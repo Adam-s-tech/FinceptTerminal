@@ -1,0 +1,262 @@
+
+Il a ouvert un terminal de trading IA à 30 000 $, 21 000 étoiles sur github
+https://www.youtube.com/watch?v=KGjA0iLvbzc
+IA bit à bit
+4,37 k abonnés
+
+S'abonner
+
+1,4 000
+
+
+
+Partager
+
+Enregistrer
+
+Télécharger
+
+41 111 vues  21 mai 2026  #MCP #OpenSource #AgenticAI
+Il a ouvert le code un terminal de trading IA à 30 000 $ — 21 838 étoiles GitHub, 37 agents IA, un hôte MCP complet connecté, et c’est gratuit. Il est présenté comme une alternative à Bloomberg Terminal ; J’ai ouvert la base de code pour voir ce qu’il y avait réellement.
+
+Dans l’audit : la pile C++/Qt à laquelle vous ne vous attendiez pas (le tag « Python » de GitHub ment), 100+ connecteurs de données qui s’avèrent tous être des flux publics gratuits, une couche de courtiers très axée sur l’Inde qui vous indique qui expédie réellement les PR, un véritable hôte Model Context Protocol qui branche des outils externes dans des personas LLM à la Buffett/Graham/Munger, la progression de la fonctionnalité 54 écrans,  et le piège AGPL que la plupart des « gratuits pour votre startup » ratent. Un verdict honnête d’installer si / sauter à la fin.
+
+HORODATAGES 0:00 - Hook — 30k $ contre gratuit 0:13 - Ce qu’est un terminal Bloomberg 0:36 - Révélation de la pile — pas Python, c’est C++/Qt 1:15 - 100+ connecteurs de données (tous flux publics gratuits) 2:01 - 16 courtiers — l’origine India-skew tell 2:38 - L’intégration MCP (la vraie surprise) 3:16 - 37 agents IA — Buffett, Graham, Munger... 3:56 - Démarrer — 54 écrans de décollage de fonctionnalités 4:27 - Vérification de la réalité : stars, licence, piège AGPL 5:22 - Verdict — installer si / passer si
+
+LIENS & RESSOURCES 
+Dépôt FinceptTerminal : https://github.com/Fincept-Corporatio...
+Site marketing : https://fincept.in/
+Source de l’intégration MCP : https://github.com/Fincept-Corporatio...
+Répertoire des écrans : https://github.com/Fincept-Corporatio...
+Licence (AGPL-3.0 + commerciale) : https://github.com/Fincept-Corporatio...
+Référence tarifaire du terminal Bloomberg : https://www.wallstreetprep.com/knowle...
+À propos du protocole de contexte modèle : https://modelcontextprotocol.io/
+ TAGS #AgenticAI #BloombergTerminal #OpenSource #MCP #AICoding
+Chapitres
+
+Tout afficher
+Transcription
+Suivez la vidéo à l'aide de la transcription.
+
+
+Afficher la transcription
+
+IA bit à bit
+4,37 k abonnés
+Vidéos
+À propos
+
+Instagram
+36 commentaires
+Adama Belem
+Ajoutez un commentaire…
+
+@BLCK_Aura
+il y a 2 jours
+Tu viens de te faire un nouvel abonné 🔥
+
+11
+
+
+
+Répondre
+
+
+@treasurerose6732
+il y a 15 heures
+Tu viens de te faire un nouvel abonné. C’était vraiment intéressant.
+
+1
+
+
+
+Répondre
+
+
+@markgreen2170
+il y a 2 jours
+Belle analyse, merci !
+
+3
+
+
+
+Répondre
+
+
+@FirstLastWinLose
+il y a 1 jour
+Super vidéo, merci beaucoup
+
+1
+
+
+
+Répondre
+
+
+@CraigHollabaugh
+il y a 2 jours
+Intéressant, j’adore la décomposition. Merci, j’ai hâte de lire le prochain.
+
+
+
+
+Répondre
+
+
+@LucasLGMarques
+il y a 2 jours (modifié)
+Super vidéo, mon gars ! J’aimerais beaucoup voir une vidéo de votre flux de travail IA en montage et motion graphics !
+
+2
+
+
+
+Répondre
+
+Bitwise AI
+·
+
+2 réponses
+
+@Hooozzz
+il y a 23 heures
+Mes Malwarebytes n’aiment pas leur « site marketing » 🧐
+
+2
+
+
+Répondre
+
+
+@ZavyrianProductions
+il y a 1 jour
+LOL. Bonne chance avec ce paradigme spéculatif, yo.
+
+
+
+Répondre
+
+
+@Truthscorer
+il y a 2 jours
+══════════════════════════════
+ Rapport d’analyse TruthScore
+══════════════════════════════
+Titre : Il a rendu open source un terminal de trading IA à 30 000 $, 21 000 étoiles sur github
+Canal : IA bit à bit
+TruthScore : 82 % — Probablement légitime
+Confiance en la chaîne : 70/100
+Taux d’aversion : 3,0 %
+Engagement : 4,678 %
+
+Signaux d’alerte et analyses :
+ • Le titre semble raisonnable
+ • Taux d’engagement sain
+ • Faible taux d’aversion : 3,0 % — les téléspectateurs sont généralement satisfaits
+
+16
+
+
+
+Répondre
+
+
+@SuperKramble
+il y a 1 jour
+Très bien, les sous-marins !
+
+1
+
+
+
+Répondre
+
+
+@Myexpectationsarerealistic
+il y a 2 jours
+Oh, très bien
+
+
+
+
+Répondre
+
+
+@seansingh4421
+il y a 4 heures
+Installation de pip ? Le frère aime vivre dangereusement, je vois 😂😂😂
+
+
+
+Répondre
+
+
+@Lins168
+il y a 1 jour
+Chat pour chercher un nouvel emploi
+
+
+
+Répondre
+
+
+@ShamanETM
+il y a 1 jour
+C’est totalement un canal IA. Comme scripté par une IA. Même s’il y a peut-être quelqu’un qui le lit. D’après la prononciation de certains noms, c’est aussi une voix générée par l’IA. Ce serait cool de se tromper.
+
+3
+
+
+Répondre
+
+
+@Indy_rawr
+il y a 12 heures
+100 % voix IA
+
+
+
+Répondre
+
+
+Masquer les réponses
+
+@chebrubin
+il y a 1 jour
+LOL pas de flux de données de marché à faible latence au niveau de socket. Logiciels frauduleux.
+
+Cela n’aurait eu de sens que si cela avait été compatible avec l’alimentation par socket de collocation Nasdaq et/ou Bloomberg.
+
+Je ne serais pas surpris qu’il ait des malaware intégrés.
+
+12
+
+
+Répondre
+
+
+2 réponses
+
+@amazons-best-buys
+il y a 15 heures
+Quelqu’un regarde ça ? C’est assez stupide de croire que quoi que ce soit ici est assez stupide pour croire quoi que ce soit ici
+
+
+
+Répondre
+
+
+@BibliothecaMagicarum
+il y a 58 minutes
+Totalement n’importe quoi... Verrouillé sur leur API
+
+
+
+Répondre
+
+
+@the-pléiades-m
+il y a 1 jour (modifié)
+Je ne ferais pas confiance à ce type d’open source. Bonne chance avec les malwares furtifs et les scripts de piratage ou les invites d’injection pour voler vos contenus sensibles quand vous les utilisez.
