@@ -10,19 +10,62 @@
 
 #pragma once
 
+#include "core/currency/Currency.h"
 #include "services/backtesting/BacktestingTypes.h"
 
+#include <QComboBox>
+#include <QCoreApplication>
+#include <QDoubleSpinBox>
+#include <QEvent>
 #include <QJsonValue>
 #include <QLayout>
 #include <QLayoutItem>
 #include <QRegularExpression>
 #include <QSizePolicy>
+#include <QSpinBox>
 #include <QString>
 #include <QWidget>
 
 #include <cmath>
 
 namespace fincept::screens::backtesting_internal {
+
+// Event filter that blocks mouse-wheel changes on unfocused combo boxes and
+// spin boxes. Without this, scrolling through the config panel accidentally
+// changes every widget the cursor passes over.
+class WheelGuard : public QObject {
+  public:
+    using QObject::QObject;
+
+  protected:
+    bool eventFilter(QObject* obj, QEvent* event) override {
+        if (event->type() == QEvent::Wheel) {
+            auto* w = qobject_cast<QWidget*>(obj);
+            if (w && !w->hasFocus()) {
+                event->ignore();
+                return true;
+            }
+        }
+        return QObject::eventFilter(obj, event);
+    }
+};
+
+// Apply the wheel guard to a widget: StrongFocus so it only gains focus on
+// click, plus the event filter to swallow wheel events when unfocused.
+inline void guard_wheel(QWidget* w, QObject* filter) {
+    w->setFocusPolicy(Qt::StrongFocus);
+    w->installEventFilter(filter);
+}
+
+// Walk a widget tree and guard every QComboBox / QSpinBox / QDoubleSpinBox.
+inline void guard_all_inputs(QWidget* root, QObject* filter) {
+    for (auto* combo : root->findChildren<QComboBox*>())
+        guard_wheel(combo, filter);
+    for (auto* spin : root->findChildren<QSpinBox*>())
+        guard_wheel(spin, filter);
+    for (auto* dspin : root->findChildren<QDoubleSpinBox*>())
+        guard_wheel(dspin, filter);
+}
 
 // Shared pill geometry used by every chip on the top bar (brand, provider
 // tabs, RUN, status) and by update_provider_buttons() when re-skinning the
@@ -31,13 +74,8 @@ namespace fincept::screens::backtesting_internal {
 inline constexpr int kPillHeight = 24;
 inline constexpr int kPillPadH = 10;
 
-inline QString pill_qss(const QString& selector,
-                        const QString& fg,
-                        const QString& bg,
-                        const QString& border,
-                        int font_px,
-                        const QString& font_family,
-                        const QString& weight = QStringLiteral("700")) {
+inline QString pill_qss(const QString& selector, const QString& fg, const QString& bg, const QString& border,
+                        int font_px, const QString& font_family, const QString& weight = QStringLiteral("700")) {
     // Subtract 2px (the 1px top + bottom border) from min/max-height so the
     // total outer box equals kPillHeight in Qt's stylesheet box model.
     return QString("%1 {"
@@ -62,10 +100,16 @@ inline void apply_pill_geometry(QWidget* w) {
 inline QString fmt_metric(const QString& key, const QJsonValue& val) {
     using namespace fincept::services::backtest;
 
+    // JSON has no Infinity, so the providers' sanitiser turns a profit factor with
+    // winners but ZERO losing trades (gross-loss denominator 0) into null. Showing "—" or
+    // dropping the card hides the best possible result; say what it is.
+    if (val.isNull() && (key == QLatin1String("profitFactor") || key == QLatin1String("profit_factor")))
+        return QString::fromUtf8("∞");
     if (val.isString())
         return val.toString();
     if (val.isBool())
-        return val.toBool() ? "YES" : "NO";
+        return val.toBool() ? QCoreApplication::translate("BacktestingScreen", "YES")
+                            : QCoreApplication::translate("BacktestingScreen", "NO");
     if (!val.isDouble())
         return QString::fromUtf8("—");
 
@@ -75,24 +119,24 @@ inline QString fmt_metric(const QString& key, const QJsonValue& val) {
     if (count_metric_keys().contains(key))
         return QString::number(static_cast<int>(v));
 
-    // Percentage metrics → show as "xx.xx%"
-    if (pct_metric_keys().contains(key)) {
-        if (std::abs(v) <= 1.0)
-            return QString("%1%").arg(v * 100.0, 0, 'f', 2);
-        return QString("%1%").arg(v, 0, 'f', 2);
-    }
+    // Percentage metrics → show as "xx.xx%".
+    //
+    // Every Python provider emits these as FRACTIONS (vbt_metrics.py divides
+    // "Max Drawdown [%]" by 100; win_rate is winning/total; zipline rounds the
+    // raw cum-return). The old `abs(v) <= 1.0 ? v*100 : v` heuristic therefore
+    // silently understated any result above 100% by a factor of 100 — a 150%
+    // total return rendered as "1.50%". Always scale: the contract is fixed.
+    if (pct_metric_keys().contains(key))
+        return QString("%1%").arg(v * 100.0, 0, 'f', 2);
 
     // Ratio metrics → show as-is with 2-4 decimals
     if (ratio_metric_keys().contains(key))
         return QString::number(v, 'f', std::abs(v) >= 10.0 ? 2 : 4);
 
-    // Currency-like large values
-    if (std::abs(v) >= 1e9)
-        return QString("$%1B").arg(v / 1e9, 0, 'f', 1);
-    if (std::abs(v) >= 1e6)
-        return QString("$%1M").arg(v / 1e6, 0, 'f', 1);
+    // Currency-like large values — follow the preferred currency (backtest
+    // capital/equity is user-denominated, not market data).
     if (std::abs(v) >= 1e3)
-        return QString("$%1K").arg(v / 1e3, 0, 'f', 0);
+        return cur::money(v, /*compact=*/true);
 
     return QString::number(v, 'f', 4);
 }

@@ -1,5 +1,7 @@
 #include "services/wallet/WalletTxBridge.h"
 
+#include "auth/ConstantTime.h"
+#include "auth/LoopbackGuard.h"
 #include "core/logging/Logger.h"
 
 #include <QByteArray>
@@ -49,8 +51,7 @@ QByteArray tx_query_param(const QByteArray& path, const char* key) {
 }
 
 QByteArray load_swap_html() {
-    const QString path = QCoreApplication::applicationDirPath()
-                         + QStringLiteral("/resources/wallet/swap.html");
+    const QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/resources/wallet/swap.html");
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
         LOG_WARN("WalletTxBridge", "swap.html not found at " + path);
@@ -74,9 +75,7 @@ WalletTxBridge::~WalletTxBridge() {
     stop_server();
 }
 
-Result<QString> WalletTxBridge::request_signature(const QString& tx_base64,
-                                                  SignatureCallback cb,
-                                                  int timeout_seconds) {
+Result<QString> WalletTxBridge::request_signature(const QString& tx_base64, SignatureCallback cb, int timeout_seconds) {
     if (tx_base64.isEmpty()) {
         return Result<QString>::err("empty_tx");
     }
@@ -99,9 +98,7 @@ Result<QString> WalletTxBridge::request_signature(const QString& tx_base64,
                             .arg(port)
                             .arg(req_id, QString::fromLatin1(session_token_));
     LOG_INFO("WalletTxBridge",
-             QStringLiteral("registered sign request %1 (expires %2s)")
-                 .arg(req_id)
-                 .arg(pr.timeout_seconds));
+             QStringLiteral("registered sign request %1 (expires %2s)").arg(req_id).arg(pr.timeout_seconds));
     return Result<QString>::ok(url);
 }
 
@@ -135,8 +132,7 @@ bool WalletTxBridge::ensure_server_started() {
     if (sweep_timer_id_ == 0) {
         sweep_timer_id_ = startTimer(kSweepIntervalMs);
     }
-    LOG_INFO("WalletTxBridge",
-             QStringLiteral("listening on 127.0.0.1:%1").arg(server_->serverPort()));
+    LOG_INFO("WalletTxBridge", QStringLiteral("listening on 127.0.0.1:%1").arg(server_->serverPort()));
     return true;
 }
 
@@ -228,6 +224,18 @@ void WalletTxBridge::on_new_connection() {
                 socket->disconnectFromHost();
                 return;
             }
+            // Host + fetch-metadata guard — blocks DNS rebinding and any
+            // cross-origin subresource request. Our own swap page is
+            // same-origin and passes. See auth/LoopbackGuard.h.
+            const auto guard =
+                fincept::auth::check_loopback_request(header_block, server_ ? server_->serverPort() : quint16(0));
+            if (!guard.allowed) {
+                LOG_WARN("WalletTxBridge", "rejected request: " + guard.reason);
+                write_response(socket, 403, "text/plain", "forbidden");
+                socket->disconnectFromHost();
+                return;
+            }
+
             const QByteArray method = parts.value(0);
             const QByteArray path = parts.value(1);
             const QByteArray body = buf.mid(header_end + 4, content_length);
@@ -236,15 +244,11 @@ void WalletTxBridge::on_new_connection() {
     }
 }
 
-void WalletTxBridge::handle_request(QTcpSocket* socket,
-                                    const QByteArray& body,
-                                    const QByteArray& path,
+void WalletTxBridge::handle_request(QTcpSocket* socket, const QByteArray& body, const QByteArray& path,
                                     const QByteArray& method) {
-    LOG_INFO("WalletTxBridge",
-             QStringLiteral("request %1 %2 (body=%3)")
-                 .arg(QString::fromLatin1(method),
-                      QString::fromLatin1(path))
-                 .arg(body.size()));
+    LOG_INFO("WalletTxBridge", QStringLiteral("request %1 %2 (body=%3)")
+                                   .arg(QString::fromLatin1(method), QString::fromLatin1(path))
+                                   .arg(body.size()));
 
     if (method == "OPTIONS") {
         write_response(socket, 204, "text/plain", QByteArray());
@@ -263,28 +267,54 @@ void WalletTxBridge::handle_request(QTcpSocket* socket,
     // is read-only, embedded in the binary's resource directory, and only
     // reachable from 127.0.0.1 — no privilege boundary is crossed.
     if (method == "GET" && tx_path_starts_with(path, "/vendor/web3.js")) {
-        const QString abs_path = QCoreApplication::applicationDirPath()
-                                 + QStringLiteral("/resources/wallet/vendor/web3.js");
+        const QString abs_path =
+            QCoreApplication::applicationDirPath() + QStringLiteral("/resources/wallet/vendor/web3.js");
         QFile f(abs_path);
         if (!f.open(QIODevice::ReadOnly)) {
             LOG_WARN("WalletTxBridge", "vendored web3.js missing at " + abs_path);
             write_response(socket, 404, "text/plain", "vendor asset missing");
         } else {
-            write_response(socket, 200,
-                           "application/javascript; charset=utf-8",
-                           f.readAll());
+            write_response(socket, 200, "application/javascript; charset=utf-8", f.readAll());
         }
         socket->disconnectFromHost();
         return;
     }
 
+    // Constant-time compare — a short-circuiting `!=` leaks the token byte by
+    // byte through response timing to anything that can hammer this port.
     const auto token_in_query = tx_query_param(path, "token");
-    if (token_in_query != session_token_) {
+    if (!fincept::auth::constant_time_equals(token_in_query, session_token_)) {
         LOG_WARN("WalletTxBridge", "token mismatch — rejecting");
         write_response(socket, 403, "text/plain", "forbidden");
         socket->disconnectFromHost();
         return;
     }
+    // Browser-side diagnostics from swap.html (logToTerminal). They carry the
+    // token but no request id, so this has to sit before the req check below —
+    // which answered every one of them with 400 "missing req" and dropped it,
+    // leaving "tx fetch failed" / "connect threw" / "sign failed" invisible in
+    // the application log. Token already validated above.
+    if (method == "POST" && tx_path_starts_with(path, "/log")) {
+        QJsonParseError log_pe;
+        const auto log_doc = QJsonDocument::fromJson(body, &log_pe);
+        if (log_pe.error == QJsonParseError::NoError && log_doc.isObject()) {
+            const auto log_obj = log_doc.object();
+            const auto level = log_obj.value(QStringLiteral("level")).toString();
+            // Capped: the page is ours, but a runaway message must not flood the log.
+            const auto msg = log_obj.value(QStringLiteral("msg")).toString().left(400);
+            if (level == QStringLiteral("error")) {
+                LOG_ERROR("WalletPage", msg);
+            } else if (level == QStringLiteral("warn")) {
+                LOG_WARN("WalletPage", msg);
+            } else {
+                LOG_INFO("WalletPage", msg);
+            }
+        }
+        write_response(socket, 200, "application/json", QByteArrayLiteral("{\"ok\":true}"));
+        socket->disconnectFromHost();
+        return;
+    }
+
     const auto req_id = QString::fromLatin1(tx_query_param(path, "req"));
     if (req_id.isEmpty()) {
         write_response(socket, 400, "text/plain", "missing req");
@@ -310,8 +340,7 @@ void WalletTxBridge::handle_request(QTcpSocket* socket,
         const auto& pr = requests_.value(req_id);
         QJsonObject out;
         out[QStringLiteral("tx_base64")] = pr.tx_base64;
-        write_response(socket, 200, "application/json",
-                       QJsonDocument(out).toJson(QJsonDocument::Compact));
+        write_response(socket, 200, "application/json", QJsonDocument(out).toJson(QJsonDocument::Compact));
         socket->disconnectFromHost();
         return;
     }
@@ -336,8 +365,7 @@ void WalletTxBridge::handle_request(QTcpSocket* socket,
                 resolve_request(req_id, Result<QString>::ok(sig));
             }
         }
-        write_response(socket, 200, "application/json",
-                       QByteArrayLiteral("{\"ok\":true}"));
+        write_response(socket, 200, "application/json", QByteArrayLiteral("{\"ok\":true}"));
         socket->disconnectFromHost();
         return;
     }
@@ -349,29 +377,47 @@ void WalletTxBridge::handle_request(QTcpSocket* socket,
 QByteArray WalletTxBridge::render_swap_page() const {
     auto html = load_swap_html();
     if (html.isEmpty()) {
-        // Defensive: until Stage 2.2 ships swap.html, return a clear stub.
-        // Won't be reached in normal builds — CMakeLists copies the page.
-        return QByteArrayLiteral(
-            "<!doctype html><meta charset='utf-8'><title>Sign</title>"
-            "<body style='background:#0a0a0a;color:#d97706;font-family:monospace;"
-            "padding:20px'>swap.html missing — Stage 2.2 work-in-progress</body>");
+        // Defensive: swap.html ships in resources/wallet and CMakeLists copies it
+        // beside the executable, so this is only reached by a damaged or
+        // partial install. Say so plainly — the old text blamed unfinished
+        // development work, which sent users hunting for a fix that isn't theirs.
+        return QByteArrayLiteral("<!doctype html><meta charset='utf-8'><title>Sign</title>"
+                                 "<body style='background:#0a0a0a;color:#d97706;font-family:monospace;"
+                                 "padding:20px'>The wallet signing page (resources/wallet/swap.html) was not "
+                                 "found next to the application. Reinstall Fincept Terminal, then retry the "
+                                 "transaction. Nothing was signed or sent.</body>");
     }
     return html;
 }
 
-void WalletTxBridge::write_response(QTcpSocket* socket, int status,
-                                    const QByteArray& content_type,
+void WalletTxBridge::write_response(QTcpSocket* socket, int status, const QByteArray& content_type,
                                     const QByteArray& body) {
     QByteArray reason;
     switch (status) {
-        case 200: reason = "OK"; break;
-        case 204: reason = "No Content"; break;
-        case 400: reason = "Bad Request"; break;
-        case 403: reason = "Forbidden"; break;
-        case 404: reason = "Not Found"; break;
-        case 410: reason = "Gone"; break;
-        case 413: reason = "Payload Too Large"; break;
-        default:  reason = "Error"; break;
+        case 200:
+            reason = "OK";
+            break;
+        case 204:
+            reason = "No Content";
+            break;
+        case 400:
+            reason = "Bad Request";
+            break;
+        case 403:
+            reason = "Forbidden";
+            break;
+        case 404:
+            reason = "Not Found";
+            break;
+        case 410:
+            reason = "Gone";
+            break;
+        case 413:
+            reason = "Payload Too Large";
+            break;
+        default:
+            reason = "Error";
+            break;
     }
     QByteArray header;
     header += "HTTP/1.1 " + QByteArray::number(status) + " " + reason + "\r\n";

@@ -19,10 +19,12 @@
 #include <QPen>
 #include <QShowEvent>
 #include <QStyle>
-#include <QValueAxis>
 #include <QVBoxLayout>
+#include <QValueAxis>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace fincept::screens::panels {
 
@@ -31,15 +33,16 @@ namespace {
 constexpr const char* kTopicSupplyHistory = "treasury:supply_history";
 
 QString font_stack() {
-    return QStringLiteral(
-        "'Consolas','Cascadia Mono','JetBrains Mono','SF Mono',monospace");
+    return QStringLiteral("'Consolas','Cascadia Mono','JetBrains Mono','SF Mono',monospace");
 }
 
 double atomic_to_billions(const QString& raw, int decimals) {
-    if (raw.isEmpty()) return 0.0;
+    if (raw.isEmpty())
+        return 0.0;
     bool ok = false;
     const auto units = raw.toULongLong(&ok);
-    if (!ok) return 0.0;
+    if (!ok)
+        return 0.0;
     return (static_cast<double>(units) / std::pow(10.0, std::max(0, decimals))) / 1e9;
 }
 
@@ -51,8 +54,7 @@ SupplyChartPanel::SupplyChartPanel(QWidget* parent) : QWidget(parent) {
     apply_theme();
 
     auto& hub = fincept::datahub::DataHub::instance();
-    connect(&hub, &fincept::datahub::DataHub::topic_error, this,
-            &SupplyChartPanel::on_topic_error);
+    connect(&hub, &fincept::datahub::DataHub::topic_error, this, &SupplyChartPanel::on_topic_error);
 }
 
 SupplyChartPanel::~SupplyChartPanel() = default;
@@ -69,16 +71,15 @@ void SupplyChartPanel::build_ui() {
     auto* hl = new QHBoxLayout(head);
     hl->setContentsMargins(12, 0, 12, 0);
     hl->setSpacing(8);
-    auto* title = new QLabel(QStringLiteral("SUPPLY CHART · 12 MONTHS"), head);
-    title->setObjectName(QStringLiteral("supplyChartTitle"));
-    auto* legend = new QLabel(
-        QStringLiteral("● TOTAL  ● CIRCULATING  ● BURNED"), head);
-    legend->setObjectName(QStringLiteral("supplyChartLegend"));
-    status_pill_ = new QLabel(QStringLiteral("LIVE"), head);
+    title_ = new QLabel(tr("SUPPLY CHART · 12 MONTHS"), head);
+    title_->setObjectName(QStringLiteral("supplyChartTitle"));
+    legend_ = new QLabel(tr("● TOTAL  ● CIRCULATING  ● BURNED"), head);
+    legend_->setObjectName(QStringLiteral("supplyChartLegend"));
+    status_pill_ = new QLabel(tr("LIVE"), head);
     status_pill_->setObjectName(QStringLiteral("supplyChartPill"));
-    hl->addWidget(title);
+    hl->addWidget(title_);
     hl->addStretch();
-    hl->addWidget(legend);
+    hl->addWidget(legend_);
     hl->addSpacing(12);
     hl->addWidget(status_pill_);
     root->addWidget(head);
@@ -167,40 +168,40 @@ void SupplyChartPanel::apply_theme() {
     using namespace ui::colors;
     const QString font = font_stack();
 
-    const QString ss = QStringLiteral(
-        "QWidget#supplyChartPanel { background:%1; }"
-        "QWidget#supplyChartHead { background:%2; border-bottom:1px solid %3; }"
-        "QLabel#supplyChartTitle { color:%4; font-family:%5; font-size:11px;"
-        "  font-weight:700; letter-spacing:1.4px; background:transparent; }"
-        "QLabel#supplyChartLegend { color:%6; font-family:%5; font-size:10px;"
-        "  font-weight:600; letter-spacing:0.8px; background:transparent; }"
-        "QLabel#supplyChartPill { color:%7; background:%8; border:1px solid %3;"
-        "  font-family:%5; font-size:9px; font-weight:700; letter-spacing:1.2px;"
-        "  padding:2px 8px; }"
-        "QLabel#supplyChartPillDemo { color:%4; background:rgba(217,119,6,0.10);"
-        "  border:1px solid %12; font-family:%5; font-size:9px; font-weight:700;"
-        "  letter-spacing:1.2px; padding:2px 8px; }"
-        "QWidget#supplyChartBody { background:%1; }"
+    const QString ss = QStringLiteral("QWidget#supplyChartPanel { background:%1; }"
+                                      "QWidget#supplyChartHead { background:%2; border-bottom:1px solid %3; }"
+                                      "QLabel#supplyChartTitle { color:%4; font-family:%5; font-size:11px;"
+                                      "  font-weight:700; letter-spacing:1.4px; background:transparent; }"
+                                      "QLabel#supplyChartLegend { color:%6; font-family:%5; font-size:10px;"
+                                      "  font-weight:600; letter-spacing:0.8px; background:transparent; }"
+                                      "QLabel#supplyChartPill { color:%7; background:%8; border:1px solid %3;"
+                                      "  font-family:%5; font-size:9px; font-weight:700; letter-spacing:1.2px;"
+                                      "  padding:2px 8px; }"
+                                      "QLabel#supplyChartPillDemo { color:%4; background:rgba(217,119,6,0.10);"
+                                      "  border:1px solid %10; font-family:%5; font-size:9px; font-weight:700;"
+                                      "  letter-spacing:1.2px; padding:2px 8px; }"
+                                      "QWidget#supplyChartBody { background:%1; }"
 
-        "QFrame#supplyChartErrorStrip { background:rgba(220,38,38,0.10);"
-        "  border:1px solid %9; }"
-        "QLabel#supplyChartErrorIcon { color:%9; font-family:%5; font-size:13px;"
-        "  font-weight:700; background:transparent; }"
-        "QLabel#supplyChartErrorText { color:%9; font-family:%5; font-size:11px;"
-        "  background:transparent; }"
-    )
-        .arg(BG_BASE(),         // %1
-             BG_SURFACE(),      // %2
-             BORDER_DIM(),      // %3
-             AMBER(),           // %4
-             font,              // %5
-             TEXT_TERTIARY(),   // %6
-             TEXT_PRIMARY(),    // %7
-             BG_RAISED(),       // %8
-             NEGATIVE())        // %9
-        .arg(BG_HOVER(),                       // %10
-             BORDER_BRIGHT(),                  // %11
-             QStringLiteral("#78350f"));       // %12 darker amber
+                                      "QFrame#supplyChartErrorStrip { background:rgba(220,38,38,0.10);"
+                                      "  border:1px solid %9; }"
+                                      "QLabel#supplyChartErrorIcon { color:%9; font-family:%5; font-size:13px;"
+                                      "  font-weight:700; background:transparent; }"
+                                      "QLabel#supplyChartErrorText { color:%9; font-family:%5; font-size:11px;"
+                                      "  background:transparent; }")
+                           .arg(BG_BASE(),                  // %1
+                                BG_SURFACE(),               // %2
+                                BORDER_DIM(),               // %3
+                                AMBER(),                    // %4
+                                font,                       // %5
+                                TEXT_TERTIARY(),            // %6
+                                TEXT_PRIMARY(),             // %7
+                                BG_RAISED(),                // %8
+                                NEGATIVE())                 // %9
+                           // One arg per marker, in ascending marker order —
+                           // QString::arg fills the LOWEST marker present, so a
+                           // spare arg shifts every later colour by one and
+                           // warns "Argument missing" for the overflow.
+                           .arg(QStringLiteral("#78350f")); // %10 darker amber
 
     setStyleSheet(ss);
 }
@@ -220,24 +221,43 @@ void SupplyChartPanel::hideEvent(QHideEvent* e) {
     fincept::datahub::DataHub::instance().unsubscribe(this);
 }
 
+void SupplyChartPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void SupplyChartPanel::retranslateUi() {
+    if (title_)
+        title_->setText(tr("SUPPLY CHART · 12 MONTHS"));
+    if (legend_)
+        legend_->setText(tr("● TOTAL  ● CIRCULATING  ● BURNED"));
+    // Re-render the LIVE/DEMO pill from the flag of the series on screen.
+    update_demo_chip(series_is_mock_);
+}
+
 // ── Updates ────────────────────────────────────────────────────────────────
 
 void SupplyChartPanel::on_supply_history_update(const QVariant& v) {
-    if (!v.canConvert<QVector<fincept::wallet::SupplyHistoryPoint>>()) return;
+    if (!v.canConvert<QVector<fincept::wallet::SupplyHistoryPoint>>())
+        return;
     const auto pts = v.value<QVector<fincept::wallet::SupplyHistoryPoint>>();
-    if (pts.isEmpty()) return;
-
-    // Mock detection: the supply-history vector itself carries no flag, but
-    // both treasury:* topics share a producer (BuybackBurnService) and a
-    // refresh path. Peek treasury:buyback_epoch — the canonical mock signal
-    // — and mirror its flag onto our pill so all three panels read DEMO
-    // together when the worker endpoint is unconfigured.
-    bool is_mock = false;
-    const auto epoch_v = fincept::datahub::DataHub::instance().peek(
-        QStringLiteral("treasury:buyback_epoch"));
-    if (epoch_v.canConvert<fincept::wallet::BuybackEpoch>()) {
-        is_mock = epoch_v.value<fincept::wallet::BuybackEpoch>().is_mock;
+    if (pts.isEmpty()) {
+        // An empty series is a legitimate (if useless) answer from the worker;
+        // dropping it silently left a blank chart with a LIVE pill.
+        show_error_strip(tr("The supply-history feed returned no data points yet."));
+        return;
     }
+
+    // Mock detection comes from the points themselves. This used to peek the
+    // separate treasury:buyback_epoch topic and mirror its flag, which was both
+    // racy (supply history can publish before the epoch does, and the epoch
+    // value expires from peek() after its 60 s TTL while this series lives for
+    // an hour) — so a fabricated curve could be labelled LIVE.
+    bool is_mock = false;
+    for (const auto& p : pts)
+        is_mock = is_mock || p.is_mock;
+    series_is_mock_ = is_mock;
     update_demo_chip(is_mock);
 
     total_series_->clear();
@@ -262,23 +282,28 @@ void SupplyChartPanel::on_supply_history_update(const QVariant& v) {
         x_max = std::max(x_max, p.ts_ms);
     }
 
-    if (x_min == std::numeric_limits<qint64>::max()) return; // nothing valid
-    if (y_min == y_max) y_max = y_min + 1.0; // avoid degenerate axis
+    if (x_min == std::numeric_limits<qint64>::max())
+        return; // nothing valid
+    if (y_min == y_max)
+        y_max = y_min + 1.0; // avoid degenerate axis
+    if (x_min == x_max)
+        x_max = x_min + 24LL * 60 * 60 * 1000; // single sample: QDateTimeAxis rejects min == max
 
-    x_axis_->setRange(QDateTime::fromMSecsSinceEpoch(x_min),
-                      QDateTime::fromMSecsSinceEpoch(x_max));
+    x_axis_->setRange(QDateTime::fromMSecsSinceEpoch(x_min), QDateTime::fromMSecsSinceEpoch(x_max));
     const double pad = (y_max - y_min) * 0.05;
     y_axis_->setRange(std::max(0.0, y_min - pad), y_max + pad);
     clear_error_strip();
 }
 
 void SupplyChartPanel::on_topic_error(const QString& topic, const QString& error) {
-    if (topic != QLatin1String(kTopicSupplyHistory)) return;
+    if (topic != QLatin1String(kTopicSupplyHistory))
+        return;
     show_error_strip(tr("Supply history feed error: %1").arg(error));
 }
 
 void SupplyChartPanel::show_error_strip(const QString& msg) {
-    if (!error_strip_) return;
+    if (!error_strip_)
+        return;
     error_text_->setText(msg);
     error_strip_->show();
 }
@@ -292,11 +317,18 @@ void SupplyChartPanel::clear_error_strip() {
 
 void SupplyChartPanel::update_demo_chip(bool is_mock) {
     if (is_mock) {
-        status_pill_->setText(QStringLiteral("DEMO"));
+        status_pill_->setText(tr("DEMO"));
         status_pill_->setObjectName(QStringLiteral("supplyChartPillDemo"));
+        // The chart itself carries no visual mock cue, so name it in the
+        // title as well — a fabricated supply curve read as real is exactly
+        // the class of defect this panel must not ship.
+        if (title_)
+            title_->setText(tr("SUPPLY CHART · 12 MONTHS · SAMPLE DATA"));
     } else {
-        status_pill_->setText(QStringLiteral("LIVE"));
+        status_pill_->setText(tr("LIVE"));
         status_pill_->setObjectName(QStringLiteral("supplyChartPill"));
+        if (title_)
+            title_->setText(tr("SUPPLY CHART · 12 MONTHS"));
     }
     status_pill_->style()->unpolish(status_pill_);
     status_pill_->style()->polish(status_pill_);

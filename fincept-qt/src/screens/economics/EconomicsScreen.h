@@ -7,6 +7,7 @@
 
 #include "screens/common/IStatefulScreen.h"
 
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMap>
@@ -32,10 +33,14 @@ class EconomicsScreen : public QWidget, public IStatefulScreen {
     QString state_key() const override { return "economics"; }
     int state_version() const override { return 1; }
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private:
     void build_ui();
     void switch_to(const QString& source_id);
     void refresh_theme();
+    void retranslateUi();
 
     // badge bar + stacked panels
     QWidget* header_ = nullptr;
@@ -55,6 +60,10 @@ class EconomicsScreen : public QWidget, public IStatefulScreen {
     };
     QList<SourceEntry> sources_;
     QString active_id_;
+    // Saved per-panel state ("<id>_panel") for panels that have not been built yet (panels are
+    // lazy). Applied when the panel is created, and written back by save_state() so a panel the
+    // user hasn't opened this session keeps the state it was saved with.
+    QVariantMap pending_panel_states_;
 
     EconPanelBase* get_or_create_panel(SourceEntry& entry);
 };

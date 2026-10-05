@@ -10,6 +10,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSaveFile>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -131,7 +132,8 @@ Result<void> LayoutCatalog::upsert_index_row(const layout::Workspace& w) {
 Result<LayoutId> LayoutCatalog::save_workspace(const layout::Workspace& w_in) {
     if (!opened_) {
         auto r = open();
-        if (r.is_err()) return Result<LayoutId>::err(r.error());
+        if (r.is_err())
+            return Result<LayoutId>::err(r.error());
     }
 
     layout::Workspace w = w_in;
@@ -144,18 +146,21 @@ Result<LayoutId> LayoutCatalog::save_workspace(const layout::Workspace& w_in) {
 
     // Write the JSON file first; if that fails, we don't want a stale
     // index row pointing at nothing.
+    // QSaveFile writes to a temp file and renames on commit(), so a crash or a
+    // full disk can no longer leave a truncated layout under the real name (the
+    // old Truncate-then-write also ignored a short write and reported success).
     const QString path = file_path_for_(w.id);
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
         return Result<LayoutId>::err(("Failed to open " + path + ": " + f.errorString()).toStdString());
     f.write(QJsonDocument(w.to_json()).toJson(QJsonDocument::Indented));
-    f.close();
+    if (!f.commit())
+        return Result<LayoutId>::err(("Failed to write " + path + ": " + f.errorString()).toStdString());
 
     auto idx = upsert_index_row(w);
     if (idx.is_err()) {
-        LOG_WARN(kCatalogTag,
-                 QString("File written but index update failed for %1: %2")
-                     .arg(w.id.to_string(), QString::fromStdString(idx.error())));
+        LOG_WARN(kCatalogTag, QString("File written but index update failed for %1: %2")
+                                  .arg(w.id.to_string(), QString::fromStdString(idx.error())));
         return Result<LayoutId>::err(idx.error());
     }
     LOG_INFO(kCatalogTag, QString("Saved layout '%1' (uuid=%2)").arg(w.name, w.id.to_string()));
@@ -166,7 +171,8 @@ Result<LayoutId> LayoutCatalog::save_workspace(const layout::Workspace& w_in) {
 Result<layout::Workspace> LayoutCatalog::load_workspace(const LayoutId& id) {
     if (!opened_) {
         auto r = open();
-        if (r.is_err()) return Result<layout::Workspace>::err(r.error());
+        if (r.is_err())
+            return Result<layout::Workspace>::err(r.error());
     }
     const QString path = file_path_for_(id);
     QFile f(path);
@@ -188,7 +194,8 @@ Result<layout::Workspace> LayoutCatalog::load_workspace(const LayoutId& id) {
 Result<void> LayoutCatalog::remove_layout(const LayoutId& id) {
     if (!opened_) {
         auto r = open();
-        if (r.is_err()) return r;
+        if (r.is_err())
+            return r;
     }
     QFile::remove(file_path_for_(id));
     // Best-effort thumbnail cleanup; not fatal if it's missing.
@@ -219,7 +226,8 @@ Result<void> LayoutCatalog::remove_layout(const LayoutId& id) {
 Result<QList<LayoutCatalog::Entry>> LayoutCatalog::list_layouts() {
     if (!opened_) {
         auto r = open();
-        if (r.is_err()) return Result<QList<Entry>>::err(r.error());
+        if (r.is_err())
+            return Result<QList<Entry>>::err(r.error());
     }
     QSqlDatabase db = QSqlDatabase::database(kConnectionName);
     if (!db.isOpen())
@@ -248,20 +256,23 @@ Result<QList<LayoutCatalog::Entry>> LayoutCatalog::list_layouts() {
 
 Result<QList<LayoutCatalog::Entry>> LayoutCatalog::recent_layouts(int limit, bool include_auto) {
     auto r = list_layouts();
-    if (r.is_err()) return r;
+    if (r.is_err())
+        return r;
     QList<Entry> filtered;
     for (const auto& e : r.value()) {
         if (!include_auto && e.kind == QStringLiteral("auto"))
             continue;
         filtered.append(e);
-        if (filtered.size() >= limit) break;
+        if (filtered.size() >= limit)
+            break;
     }
     return Result<QList<Entry>>::ok(filtered);
 }
 
 LayoutId LayoutCatalog::find_by_name(const QString& name) {
     auto r = list_layouts();
-    if (r.is_err()) return LayoutId();
+    if (r.is_err())
+        return LayoutId();
     for (const auto& e : r.value()) {
         if (e.name.compare(name, Qt::CaseInsensitive) == 0)
             return e.id;
@@ -271,12 +282,14 @@ LayoutId LayoutCatalog::find_by_name(const QString& name) {
 
 Result<void> LayoutCatalog::export_to(const LayoutId& id, const QString& path) {
     auto wr = load_workspace(id);
-    if (wr.is_err()) return Result<void>::err(wr.error());
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    if (wr.is_err())
+        return Result<void>::err(wr.error());
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly))
         return Result<void>::err(("Export open failed: " + f.errorString()).toStdString());
     f.write(QJsonDocument(wr.value().to_json()).toJson(QJsonDocument::Indented));
-    f.close();
+    if (!f.commit())
+        return Result<void>::err(("Export write failed: " + f.errorString()).toStdString());
     return Result<void>::ok();
 }
 
@@ -310,14 +323,15 @@ Result<void> LayoutCatalog::set_meta(const QString& key, const QString& value) {
 
 Result<LayoutId> LayoutCatalog::last_loaded_id() const {
     auto m = meta(QStringLiteral("last_loaded_uuid"));
-    if (m.is_err()) return Result<LayoutId>::err(m.error());
-    if (m.value().isEmpty()) return Result<LayoutId>::ok(LayoutId());
+    if (m.is_err())
+        return Result<LayoutId>::err(m.error());
+    if (m.value().isEmpty())
+        return Result<LayoutId>::ok(LayoutId());
     return Result<LayoutId>::ok(LayoutId::from_string(m.value()));
 }
 
 Result<void> LayoutCatalog::set_last_loaded_id(const LayoutId& id) {
-    return set_meta(QStringLiteral("last_loaded_uuid"),
-                    id.is_null() ? QString() : id.to_string());
+    return set_meta(QStringLiteral("last_loaded_uuid"), id.is_null() ? QString() : id.to_string());
 }
 
 Result<LayoutId> LayoutCatalog::import_from(const QString& path) {
@@ -331,6 +345,8 @@ Result<LayoutId> LayoutCatalog::import_from(const QString& path) {
     const QJsonDocument doc = QJsonDocument::fromJson(bytes, &err);
     if (err.error != QJsonParseError::NoError)
         return Result<LayoutId>::err(("Parse error: " + err.errorString()).toStdString());
+    if (!doc.isObject())
+        return Result<LayoutId>::err("Import failed: file is not a layout (JSON root is not an object)");
 
     layout::Workspace w = layout::Workspace::from_json(doc.object());
     // Mint a fresh id so two users importing the same shared file don't

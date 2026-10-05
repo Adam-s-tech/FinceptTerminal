@@ -1,6 +1,10 @@
 #include "trading/brokers/shoonya/ShoonyaBroker.h"
+#include "trading/brokers/BrokerModifyFields.h"
 
+#include "trading/brokers/BrokerClientOrderId.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
+#include "trading/instruments/InstrumentService.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -49,9 +53,11 @@ QString ShoonyaBroker::sh_status(const QString& s) {
     QString sl = s.toUpper();
     if (sl == "COMPLETE")
         return "filled";
-    if (sl == "OPEN" || sl == "TRIGGER PENDING")
+    if (sl == "OPEN" || sl == "TRIGGER PENDING" || sl == "TRIGGER_PENDING")
         return "open";
-    if (sl == "CANCELLED")
+    // NorenAPI spells the status "CANCELED" (one L); the Flattrade twin already accepts both. Without
+    // it a cancelled order fell through to the "open" default and kept its EDIT/CANCEL buttons.
+    if (sl == "CANCELLED" || sl == "CANCELED")
         return "cancelled";
     if (sl == "REJECTED")
         return "rejected";
@@ -128,23 +134,26 @@ TokenExchangeResponse ShoonyaBroker::exchange_token(const QString& api_key, cons
                               {{"Content-Type", "application/x-www-form-urlencoded"}});
 
     if (!resp.success)
-        return {false, "", "", "", "Login failed: " + resp.error, ""};
+        return {.success = false, .error = "Login failed: " + resp.error};
 
     QJsonDocument doc = QJsonDocument::fromJson(resp.raw_body.toUtf8());
     if (!doc.isObject())
-        return {false, "", "", "", "Login: invalid response", ""};
+        return {.success = false, .error = "Login: invalid response"};
 
     QJsonObject obj = doc.object();
     if (obj.value("stat").toString() != "Ok")
-        return {false, "", "", "", obj.value("emsg").toString("Login failed"), ""};
+        return {.success = false, .error = obj.value("emsg").toString("Login failed")};
 
     QString token = obj.value("susertoken").toString();
     QString uid = obj.value("uid").toString(api_key);
 
     if (token.isEmpty())
-        return {false, "", "", "", "Login: no susertoken in response", ""};
+        return {.success = false, .error = "Login: no susertoken in response"};
 
-    return {true, token, "", uid, "", ""};
+    // Shoonya session tokens lapse at the daily reset; factor2 (TOTP/OTP) is a
+    // one-time code we can't replay, so detect-only. Startup hint.
+    const QString extra = with_token_expiry({}, next_ist_flush_epoch(6, 0));
+    return {.success = true, .access_token = token, .user_id = uid, .additional_data = extra};
 }
 
 // ---------- place_order ----------
@@ -158,14 +167,21 @@ OrderPlaceResponse ShoonyaBroker::place_order(const BrokerCredentials& creds, co
     jdata["exch"] = order.exchange;
     // tsym goes in raw — make_body percent-encodes the JSON wrapper exactly once.
     // Pre-encoding here would double-encode special chars (M&M-EQ → M%2526M-EQ).
-    jdata["tsym"] = order.symbol;
+    // NorenAPI wants the scrip master's trading symbol ("RELIANCE-EQ"), not the normalised
+    // "RELIANCE" the equity ticket carries. Map through the instrument master; an unknown symbol
+    // (master not loaded, or the F&O chain's already-native symbol) is sent exactly as given.
+    const auto br_sym =
+        InstrumentService::instance().to_brsymbol(order.symbol, order.exchange, QStringLiteral("shoonya"));
+    jdata["tsym"] = (br_sym.has_value() && !br_sym->isEmpty()) ? *br_sym : order.symbol;
     jdata["qty"] = QString::number(static_cast<int>(order.quantity));
     jdata["dscqty"] = "0";
     jdata["prctyp"] = sh_enum_map().order_type_or(order.order_type, "MKT");
     jdata["prc"] = QString::number(order.price, 'f', 2);
     jdata["trgprc"] = QString::number(order.stop_price, 'f', 2);
     jdata["ret"] = order.validity.isEmpty() ? "DAY" : order.validity;
-    jdata["remarks"] = "fincept";
+    // Stable per order intent (UnifiedOrder::client_order_id) so a retry after an 8s
+    // client-side timeout carries the same reference (see BrokerClientOrderId.h).
+    jdata["remarks"] = client_order_ref_for(order, 20);
     // ordersource is a PlaceOrder-only field per NorenAPI spec (values: WEB/MOB/TT).
     jdata["ordersource"] = "WEB";
 
@@ -203,9 +219,14 @@ ApiResponse<QJsonObject> ShoonyaBroker::modify_order(const BrokerCredentials& cr
     jdata["qty"] = QString::number(mods.value("quantity").toInt(0));
     jdata["prctyp"] = mods.value("orderType").toString("LMT");
     jdata["prc"] = QString::number(mods.value("price").toDouble(0), 'f', 2);
-    jdata["trgprc"] = QString::number(mods.value("triggerPrice").toDouble(0), 'f', 2);
     jdata["dscqty"] = "0";
     jdata["ret"] = mods.value("validity").toString("DAY");
+    // Only include trigger price for SL/SL-M — trgprc=0 on LMT causes a reject.
+    // (Same guard as the line-identical Noren twin in FlattradeBroker.)
+    const QString prctyp = jdata["prctyp"].toString();
+    if (prctyp == "SL-LMT" || prctyp == "SL-MKT")
+        jdata["trgprc"] = QString::number(
+            modify_fields::number(mods, modify_fields::kTrigger), 'f', 2);
     // ordersource not part of ModifyOrder spec — omit.
 
     auto& http = BrokerHttp::instance();
@@ -632,8 +653,10 @@ ApiResponse<QVector<BrokerCandle>> ShoonyaBroker::get_history(const BrokerCreden
     if (!to.isValid())
         to = QDate::currentDate();
 
-    int64_t from_epoch = QDateTime(from, QTime(9, 15, 0)).toSecsSinceEpoch();
-    int64_t to_epoch = QDateTime(to, QTime(15, 30, 0)).toSecsSinceEpoch();
+    // NSE session bounds are IST wall-clock; anchor them in IST, not the machine's zone, or the
+    // requested window slides by the zone offset on a non-IST PC.
+    int64_t from_epoch = QDateTime(from, QTime(9, 15, 0), ist_zone()).toSecsSinceEpoch();
+    int64_t to_epoch = QDateTime(to, QTime(15, 30, 0), ist_zone()).toSecsSinceEpoch();
 
     bool is_daily = (resolution == "D" || resolution == "1D" || resolution == "W" || resolution == "M");
     auto& http = BrokerHttp::instance();
@@ -651,8 +674,8 @@ ApiResponse<QVector<BrokerCandle>> ShoonyaBroker::get_history(const BrokerCreden
 
         auto resp = http.post_raw(QString("%1/EODChartData").arg(BASE), make_body(jdata, creds.access_token),
                                   {{"Content-Type", "application/x-www-form-urlencoded"}});
-        const bool eod_ok = resp.success && !resp.raw_body.isEmpty() &&
-                            QJsonDocument::fromJson(resp.raw_body.toUtf8()).isArray();
+        const bool eod_ok =
+            resp.success && !resp.raw_body.isEmpty() && QJsonDocument::fromJson(resp.raw_body.toUtf8()).isArray();
 
         if (eod_ok) {
             for (const QJsonValue& v : QJsonDocument::fromJson(resp.raw_body.toUtf8()).array()) {
@@ -678,7 +701,8 @@ ApiResponse<QVector<BrokerCandle>> ShoonyaBroker::get_history(const BrokerCreden
             auto tp_resp = http.post_raw(QString("%1/TPSeries").arg(BASE), make_body(tp, creds.access_token),
                                          {{"Content-Type", "application/x-www-form-urlencoded"}});
             if (!tp_resp.success)
-                return {false, std::nullopt, checked_error(tp_resp, "get_history failed (EOD + TPSeries fallback)"), ts};
+                return {false, std::nullopt, checked_error(tp_resp, "get_history failed (EOD + TPSeries fallback)"),
+                        ts};
             QJsonDocument tp_doc = QJsonDocument::fromJson(tp_resp.raw_body.toUtf8());
             if (!tp_doc.isArray())
                 return {false, std::nullopt, "get_history: invalid TPSeries fallback response", ts};
@@ -694,7 +718,8 @@ ApiResponse<QVector<BrokerCandle>> ShoonyaBroker::get_history(const BrokerCreden
                 candles.append(c);
             }
         } else {
-            return {false, std::nullopt, checked_error(resp, "get_history failed (EOD unavailable; provide token for fallback)"), ts};
+            return {false, std::nullopt,
+                    checked_error(resp, "get_history failed (EOD unavailable; provide token for fallback)"), ts};
         }
     } else {
         // TPSeries — needs numeric token
@@ -733,6 +758,8 @@ ApiResponse<QVector<BrokerCandle>> ShoonyaBroker::get_history(const BrokerCreden
             // Timestamp format: "DD-MM-YYYY HH:MM:SS"
             QString time_str = o.value("time").toString();
             QDateTime dt = QDateTime::fromString(time_str, "dd-MM-yyyy HH:mm:ss");
+            if (dt.isValid())
+                dt.setTimeZone(ist_zone()); // Noren timestamps are IST wall-clock, not machine-local
             BrokerCandle c;
             c.timestamp = dt.isValid() ? dt.toSecsSinceEpoch() * 1000LL : 0LL;
             c.open = o.value("into").toString().toDouble();

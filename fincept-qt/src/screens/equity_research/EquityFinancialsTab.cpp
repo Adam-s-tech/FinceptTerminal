@@ -35,7 +35,6 @@
 
 namespace fincept::screens {
 
-
 // ── Static helpers (anon ns + statics from original file) ──
 namespace {
 
@@ -48,7 +47,7 @@ static const QString kPurple = "#a855f7";
 static const QString kOrange = "#f97316";
 static const QString kYellow = "#eab308";
 
-QFrame* section_frame(const QString& title, const QString& color) {
+[[maybe_unused]] QFrame* section_frame(const QString& title, const QString& color) {
     auto* f = new QFrame;
     f->setStyleSheet(QString("QFrame { background:%1; border:1px solid %2; border-radius:4px; }")
                          .arg(ui::colors::BG_SURFACE(), ui::colors::BORDER_DIM()));
@@ -75,8 +74,9 @@ QFrame* section_frame(const QString& title, const QString& color) {
 }
 
 // Large metric card: label on top, big value, optional subtitle
-QWidget* metric_card(const QString& label, QLabel*& val_out, QLabel*& sub_out, const QString& val_color,
-                     const QString& initial_val = "—", const QString& initial_sub = {}) {
+[[maybe_unused]] QWidget* metric_card(const QString& label, QLabel*& val_out, QLabel*& sub_out,
+                                      const QString& val_color, const QString& initial_val = "—",
+                                      const QString& initial_sub = {}) {
     auto* f = new QFrame;
     f->setStyleSheet(QString("QFrame { background:%1; border:1px solid %2; border-radius:4px; }")
                          .arg(ui::colors::BG_BASE(), ui::colors::BORDER_DIM()));
@@ -108,7 +108,7 @@ QWidget* metric_card(const QString& label, QLabel*& val_out, QLabel*& sub_out, c
 }
 
 // Small ratio row
-QLabel* ratio_row(QWidget* parent_vl_owner, const QString& label, const QString& color) {
+[[maybe_unused]] QLabel* ratio_row(QWidget* parent_vl_owner, const QString& label, const QString& color) {
     auto* hl = new QHBoxLayout;
     hl->setSpacing(4);
     hl->setContentsMargins(0, 0, 0, 0);
@@ -126,7 +126,7 @@ QLabel* ratio_row(QWidget* parent_vl_owner, const QString& label, const QString&
     return v;
 }
 
-QTableWidget* make_table() {
+[[maybe_unused]] QTableWidget* make_table() {
     auto* t = new QTableWidget;
     t->setAlternatingRowColors(true);
     t->setStyleSheet(QString(R"(
@@ -150,7 +150,7 @@ QTableWidget* make_table() {
     return t;
 }
 
-QChartView* make_chart_view(int fixed_height = 0) {
+[[maybe_unused]] QChartView* make_chart_view(int fixed_height = 0) {
     auto* cv = new QChartView;
     cv->setRenderHint(QPainter::Antialiasing, false);
     cv->setStyleSheet("background:transparent; border:0;");
@@ -163,12 +163,24 @@ QChartView* make_chart_view(int fixed_height = 0) {
 
 // ── Constructor ───────────────────────────────────────────────────────────────
 
-
 EquityFinancialsTab::EquityFinancialsTab(QWidget* parent) : QWidget(parent) {
     build_ui();
     auto& svc = services::equity::EquityResearchService::instance();
     connect(&svc, &services::equity::EquityResearchService::financials_loaded, this,
             &EquityFinancialsTab::on_financials_loaded);
+    // Dismiss the "LOADING FINANCIALS…" overlay on failure — it's hidden only on success.
+    connect(&svc, &services::equity::EquityResearchService::error_occurred, this,
+            [this](const QString& ctx, const QString&) {
+                if (ctx != "Financials")
+                    return;
+                if (loading_overlay_)
+                    loading_overlay_->hide_loading();
+                // Hiding the overlay alone left the PREVIOUS symbol's statements on screen
+                // under the new symbol's header. Nothing has loaded for this symbol, so
+                // return every card/table/chart to its blank state.
+                if (!loaded_)
+                    rebuild_views();
+            });
 }
 
 void EquityFinancialsTab::set_symbol(const QString& symbol) {
@@ -201,10 +213,14 @@ void EquityFinancialsTab::changeEvent(QEvent* event) {
 }
 
 void EquityFinancialsTab::retranslateUi() {
-    if (btn_income_)     btn_income_->setText(tr("Income Statement"));
-    if (btn_balance_)    btn_balance_->setText(tr("Balance Sheet"));
-    if (btn_cashflow_)   btn_cashflow_->setText(tr("Cash Flow"));
-    if (btn_export_csv_) btn_export_csv_->setText(tr("EXPORT CSV"));
+    if (btn_income_)
+        btn_income_->setText(tr("Income Statement"));
+    if (btn_balance_)
+        btn_balance_->setText(tr("Balance Sheet"));
+    if (btn_cashflow_)
+        btn_cashflow_->setText(tr("Cash Flow"));
+    if (btn_export_csv_)
+        btn_export_csv_->setText(tr("EXPORT CSV"));
 
     rebuild_views();
 }
@@ -239,7 +255,6 @@ void EquityFinancialsTab::rebuild_views() {
 }
 
 // ── Build UI ──────────────────────────────────────────────────────────────────
-
 
 void EquityFinancialsTab::populate_table(QTableWidget* table, const QVector<QPair<QString, QJsonObject>>& stmt) {
 
@@ -276,6 +291,8 @@ void EquityFinancialsTab::populate_table(QTableWidget* table, const QVector<QPai
             QString text = val == 0.0 ? "—" : fmt_large(val);
             auto* cell = new QTableWidgetItem(text);
             cell->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            if (val != 0.0)
+                cell->setData(Qt::UserRole, val); // raw figure, used by EXPORT CSV (the text is "391.04B")
             if (val < 0)
                 cell->setForeground(QColor(kRed));
             table->setItem(r, c + 1, cell);

@@ -1,20 +1,22 @@
 // src/screens/agent_config/TeamsViewPanel.cpp
 #include "screens/agent_config/TeamsViewPanel.h"
 
-#include "services/llm/LlmService.h"
 #include "core/logging/Logger.h"
 #include "services/agents/AgentService.h"
+#include "services/llm/LlmService.h"
 #include "storage/repositories/AgentConfigRepository.h"
 #include "storage/repositories/LlmProfileRepository.h"
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
 
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QShowEvent>
 #include <QSplitter>
+#include <QUuid>
 #include <QVBoxLayout>
 
 namespace {
@@ -25,11 +27,23 @@ static const QString kIn =
 
 namespace fincept::screens {
 
-static const QMap<QString, QString> kModeDescriptions = {
-    {"coordinate", "Agents coordinate through a leader who delegates and synthesizes results."},
-    {"route", "Queries are routed to the most appropriate agent based on intent."},
-    {"collaborate", "All agents work on the query simultaneously, results are merged."},
-};
+namespace {
+// Status-line styling in one place (was seven identical inline setStyleSheet pairs).
+void set_exec_status(QLabel* lbl, const QString& text, const QString& color) {
+    lbl->setText(text);
+    lbl->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(color));
+}
+} // namespace
+
+QString TeamsViewPanel::mode_description(const QString& mode) {
+    if (mode == QLatin1String("coordinate"))
+        return tr("Agents coordinate through a leader who delegates and synthesizes results.");
+    if (mode == QLatin1String("route"))
+        return tr("Queries are routed to the most appropriate agent based on intent.");
+    if (mode == QLatin1String("collaborate"))
+        return tr("All agents work on the query simultaneously, results are merged.");
+    return {};
+}
 
 TeamsViewPanel::TeamsViewPanel(QWidget* parent) : QWidget(parent) {
     setObjectName("TeamsViewPanel");
@@ -75,9 +89,10 @@ QWidget* TeamsViewPanel::build_team_panel() {
     vl->setSpacing(6);
 
     auto* hdr = new QHBoxLayout;
-    auto* t = new QLabel(tr("TEAM"));
-    t->setStyleSheet(QString("color:%1;font-size:11px;font-weight:700;letter-spacing:1px;").arg(ui::colors::AMBER()));
-    hdr->addWidget(t);
+    team_title_ = new QLabel(tr("TEAM"));
+    team_title_->setStyleSheet(
+        QString("color:%1;font-size:11px;font-weight:700;letter-spacing:1px;").arg(ui::colors::AMBER()));
+    hdr->addWidget(team_title_);
     team_count_ = new QLabel("0");
     team_count_->setStyleSheet(QString("color:%1;font-size:10px;background:%2;padding:1px 6px;border-radius:2px;")
                                    .arg(ui::colors::CYAN(), ui::colors::BG_RAISED()));
@@ -86,31 +101,32 @@ QWidget* TeamsViewPanel::build_team_panel() {
     vl->addLayout(hdr);
 
     // Mode
-    auto* ml = new QLabel("Mode:");
-    ml->setStyleSheet(QString("color:%1;font-size:10px;").arg(ui::colors::TEXT_SECONDARY()));
-    vl->addWidget(ml);
+    mode_caption_ = new QLabel(tr("Mode:"));
+    mode_caption_->setStyleSheet(QString("color:%1;font-size:10px;").arg(ui::colors::TEXT_SECONDARY()));
+    vl->addWidget(mode_caption_);
     mode_combo_ = new QComboBox;
     mode_combo_->addItems({"coordinate", "route", "collaborate"});
     mode_combo_->setStyleSheet(QString("QComboBox{%1}QComboBox::drop-down{border:none;}").arg(kIn));
     vl->addWidget(mode_combo_);
 
-    mode_desc_label_ = new QLabel(kModeDescriptions["coordinate"]);
+    mode_desc_label_ = new QLabel(mode_description("coordinate"));
     mode_desc_label_->setWordWrap(true);
     mode_desc_label_->setStyleSheet(
         QString("color:%1;font-size:10px;font-style:italic;padding:2px 0;").arg(ui::colors::TEXT_TERTIARY()));
     vl->addWidget(mode_desc_label_);
 
     // Leader selector
-    auto* ll = new QLabel("Leader:");
-    ll->setStyleSheet(QString("color:%1;font-size:10px;").arg(ui::colors::TEXT_SECONDARY()));
-    vl->addWidget(ll);
+    leader_caption_ = new QLabel(tr("Leader:"));
+    leader_caption_->setStyleSheet(QString("color:%1;font-size:10px;").arg(ui::colors::TEXT_SECONDARY()));
+    vl->addWidget(leader_caption_);
     leader_combo_ = new QComboBox;
     leader_combo_->setStyleSheet(QString("QComboBox{%1}QComboBox::drop-down{border:none;}").arg(kIn));
     vl->addWidget(leader_combo_);
 
     // Show member responses
-    show_responses_check_ = new QCheckBox("Show member responses");
-    show_responses_check_->setStyleSheet(QString("QCheckBox{color:%1;font-size:10px;}").arg(ui::colors::TEXT_PRIMARY()));
+    show_responses_check_ = new QCheckBox(tr("Show member responses"));
+    show_responses_check_->setStyleSheet(
+        QString("QCheckBox{color:%1;font-size:10px;}").arg(ui::colors::TEXT_PRIMARY()));
     vl->addWidget(show_responses_check_);
 
     // Team list
@@ -123,17 +139,40 @@ QWidget* TeamsViewPanel::build_team_panel() {
                                        ui::colors::AMBER_DIM(), ui::colors::BG_HOVER()));
     vl->addWidget(team_list_, 1);
 
-    auto* rb = new QPushButton("REMOVE");
-    rb->setCursor(Qt::PointingHandCursor);
-    rb->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %1;padding:5px;"
-                              "font-size:10px;font-weight:600;}QPushButton:hover{background:%2;}")
-                          .arg(ui::colors::NEGATIVE(), ui::colors::BG_HOVER()));
-    connect(rb, &QPushButton::clicked, this, [this]() {
+    // SAVE / LOAD persist the team as an AgentConfig row with category "team" - the
+    // rows the TOOLS tab's "Team" assign target already lists (it was always empty,
+    // nothing ever created one).
+    auto* io_host = new QWidget(this);
+    io_host->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;padding:5px;"
+                                   "font-size:10px;font-weight:600;}QPushButton:hover{background:%3;}")
+                               .arg(ui::colors::CYAN(), ui::colors::BORDER_MED(), ui::colors::BG_HOVER()));
+    auto* io_row = new QHBoxLayout(io_host);
+    io_row->setContentsMargins(0, 0, 0, 0);
+    io_row->setSpacing(6);
+    team_save_btn_ = new QPushButton(tr("SAVE TEAM"));
+    team_save_btn_->setCursor(Qt::PointingHandCursor);
+    team_save_btn_->setToolTip(tr("Save this team (members, mode, leader) so it can be loaded later"));
+    team_load_btn_ = new QPushButton(tr("LOAD TEAM"));
+    team_load_btn_->setCursor(Qt::PointingHandCursor);
+    team_load_btn_->setToolTip(tr("Replace the current team with a saved one"));
+    io_row->addWidget(team_save_btn_);
+    io_row->addWidget(team_load_btn_);
+    connect(team_save_btn_, &QPushButton::clicked, this, &TeamsViewPanel::save_team);
+    connect(team_load_btn_, &QPushButton::clicked, this, &TeamsViewPanel::load_team);
+    vl->addWidget(io_host);
+
+    team_remove_btn_ = new QPushButton(tr("REMOVE"));
+    team_remove_btn_->setCursor(Qt::PointingHandCursor);
+    team_remove_btn_->setStyleSheet(
+        QString("QPushButton{background:transparent;color:%1;border:1px solid %1;padding:5px;"
+                "font-size:10px;font-weight:600;}QPushButton:hover{background:%2;}")
+            .arg(ui::colors::NEGATIVE(), ui::colors::BG_HOVER()));
+    connect(team_remove_btn_, &QPushButton::clicked, this, [this]() {
         int row = team_list_->currentRow();
         if (row >= 0)
             remove_from_team(row);
     });
-    vl->addWidget(rb);
+    vl->addWidget(team_remove_btn_);
     return p;
 }
 
@@ -148,10 +187,10 @@ QWidget* TeamsViewPanel::build_agents_panel() {
     vl->setSpacing(6);
 
     auto* hdr = new QHBoxLayout;
-    auto* t = new QLabel(tr("AVAILABLE AGENTS"));
-    t->setStyleSheet(
+    available_title_ = new QLabel(tr("AVAILABLE AGENTS"));
+    available_title_->setStyleSheet(
         QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;").arg(ui::colors::TEXT_SECONDARY()));
-    hdr->addWidget(t);
+    hdr->addWidget(available_title_);
     available_count_ = new QLabel("0");
     available_count_->setStyleSheet(QString("color:%1;font-size:10px;background:%2;padding:1px 6px;border-radius:2px;")
                                         .arg(ui::colors::CYAN(), ui::colors::BG_RAISED()));
@@ -168,17 +207,18 @@ QWidget* TeamsViewPanel::build_agents_panel() {
                                             ui::colors::AMBER_DIM(), ui::colors::BG_HOVER()));
     vl->addWidget(available_list_, 1);
 
-    auto* ab = new QPushButton(tr("ADD TO TEAM"));
-    ab->setCursor(Qt::PointingHandCursor);
-    ab->setStyleSheet(QString("QPushButton{background:%1;color:%2;border:none;padding:6px;"
-                              "font-size:10px;font-weight:700;letter-spacing:1px;}QPushButton:hover{background:%3;}")
-                          .arg(ui::colors::AMBER(), ui::colors::BG_BASE(), ui::colors::ORANGE()));
-    connect(ab, &QPushButton::clicked, this, [this]() {
+    add_to_team_btn_ = new QPushButton(tr("ADD TO TEAM"));
+    add_to_team_btn_->setCursor(Qt::PointingHandCursor);
+    add_to_team_btn_->setStyleSheet(
+        QString("QPushButton{background:%1;color:%2;border:none;padding:6px;"
+                "font-size:10px;font-weight:700;letter-spacing:1px;}QPushButton:hover{background:%3;}")
+            .arg(ui::colors::AMBER(), ui::colors::BG_BASE(), ui::colors::ORANGE()));
+    connect(add_to_team_btn_, &QPushButton::clicked, this, [this]() {
         int row = available_list_->currentRow();
         if (row >= 0 && row < all_agents_.size())
             add_to_team(all_agents_[row]);
     });
-    vl->addWidget(ab);
+    vl->addWidget(add_to_team_btn_);
     return p;
 }
 
@@ -190,13 +230,14 @@ QWidget* TeamsViewPanel::build_execution_panel() {
     vl->setSpacing(6);
 
     // Coordinator LLM profile picker
-    auto* llm_hdr = new QLabel(tr("COORDINATOR LLM PROFILE"));
-    llm_hdr->setStyleSheet(
+    coordinator_hdr_ = new QLabel(tr("COORDINATOR LLM PROFILE"));
+    coordinator_hdr_->setStyleSheet(
         QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;").arg(ui::colors::TEXT_SECONDARY()));
-    vl->addWidget(llm_hdr);
+    vl->addWidget(coordinator_hdr_);
 
     team_profile_combo_ = new QComboBox;
-    team_profile_combo_->setToolTip("LLM profile for the team coordinator. Members use their own assigned profiles.");
+    team_profile_combo_->setToolTip(
+        tr("LLM profile for the team coordinator. Members use their own assigned profiles."));
     team_profile_combo_->setStyleSheet(
         QString("QComboBox{%1}QComboBox::drop-down{border:none;}"
                 "QComboBox QAbstractItemView{background:%2;color:%3;selection-background-color:%4;}")
@@ -204,14 +245,15 @@ QWidget* TeamsViewPanel::build_execution_panel() {
     vl->addWidget(team_profile_combo_);
 
     team_resolved_lbl_ = new QLabel;
-    team_resolved_lbl_->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::TEXT_TERTIARY()));
+    team_resolved_lbl_->setStyleSheet(
+        QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::TEXT_TERTIARY()));
     vl->addWidget(team_resolved_lbl_);
 
     // Query
-    auto* qh = new QLabel(tr("TEAM QUERY"));
-    qh->setStyleSheet(
-        QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;padding-top:4px;").arg(ui::colors::AMBER()));
-    vl->addWidget(qh);
+    query_hdr_ = new QLabel(tr("TEAM QUERY"));
+    query_hdr_->setStyleSheet(QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;padding-top:4px;")
+                                  .arg(ui::colors::AMBER()));
+    vl->addWidget(query_hdr_);
     query_input_ = new QPlainTextEdit;
     query_input_->setPlaceholderText(tr("Enter a query for the team..."));
     query_input_->setMaximumHeight(80);
@@ -225,18 +267,18 @@ QWidget* TeamsViewPanel::build_execution_panel() {
     run_btn_->setStyleSheet(QString("QPushButton{background:%1;color:%2;border:none;padding:8px;font-size:11px;"
                                     "font-weight:700;letter-spacing:1px;}QPushButton:hover{background:%3;}"
                                     "QPushButton:disabled{background:%4;color:%5;}")
-                                .arg(ui::colors::AMBER(), ui::colors::BG_BASE(), ui::colors::ORANGE(), ui::colors::BG_RAISED(),
-                                     ui::colors::TEXT_TERTIARY()));
+                                .arg(ui::colors::AMBER(), ui::colors::BG_BASE(), ui::colors::ORANGE(),
+                                     ui::colors::BG_RAISED(), ui::colors::TEXT_TERTIARY()));
     vl->addWidget(run_btn_);
 
     exec_status_ = new QLabel;
     exec_status_->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::TEXT_TERTIARY()));
     vl->addWidget(exec_status_);
 
-    auto* lh = new QLabel(tr("EXECUTION LOG"));
-    lh->setStyleSheet(QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;padding-top:4px;")
-                          .arg(ui::colors::TEXT_SECONDARY()));
-    vl->addWidget(lh);
+    log_hdr_ = new QLabel(tr("EXECUTION LOG"));
+    log_hdr_->setStyleSheet(QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;padding-top:4px;")
+                                .arg(ui::colors::TEXT_SECONDARY()));
+    vl->addWidget(log_hdr_);
     log_display_ = new QTextEdit;
     log_display_->setReadOnly(true);
     log_display_->setMaximumHeight(120);
@@ -245,17 +287,18 @@ QWidget* TeamsViewPanel::build_execution_panel() {
             .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM()));
     vl->addWidget(log_display_);
 
-    auto* rh = new QLabel(tr("RESULT"));
-    rh->setStyleSheet(QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;padding-top:4px;")
-                          .arg(ui::colors::TEXT_SECONDARY()));
-    vl->addWidget(rh);
+    result_hdr_ = new QLabel(tr("RESULT"));
+    result_hdr_->setStyleSheet(QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;padding-top:4px;")
+                                   .arg(ui::colors::TEXT_SECONDARY()));
+    vl->addWidget(result_hdr_);
     result_display_ = new QTextEdit;
     result_display_->setReadOnly(true);
     result_display_->setStyleSheet(
         QString("QTextEdit{background:%1;color:%2;border:1px solid %3;padding:8px;font-size:12px;}"
                 "QScrollBar:vertical{background:%1;width:6px;}"
                 "QScrollBar::handle:vertical{background:%4;min-height:20px;}")
-            .arg(ui::colors::BG_BASE(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM(), ui::colors::BORDER_BRIGHT()));
+            .arg(ui::colors::BG_BASE(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM(),
+                 ui::colors::BORDER_BRIGHT()));
     result_display_->document()->setDefaultStyleSheet(
         QString("body { color: %1; background: %2; font-size: 12px; }"
                 "h1, h2, h3, h4 { color: %3; margin: 8px 0 4px 0; }"
@@ -269,7 +312,8 @@ QWidget* TeamsViewPanel::build_execution_panel() {
                 "li { margin: 2px 0; } strong { color: %1; }"
                 "hr { border: none; border-top: 1px solid %4; }")
             .arg(ui::colors::TEXT_PRIMARY(), ui::colors::BG_BASE(), ui::colors::AMBER(), ui::colors::BORDER_DIM(),
-                 ui::colors::CYAN(), ui::colors::BG_RAISED(), ui::colors::TEXT_PRIMARY(), ui::colors::TEXT_SECONDARY()));
+                 ui::colors::CYAN(), ui::colors::BG_RAISED(), ui::colors::TEXT_PRIMARY(),
+                 ui::colors::TEXT_SECONDARY()));
     vl->addWidget(result_display_, 1);
     return p;
 }
@@ -290,13 +334,11 @@ void TeamsViewPanel::setup_connections() {
         run_btn_->setText(tr("RUN TEAM"));
         if (r.success) {
             result_display_->setMarkdown(r.response);
-            exec_status_->setText(QString("Completed in %1ms").arg(r.execution_time_ms));
-            exec_status_->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::POSITIVE()));
+            set_exec_status(exec_status_, tr("Completed in %1ms").arg(r.execution_time_ms), ui::colors::POSITIVE());
             log_display_->append(QString("[DONE] Team completed (%1ms)").arg(r.execution_time_ms));
         } else {
-            result_display_->setPlainText("Error: " + r.error);
-            exec_status_->setText(tr("FAILED"));
-            exec_status_->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::NEGATIVE()));
+            result_display_->setPlainText(tr("Error: %1").arg(r.error));
+            set_exec_status(exec_status_, tr("FAILED"), ui::colors::NEGATIVE());
             log_display_->append("[ERROR] " + r.error);
         }
     });
@@ -316,7 +358,7 @@ void TeamsViewPanel::setup_connections() {
                 QTextCursor cursor = result_display_->textCursor();
                 cursor.movePosition(QTextCursor::End);
                 result_display_->setTextCursor(cursor);
-                result_display_->insertPlainText(token + " ");
+                result_display_->insertPlainText(token);
             });
 
     connect(&svc, &services::AgentService::agent_stream_done, this, [this](services::AgentExecutionResult r) {
@@ -328,14 +370,15 @@ void TeamsViewPanel::setup_connections() {
         run_btn_->setText(tr("RUN TEAM"));
         if (r.success) {
             result_display_->setMarkdown(r.response);
-            exec_status_->setText(QString("Completed in %1ms").arg(r.execution_time_ms));
-            exec_status_->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::POSITIVE()));
+            set_exec_status(exec_status_, tr("Completed in %1ms").arg(r.execution_time_ms), ui::colors::POSITIVE());
             log_display_->append(QString("[DONE] Team completed (%1ms)").arg(r.execution_time_ms));
         } else {
-            result_display_->setPlainText("Error: " + r.error);
-            exec_status_->setText(tr("FAILED"));
-            exec_status_->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::NEGATIVE()));
-            log_display_->append("[ERROR] " + r.error);
+            // STOP pressed: keep whatever streamed in, just mark the run as stopped.
+            const bool stopped = r.error == QLatin1String(services::AgentService::kCancelledError);
+            if (!stopped)
+                result_display_->setPlainText(tr("Error: %1").arg(r.error));
+            set_exec_status(exec_status_, stopped ? tr("STOPPED") : tr("FAILED"), ui::colors::NEGATIVE());
+            log_display_->append((stopped ? QStringLiteral("[STOP] ") : QStringLiteral("[ERROR] ")) + r.error);
         }
     });
     // Profile combo for coordinator
@@ -353,8 +396,7 @@ void TeamsViewPanel::setup_connections() {
         pending_request_id_.clear();
         run_btn_->setEnabled(true);
         run_btn_->setText(tr("RUN TEAM"));
-        exec_status_->setText(tr("ERROR"));
-        exec_status_->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::NEGATIVE()));
+        set_exec_status(exec_status_, tr("ERROR"), ui::colors::NEGATIVE());
         log_display_->append("[ERROR] " + msg);
     });
 
@@ -365,7 +407,7 @@ void TeamsViewPanel::setup_connections() {
             add_to_team(all_agents_[row]);
     });
     connect(mode_combo_, &QComboBox::currentTextChanged, this,
-            [this](const QString& mode) { mode_desc_label_->setText(kModeDescriptions.value(mode, "")); });
+            [this](const QString& mode) { mode_desc_label_->setText(mode_description(mode)); });
 }
 
 void TeamsViewPanel::populate_available_agents(const QVector<services::AgentInfo>& agents) {
@@ -414,14 +456,14 @@ void TeamsViewPanel::load_team_profile_combo() {
     const QString prev_id = team_profile_combo_->currentData().toString();
     team_profile_combo_->blockSignals(true);
     team_profile_combo_->clear();
-    team_profile_combo_->addItem("Default (Global)", QString{});
+    team_profile_combo_->addItem(tr("Default (Global)"), QString{});
 
     const auto pr = LlmProfileRepository::instance().list_profiles();
     const auto profiles = pr.is_ok() ? pr.value() : QVector<LlmProfile>{};
     for (const auto& p : profiles) {
         QString label = p.name;
         if (p.is_default)
-            label += " [default]";
+            label += tr(" [default]");
         team_profile_combo_->addItem(label, p.id);
     }
 
@@ -468,26 +510,31 @@ void TeamsViewPanel::refresh_team_llm_label() {
         if (text.length() > 60)
             text = text.left(58) + "..";
         if (profile_id.isEmpty())
-            text += " (inherited)";
+            text += tr(" (inherited)");
         team_resolved_lbl_->setText(text);
         team_resolved_lbl_->setStyleSheet(
             QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::TEXT_TERTIARY()));
     } else {
-        team_resolved_lbl_->setText("No provider — go to Settings > LLM Config");
-        team_resolved_lbl_->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::NEGATIVE()));
+        team_resolved_lbl_->setText(tr("No provider — go to Settings > LLM Config"));
+        team_resolved_lbl_->setStyleSheet(
+            QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::NEGATIVE()));
     }
 }
 
 void TeamsViewPanel::run_team() {
+    // While the team is running the button doubles as STOP.
+    if (executing_) {
+        services::AgentService::instance().cancel_run(pending_request_id_);
+        return;
+    }
     QString q = query_input_->toPlainText().trimmed();
-    if (q.isEmpty() || team_members_.isEmpty() || executing_)
+    if (q.isEmpty() || team_members_.isEmpty())
         return;
     executing_ = true;
     run_btn_->setEnabled(false);
-    run_btn_->setText("RUNNING...");
+    run_btn_->setText(tr("RUNNING..."));
     result_display_->clear();
-    exec_status_->setText("Executing...");
-    exec_status_->setStyleSheet(QString("color:%1;font-size:10px;padding:2px 0;").arg(ui::colors::AMBER()));
+    set_exec_status(exec_status_, tr("Executing..."), ui::colors::AMBER());
     log_display_->append(QString("[START] Running team (%1 members, mode: %2)")
                              .arg(team_members_.size())
                              .arg(mode_combo_->currentText()));
@@ -565,6 +612,115 @@ void TeamsViewPanel::run_team() {
     }
     tc["members"] = members;
     pending_request_id_ = services::AgentService::instance().run_team(q, tc);
+    // run_team streams, so it can be stopped — re-enable the button as STOP.
+    run_btn_->setEnabled(true);
+    run_btn_->setText(tr("STOP"));
+}
+
+void TeamsViewPanel::save_team() {
+    if (team_members_.isEmpty()) {
+        log_display_->append(tr("[!] Add at least one agent before saving the team"));
+        return;
+    }
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, tr("Save Team"), tr("Team name:"), QLineEdit::Normal,
+                                               saved_team_name_.isEmpty() ? tr("My Team") : saved_team_name_, &ok)
+                             .trimmed();
+    if (!ok || name.isEmpty())
+        return;
+
+    // Same name as the team that was loaded/saved last = overwrite it in place;
+    // anything else is a new team.
+    const bool overwrite = !saved_team_id_.isEmpty() && name == saved_team_name_;
+    const QString id = overwrite ? saved_team_id_ : QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+    QJsonObject cfg;
+    if (overwrite) {
+        // Keep what other tabs wrote into the row (e.g. tools assigned from TOOLS).
+        const auto existing = AgentConfigRepository::instance().get(id);
+        if (existing.is_ok())
+            cfg = QJsonDocument::fromJson(existing.value().config_json.toUtf8()).object();
+    }
+    QJsonArray member_ids;
+    for (const auto& m : team_members_)
+        member_ids.append(m.id);
+    cfg["members"] = member_ids;
+    cfg["mode"] = mode_combo_->currentText();
+    cfg["leader_index"] = leader_combo_->currentIndex();
+    cfg["show_members_responses"] = show_responses_check_->isChecked();
+    cfg["coordinator_profile_id"] = team_profile_combo_->currentData().toString();
+
+    AgentConfig row;
+    row.id = id;
+    row.name = name;
+    row.description = QStringLiteral("%1 team, %2 member(s)").arg(mode_combo_->currentText()).arg(team_members_.size());
+    row.category = QStringLiteral("team");
+    row.config_json = QString::fromUtf8(QJsonDocument(cfg).toJson(QJsonDocument::Compact));
+    services::AgentService::instance().save_config(row);
+    saved_team_id_ = id;
+    saved_team_name_ = name;
+    log_display_->append(QString("[SAVE] Team \"%1\" (%2 members)").arg(name).arg(team_members_.size()));
+}
+
+void TeamsViewPanel::load_team() {
+    const auto teams = AgentConfigRepository::instance().list_by_category(QStringLiteral("team"));
+    if (teams.is_err() || teams.value().isEmpty()) {
+        log_display_->append(tr("[!] No saved teams yet - build a team and press SAVE TEAM"));
+        return;
+    }
+    QStringList names;
+    for (const auto& t : teams.value())
+        names << t.name;
+    bool ok = false;
+    const QString pick = QInputDialog::getItem(this, tr("Load Team"), tr("Saved teams:"), names, 0, false, &ok);
+    if (!ok)
+        return;
+    const int idx = static_cast<int>(names.indexOf(pick));
+    if (idx < 0)
+        return;
+    const AgentConfig row = teams.value()[idx];
+    const QJsonObject cfg = QJsonDocument::fromJson(row.config_json.toUtf8()).object();
+
+    // Replace the current team.
+    team_members_.clear();
+    team_list_->clear();
+    int missing = 0;
+    for (const auto& v : cfg.value("members").toArray()) {
+        const QString agent_id = v.toString();
+        bool found = false;
+        for (const auto& a : all_agents_) {
+            if (a.id == agent_id) {
+                add_to_team(a);
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            ++missing;
+    }
+    update_leader_combo(); // also covers the all-members-missing case (clears the combo)
+    team_count_->setText(QString::number(team_members_.size()));
+
+    const int mode_idx = mode_combo_->findText(cfg.value("mode").toString());
+    if (mode_idx >= 0)
+        mode_combo_->setCurrentIndex(mode_idx);
+    show_responses_check_->setChecked(cfg.value("show_members_responses").toBool());
+    if (!team_members_.isEmpty())
+        leader_combo_->setCurrentIndex(qBound(0, cfg.value("leader_index").toInt(), int(team_members_.size()) - 1));
+    const int prof_idx = team_profile_combo_->findData(cfg.value("coordinator_profile_id").toString());
+    team_profile_combo_->setCurrentIndex(prof_idx >= 0 ? prof_idx : 0);
+
+    // Team-level tools (assigned from the TOOLS tab) back members that have none.
+    QStringList tools;
+    for (const auto& t : cfg.value("tools").toArray())
+        tools << t.toString();
+    selected_tools_ = tools;
+
+    saved_team_id_ = row.id;
+    saved_team_name_ = row.name;
+    log_display_->append(QString("[LOAD] Team \"%1\" (%2 members)").arg(row.name).arg(team_members_.size()));
+    if (missing > 0)
+        log_display_->append(tr("[!] %1 saved member(s) no longer exist and were skipped").arg(missing));
 }
 
 void TeamsViewPanel::apply_tools_selection(const QStringList& tools) {
@@ -577,6 +733,66 @@ void TeamsViewPanel::showEvent(QShowEvent* event) {
     // Trigger a fresh discover so the list stays current.
     // AgentService caches results with TTL — no Python spawn if cache is warm.
     services::AgentService::instance().discover_agents();
+}
+
+// ── Re-translation ───────────────────────────────────────────────────────────
+
+void TeamsViewPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void TeamsViewPanel::retranslateUi() {
+    // Left: team panel.
+    if (team_title_)
+        team_title_->setText(tr("TEAM"));
+    if (mode_caption_)
+        mode_caption_->setText(tr("Mode:"));
+    if (leader_caption_)
+        leader_caption_->setText(tr("Leader:"));
+    if (show_responses_check_)
+        show_responses_check_->setText(tr("Show member responses"));
+    if (team_remove_btn_)
+        team_remove_btn_->setText(tr("REMOVE"));
+    if (team_save_btn_) {
+        team_save_btn_->setText(tr("SAVE TEAM"));
+        team_save_btn_->setToolTip(tr("Save this team (members, mode, leader) so it can be loaded later"));
+    }
+    if (team_load_btn_) {
+        team_load_btn_->setText(tr("LOAD TEAM"));
+        team_load_btn_->setToolTip(tr("Replace the current team with a saved one"));
+    }
+    // Mode description tracks the selected mode code (combo items stay as codes).
+    if (mode_desc_label_ && mode_combo_)
+        mode_desc_label_->setText(mode_description(mode_combo_->currentText()));
+
+    // Center: available agents.
+    if (available_title_)
+        available_title_->setText(tr("AVAILABLE AGENTS"));
+    if (add_to_team_btn_)
+        add_to_team_btn_->setText(tr("ADD TO TEAM"));
+
+    // Right: execution panel section headers + input.
+    if (coordinator_hdr_)
+        coordinator_hdr_->setText(tr("COORDINATOR LLM PROFILE"));
+    if (team_profile_combo_)
+        team_profile_combo_->setToolTip(
+            tr("LLM profile for the team coordinator. Members use their own assigned profiles."));
+    if (query_hdr_)
+        query_hdr_->setText(tr("TEAM QUERY"));
+    if (query_input_)
+        query_input_->setPlaceholderText(tr("Enter a query for the team..."));
+    if (log_hdr_)
+        log_hdr_->setText(tr("EXECUTION LOG"));
+    if (result_hdr_)
+        result_hdr_->setText(tr("RESULT"));
+    if (run_btn_ && !executing_)
+        run_btn_->setText(tr("RUN TEAM"));
+
+    // exec_status_ / log_display_ hold live state. Refresh the resolved coordinator
+    // label (re-derives provider/model from current config).
+    refresh_team_llm_label();
 }
 
 } // namespace fincept::screens

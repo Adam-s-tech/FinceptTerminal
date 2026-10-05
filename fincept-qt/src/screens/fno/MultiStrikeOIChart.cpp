@@ -27,7 +27,7 @@ QColor with_alpha(const QString& hex, int alpha) {
     return c;
 }
 
-}  // namespace
+} // namespace
 
 MultiStrikeOIChart::MultiStrikeOIChart(QWidget* parent) : QChartView(parent) {
     setRenderHint(QPainter::Antialiasing, true);
@@ -37,7 +37,7 @@ MultiStrikeOIChart::MultiStrikeOIChart(QWidget* parent) : QChartView(parent) {
     chart_->setPlotAreaBackgroundBrush(QColor(colors::BG_BASE()));
     chart_->setPlotAreaBackgroundVisible(true);
     chart_->setMargins(QMargins(0, 4, 0, 0));
-    chart_->setTitle(QStringLiteral("Open Interest by Strike"));
+    chart_->setTitle(tr("Open Interest by Strike"));
     chart_->setTitleBrush(QColor(colors::TEXT_SECONDARY()));
     QFont title_font = chart_->titleFont();
     title_font.setPointSize(9);
@@ -46,8 +46,8 @@ MultiStrikeOIChart::MultiStrikeOIChart(QWidget* parent) : QChartView(parent) {
     chart_->legend()->setVisible(false);
     setChart(chart_);
 
-    ce_set_ = new QBarSet(QStringLiteral("CE OI"));
-    pe_set_ = new QBarSet(QStringLiteral("PE OI"));
+    ce_set_ = new QBarSet(tr("CE OI"));
+    pe_set_ = new QBarSet(tr("PE OI"));
     ce_set_->setColor(with_alpha(colors::POSITIVE(), kBarAlpha));
     pe_set_->setColor(with_alpha(colors::NEGATIVE(), kBarAlpha));
     ce_set_->setBorderColor(Qt::transparent);
@@ -106,7 +106,7 @@ void MultiStrikeOIChart::set_chain(const OptionChain& chain) {
     // (Sensibull convention).
     for (int i = hi; i >= lo; --i) {
         const OptionChainRow& row = chain.rows[i];
-        const QString cat = QString::number(row.strike, 'f', row.strike < 100 ? 2 : 0);
+        const QString cat = fincept::services::options::format_strike(row.strike);
         categories.append(cat);
         const double ce = double(row.ce_quote.oi);
         const double pe = double(row.pe_quote.oi);
@@ -123,6 +123,21 @@ void MultiStrikeOIChart::set_chain(const OptionChain& chain) {
     } else {
         axis_x_->setRange(-1, 1);
     }
+}
+
+void MultiStrikeOIChart::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QChartView::changeEvent(event);
+}
+
+void MultiStrikeOIChart::retranslateUi() {
+    if (chart_)
+        chart_->setTitle(tr("Open Interest by Strike"));
+    if (ce_set_)
+        ce_set_->setLabel(tr("CE OI"));
+    if (pe_set_)
+        pe_set_->setLabel(tr("PE OI"));
 }
 
 } // namespace fincept::screens::fno

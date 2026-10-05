@@ -1,6 +1,10 @@
 #include "trading/brokers/iifl/IIFLBroker.h"
+#include "trading/brokers/BrokerModifyFields.h"
 
+#include "trading/brokers/BrokerClientOrderId.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
+#include "trading/instruments/InstrumentService.h"
 
 #include <QDateTime>
 #include <QJsonArray>
@@ -35,6 +39,11 @@ IIFLBroker::KeyParts IIFLBroker::unpack_key(const QString& packed) {
 bool IIFLBroker::is_token_expired(const BrokerHttpResponse& resp) {
     if (resp.status_code == 401)
         return true;
+    // XTS reports a dead interactive/market-data token as {"type":"error","code":"e-session-NNNN",
+    // "description":...}, usually under a 4xx that is NOT 401 — which this check used to miss, leaving
+    // the account "connected" with every call failing.
+    if (resp.json.value("code").toString().startsWith(QLatin1String("e-session"), Qt::CaseInsensitive))
+        return true;
     if (!resp.success)
         return false;
     QJsonDocument doc = QJsonDocument::fromJson(resp.raw_body.toUtf8());
@@ -47,15 +56,21 @@ bool IIFLBroker::is_token_expired(const BrokerHttpResponse& resp) {
 QString IIFLBroker::checked_error(const BrokerHttpResponse& resp, const QString& fallback) {
     if (is_token_expired(resp))
         return "[TOKEN_EXPIRED] Session expired, please re-login";
-    if (!resp.success)
+    // XTS puts its reason in `description`; BrokerHttp's own fallback only reads `message`/`error`,
+    // so a rejected request used to surface as a bare "HTTP 400".
+    const QString description = resp.json.value("description").toString();
+    if (!resp.success) {
+        if (!description.isEmpty())
+            return description;
         return resp.error.isEmpty() ? fallback : resp.error;
+    }
     QJsonDocument doc = QJsonDocument::fromJson(resp.raw_body.toUtf8());
     if (doc.isObject()) {
         QString msg = doc.object().value("message").toString();
         if (!msg.isEmpty())
             return msg;
     }
-    return fallback;
+    return description.isEmpty() ? fallback : description;
 }
 
 QString IIFLBroker::iifl_exchange(const QString& exchange) {
@@ -95,7 +110,7 @@ const BrokerEnumMap<QString>& IIFLBroker::iifl_enum_map() {
         BrokerEnumMap<QString> x;
         x.set(OrderType::Market, "MARKET");
         x.set(OrderType::Limit, "LIMIT");
-        x.set(OrderType::StopLoss, "STOPMARKET");      // SL-M: trigger only, market fill
+        x.set(OrderType::StopLoss, "STOPMARKET");     // SL-M: trigger only, market fill
         x.set(OrderType::StopLossLimit, "STOPLIMIT"); // SL:   trigger + limit price
         x.set(ProductType::Intraday, "MIS");
         x.set(ProductType::Delivery, "CNC");
@@ -162,19 +177,19 @@ TokenExchangeResponse IIFLBroker::exchange_token(const QString& api_key, const Q
     auto trade_resp = http.post_json(QString("%1/user/session").arg(INTERACTIVE_URL), trade_body,
                                      {{"Content-Type", "application/json"}, {"Accept", "application/json"}});
     if (!trade_resp.success)
-        return {false, "", "", "", "Interactive login failed: " + trade_resp.error, ""};
+        return {.success = false, .error = "Interactive login failed: " + trade_resp.error};
 
     QJsonDocument trade_doc = QJsonDocument::fromJson(trade_resp.raw_body.toUtf8());
     if (!trade_doc.isObject())
-        return {false, "", "", "", "Interactive login: invalid response", ""};
+        return {.success = false, .error = "Interactive login: invalid response"};
 
     QJsonObject trade_obj = trade_doc.object();
     if (trade_obj.value("type").toString() != "success")
-        return {false, "", "", "", trade_obj.value("description").toString("Interactive login failed"), ""};
+        return {.success = false, .error = trade_obj.value("description").toString("Interactive login failed")};
 
     QString trade_token = trade_obj.value("result").toObject().value("token").toString();
     if (trade_token.isEmpty())
-        return {false, "", "", "", "Interactive login: no token in response", ""};
+        return {.success = false, .error = "Interactive login: no token in response"};
 
     // Step 2: Market data login (feed token)
     QJsonObject market_body;
@@ -185,26 +200,40 @@ TokenExchangeResponse IIFLBroker::exchange_token(const QString& api_key, const Q
     auto market_resp = http.post_json(QString("%1/auth/login").arg(MARKET_DATA_URL), market_body,
                                       {{"Content-Type", "application/json"}, {"Accept", "application/json"}});
     if (!market_resp.success)
-        return {false, "", "", "", "Market data login failed: " + market_resp.error, ""};
+        return {.success = false, .error = "Market data login failed: " + market_resp.error};
 
     QJsonDocument market_doc = QJsonDocument::fromJson(market_resp.raw_body.toUtf8());
     if (!market_doc.isObject())
-        return {false, "", "", "", "Market data login: invalid response", ""};
+        return {.success = false, .error = "Market data login: invalid response"};
 
     QJsonObject market_obj = market_doc.object();
     if (market_obj.value("type").toString() != "success")
-        return {false, "", "", "", market_obj.value("description").toString("Market data login failed"), ""};
+        return {.success = false, .error = market_obj.value("description").toString("Market data login failed")};
 
     QJsonObject market_result = market_obj.value("result").toObject();
     QString feed_token = market_result.value("token").toString();
     QString user_id = market_result.value("userID").toString();
 
     if (feed_token.isEmpty())
-        return {false, "", "", "", "Market data login: no token in response", ""};
+        return {.success = false, .error = "Market data login: no token in response"};
 
     // Pack both tokens
     QString packed_token = trade_token + ":::" + feed_token;
-    return {true, packed_token, user_id, "", "", ""};
+    // IIFL XTS tokens (interactive + market) are minted from the appKey/secret
+    // pairs stored in api_key/api_secret — both are persisted, so the session is
+    // silently re-mintable. Tokens lapse at the daily reset.
+    const QString extra = with_token_expiry({}, next_ist_flush_epoch(6, 0));
+    // XTS userID is the account identifier, not a refresh token — it used to be
+    // passed positionally into the refresh_token slot, which left user_id empty.
+    return {.success = true, .access_token = packed_token, .user_id = user_id, .additional_data = extra};
+}
+
+// Silent refresh = re-run the XTS interactive + market logins from the stored
+// appKey/secret pairs (no TOTP/web code involved).
+TokenExchangeResponse IIFLBroker::refresh_session(const BrokerCredentials& creds) {
+    if (creds.api_key.isEmpty() || creds.api_secret.isEmpty())
+        return {.success = false, .error = "IIFL silent refresh requires stored app/secret keys"};
+    return exchange_token(creds.api_key, creds.api_secret, QString());
 }
 
 // ---------- place_order ----------
@@ -212,11 +241,26 @@ TokenExchangeResponse IIFLBroker::exchange_token(const QString& api_key, const Q
 OrderPlaceResponse IIFLBroker::place_order(const BrokerCredentials& creds, const UnifiedOrder& order) {
     TokenParts tok = unpack_token(creds.access_token);
 
+    // exchangeInstrumentID is the ONLY contract identifier in an XTS order. The equity ticket
+    // does not carry one (only the F&O chain fills UnifiedOrder::instrument_token), so resolve
+    // it from the instrument master; transmitting the old 0 could never match a contract.
+    qint64 instrument_id = order.instrument_token.toLongLong();
+    if (instrument_id <= 0) {
+        const auto tok = InstrumentService::instance().instrument_token(order.symbol, order.exchange,
+                                                                        QStringLiteral("iifl"));
+        if (tok.has_value() && tok.value() > 0)
+            instrument_id = tok.value();
+    }
+    if (instrument_id <= 0)
+        return {false, "",
+                "IIFL place_order: exchangeInstrumentID not found for " + order.exchange + ":" + order.symbol +
+                    " (instrument master not loaded yet?)"};
+
     QJsonObject body;
     body["exchangeSegment"] = iifl_exchange(order.exchange);
     // exchangeInstrumentID must be a JSON number per XTS spec; passing as string
     // works for some endpoints but is silently rejected for derivatives.
-    body["exchangeInstrumentID"] = order.instrument_token.toLongLong();
+    body["exchangeInstrumentID"] = instrument_id;
     body["productType"] = iifl_enum_map().product_or(order.product_type, "MIS");
     body["orderType"] = iifl_enum_map().order_type_or(order.order_type, "MARKET");
     body["orderSide"] = (order.side == OrderSide::Buy) ? "BUY" : "SELL";
@@ -226,7 +270,9 @@ OrderPlaceResponse IIFLBroker::place_order(const BrokerCredentials& creds, const
     body["orderQuantity"] = static_cast<int>(order.quantity);
     body["limitPrice"] = order.price;
     body["stopPrice"] = order.stop_price;
-    body["orderUniqueIdentifier"] = "fincept";
+    // Stable per order intent (UnifiedOrder::client_order_id) so a retry after an 8s
+    // client-side timeout carries the same reference (see BrokerClientOrderId.h).
+    body["orderUniqueIdentifier"] = client_order_ref_for(order, 20);
 
     auto& http = BrokerHttp::instance();
     auto resp = http.post_json(
@@ -258,12 +304,15 @@ ApiResponse<QJsonObject> IIFLBroker::modify_order(const BrokerCredentials& creds
     body["appOrderID"] = order_id.toLongLong();
     body["modifiedProductType"] = mods.value("productType").toString("MIS");
     body["modifiedOrderType"] = mods.value("orderType").toString("MARKET");
-    body["modifiedOrderQuantity"] = mods.value("quantity").toInt(0);
+    body["modifiedOrderQuantity"] = static_cast<int>(modify_fields::number(mods, modify_fields::kQuantity));
     body["modifiedDisclosedQuantity"] = 0;
-    body["modifiedLimitPrice"] = mods.value("limitPrice").toDouble(0.0);
-    body["modifiedStopPrice"] = mods.value("stopPrice").toDouble(0.0);
+    body["modifiedLimitPrice"] = modify_fields::number(mods, modify_fields::kPrice);
+    body["modifiedStopPrice"] = modify_fields::number(mods, modify_fields::kTrigger);
     body["modifiedTimeInForce"] = mods.value("timeInForce").toString("DAY");
-    body["orderUniqueIdentifier"] = "fincept";
+    // Unique per attempt so a retry after an 8s client-side timeout is a
+    // broker-side duplicate rather than a second live order (see
+    // BrokerClientOrderId.h). Was the constant "fincept", which deduplicated nothing.
+    body["orderUniqueIdentifier"] = make_client_order_ref(20);
 
     auto& http = BrokerHttp::instance();
     auto resp = http.put_json(
@@ -416,18 +465,30 @@ ApiResponse<QVector<BrokerPosition>> IIFLBroker::get_positions(const BrokerCrede
 
     for (const QJsonValue& v : arr) {
         QJsonObject o = v.toObject();
-        int qty = o.value("Quantity").toInt();
-        if (qty == 0)
+        // XTS returns position figures as numeric STRINGS ("Quantity":"-50", "BEP":"76.80");
+        // toInt()/toDouble() on a string read 0, which skipped the row as flat. Accept both.
+        auto num = [&o](const char* key) { return o.value(QLatin1String(key)).toVariant().toDouble(); };
+        const double qty = num("Quantity");
+        if (qty == 0.0)
             continue;
 
         BrokerPosition pos;
         pos.symbol = o.value("TradingSymbol").toString();
         pos.exchange = o.value("ExchangeSegment").toString();
         pos.quantity = qty;
-        pos.avg_price = o.value("AveragePrice").toDouble();
-        pos.ltp = o.value("LastPrice").toDouble();
-        pos.pnl = o.value("UnrealizedMTM").toDouble();
+        pos.avg_price = num("AveragePrice");
+        if (pos.avg_price <= 0.0) // XTS spells the entry price per side, plus a break-even field
+            pos.avg_price = qty > 0 ? num("BuyAveragePrice") : num("SellAveragePrice");
+        if (pos.avg_price <= 0.0)
+            pos.avg_price = num("BEP");
+        pos.ltp = num("LastPrice");
+        pos.pnl = num("UnrealizedMTM");
+        pos.pnl_pct = (pos.avg_price > 0.0) ? ((pos.ltp - pos.avg_price) / pos.avg_price) * 100.0 : 0.0;
         pos.product_type = o.value("ProductType").toString();
+        // Quantity carries the sign, but PortfolioReplicationService takes
+        // fabs() of quantity and reads direction from `side` alone — leaving it
+        // empty replicated every short as a long and inverted its P&L.
+        pos.side = qty > 0 ? "LONG" : "SHORT";
         positions.append(pos);
     }
 
@@ -472,7 +533,10 @@ ApiResponse<QVector<BrokerHolding>> IIFLBroker::get_holdings(const BrokerCredent
         h.quantity = o.value("HoldingQuantity").toInt();
         h.avg_price = o.value("BuyPrice").toDouble();
         h.ltp = o.value("Price").toDouble();
+        h.invested_value = h.quantity * h.avg_price;
+        h.current_value = h.quantity * h.ltp;
         h.pnl = (h.ltp - h.avg_price) * h.quantity;
+        h.pnl_pct = (h.invested_value > 0.0) ? (h.pnl / h.invested_value) * 100.0 : 0.0;
         holdings.append(h);
     }
 
@@ -665,6 +729,16 @@ ApiResponse<QVector<BrokerCandle>> IIFLBroker::get_history(const BrokerCredentia
     }
 
     return {true, candles, "", ts};
+}
+
+// ============================================================================
+// Pre-trade margin calculator — fallback estimator.
+// IIFL (XTS) has no margin calculator API (OpenAlgo's broker/iifl/api/margin_api.py
+// raises NotImplementedError), so we use the shared heuristic estimator
+// (BrokerInterface.h::estimate_order_margin).
+// ============================================================================
+ApiResponse<OrderMargin> IIFLBroker::get_order_margins(const BrokerCredentials& /*creds*/, const UnifiedOrder& order) {
+    return {true, estimate_order_margin(order), "", now_ts()};
 }
 
 } // namespace fincept::trading

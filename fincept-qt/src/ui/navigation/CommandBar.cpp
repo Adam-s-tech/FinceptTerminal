@@ -8,12 +8,12 @@
 //   - CommandBar_Assets.cpp       — /stock-style asset search mode
 // Shared constants (kMaxResults) live in CommandBar_internal.h.
 #include "ui/navigation/CommandBar.h"
-#include "ui/navigation/CommandBar_internal.h"
 
 #include "core/events/EventBus.h"
 #include "core/keys/KeyConfigManager.h"
 #include "core/session/ScreenStateManager.h"
 #include "network/http/HttpClient.h"
+#include "ui/navigation/CommandBar_internal.h"
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
 
@@ -62,6 +62,18 @@ static QString drop_ss() {
         .arg(colors::BORDER_MED.get());
 }
 
+// The dropdown rows (built per keystroke in CommandBar_Input / _Suggestions /
+// _Assets) used to give every row widget and label its own setStyleSheet() —
+// five CSS parses per row, ten rows, on every debounce tick. They now carry only
+// an objectName and are styled here, once, by the list's own sheet. Descendant
+// selectors reach the item widgets (they live under the list's viewport), and the
+// sheet is rebuilt in refresh_theme(), so visible rows follow theme changes too.
+// objectName -> look:  cbRow  = row container (transparent)
+//   cbSlash/cbVerb    = amber 12px / 11px bold   cbHeader/cbNote = amber 10px / 11px
+//   cbAlias/cbAsset   = primary 11px / 12px bold  cbSep    = tertiary 12px separator
+//   cbDesc            = secondary 11px            cbExch   = tertiary 10px
+//   cbShortcut        = dim 10px                  cbEmpty  = tertiary 11px (no results)
+//   cbType            = amber 9px bold badge on a raised background
 static QString list_ss() {
     return QString("QListWidget{"
                    "  background:transparent;"
@@ -76,9 +88,37 @@ static QString list_ss() {
                    "QListWidget::item:selected{"
                    "  background:%1;"
                    "  border-left:3px solid %2;"
-                   "}")
+                   "}"
+                   "QListWidget QWidget#cbRow{background:transparent;}"
+                   "QListWidget QLabel#cbSlash{color:%2;font-size:12px;font-weight:700;"
+                   "  font-family:'Consolas',monospace;background:transparent;}"
+                   "QListWidget QLabel#cbVerb{color:%2;font-size:11px;font-weight:700;"
+                   "  font-family:'Consolas',monospace;background:transparent;}"
+                   "QListWidget QLabel#cbHeader{color:%2;font-size:10px;"
+                   "  font-family:'Consolas',monospace;background:transparent;}"
+                   "QListWidget QLabel#cbNote{color:%2;font-size:11px;"
+                   "  font-family:'Consolas',monospace;background:transparent;}"
+                   "QListWidget QLabel#cbAlias{color:%3;font-size:11px;font-weight:700;"
+                   "  font-family:'Consolas',monospace;background:transparent;}"
+                   "QListWidget QLabel#cbAsset{color:%3;font-size:12px;font-weight:700;"
+                   "  font-family:'Consolas',monospace;background:transparent;}"
+                   "QListWidget QLabel#cbSep{color:%5;font-size:12px;background:transparent;}"
+                   "QListWidget QLabel#cbDesc{color:%4;font-size:11px;"
+                   "  font-family:'Consolas',monospace;background:transparent;}"
+                   "QListWidget QLabel#cbExch{color:%5;font-size:10px;"
+                   "  font-family:'Consolas',monospace;background:transparent;}"
+                   "QListWidget QLabel#cbShortcut{color:%6;font-size:10px;"
+                   "  font-family:'Consolas',monospace;background:transparent;}"
+                   "QListWidget QLabel#cbEmpty{color:%5;font-size:11px;"
+                   "  font-family:'Consolas',monospace;background:transparent;}"
+                   "QListWidget QLabel#cbType{color:%2;font-size:9px;font-weight:700;"
+                   "  font-family:'Consolas',monospace;background:%1;padding:1px 4px;border-radius:2px;}")
         .arg(colors::BG_RAISED.get())
-        .arg(colors::AMBER.get());
+        .arg(colors::AMBER.get())
+        .arg(colors::TEXT_PRIMARY.get())
+        .arg(colors::TEXT_SECONDARY.get())
+        .arg(colors::TEXT_TERTIARY.get())
+        .arg(colors::TEXT_DIM.get());
 }
 
 // ── yfinance symbol conversion ───────────────────────────────────────────────
@@ -91,247 +131,262 @@ void CommandBar::build_commands() {
     commands_ = {
         // Primary tabs
         {"dashboard",
-         "Dashboard",
+         tr("Dashboard"),
          "Main overview screen",
          {"dash", "home", "overview", "main"},
          "F1",
          {"dashboard", "home", "summary"}},
         {"markets",
-         "Markets",
+         tr("Markets"),
          "Live market data",
          {"mkts", "markets", "market", "live"},
          "F2",
          {"markets", "stocks", "quotes", "prices"}},
-        {"news", "News", "Financial news feed", {"news", "headlines", "feed"}, "F3", {"news", "headlines", "articles"}},
+        {"news",
+         tr("News"),
+         "Financial news feed",
+         {"news", "headlines", "feed"},
+         "F3",
+         {"news", "headlines", "articles"}},
         {"portfolio",
-         "Portfolio",
+         tr("Portfolio"),
          "Portfolio management",
          {"port", "portfolio", "pf", "holdings"},
          "F4",
          {"portfolio", "holdings", "positions"}},
         {"backtesting",
-         "Backtesting",
+         tr("Backtesting"),
          "Strategy backtesting",
          {"bktest", "backtest", "bt"},
          "F5",
          {"backtest", "strategy", "historical"}},
         {"watchlist",
-         "Watchlist",
+         tr("Watchlist"),
          "Manage watchlists",
          {"watch", "watchlist", "wl"},
          "F6",
          {"watchlist", "favorites", "track"}},
         {"crypto_trading",
-         "Crypto Trading",
+         tr("Crypto Trading"),
          "Cryptocurrency trading",
          {"trade", "trading", "crypto", "kraken"},
          "F9",
          {"trading", "crypto", "exchange"}},
-        {"ai_chat", "AI Chat", "AI assistant", {"ai", "chat", "assistant", "bot"}, "F10", {"ai", "chat", "assistant"}},
-        {"notes", "Notes", "Notes and reports", {"notes", "note"}, "F11", {"notes", "reports", "documents"}},
+        {"ai_chat",
+         tr("AI Chat"),
+         "AI assistant",
+         {"ai", "chat", "assistant", "bot"},
+         "F10",
+         {"ai", "chat", "assistant"}},
+        {"notes", tr("Notes"), "Notes and reports", {"notes", "note"}, "F11", {"notes", "reports", "documents"}},
         {"profile",
-         "Profile",
+         tr("Profile"),
          "User profile & account",
          {"prof", "profile", "account"},
          "F12",
          {"profile", "account", "user"}},
         {"settings",
-         "Settings",
+         tr("Settings"),
          "Application settings",
          {"settings", "prefs", "config"},
          "",
          {"settings", "preferences"}},
-        {"forum", "Forum", "Community forum", {"forum", "community"}, "", {"forum", "community", "discuss"}},
+        {"forum", tr("Forum"), "Community forum", {"forum", "community"}, "", {"forum", "community", "discuss"}},
         // Trading & Portfolio
         {"equity_trading",
-         "Equity Trading",
+         tr("Equity Trading"),
          "Stock trading interface",
          {"eqtrade", "stocks", "equities"},
          "",
          {"equity", "stocks", "trading"}},
         {"algo_trading",
-         "Algo Trading",
+         tr("Algo Trading"),
          "Algorithmic trading",
          {"algo", "algotrading"},
          "",
          {"algo", "algorithmic", "automated"}},
         {"alpha_arena",
-         "Alpha Arena",
+         tr("Alpha Arena"),
          "Trading competition platform",
          {"alpha", "arena", "alphaarena"},
          "",
          {"alpha", "competition", "leaderboard"}},
         {"polymarket",
-         "Prediction Markets",
+         tr("Prediction Markets"),
          "Polymarket + Kalshi prediction markets",
          {"poly", "polymarket", "kalshi", "prediction"},
          "",
          {"polymarket", "kalshi", "prediction", "markets"}},
         {"derivatives",
-         "Derivatives",
+         tr("Derivatives"),
          "Single-contract pricing calculator (BSM, swaps, CDS)",
          {"deriv", "derivatives", "calc", "calculator"},
          "",
          {"derivatives", "pricing", "calculator", "bsm"}},
         {"fno",
-         "F&O",
+         tr("F&O"),
          "Sensibull-style option chain, strategy builder, OI analytics",
          {"fno", "options", "chain", "strategy", "sensibull"},
          "",
          {"options", "chain", "strategy", "payoff", "oi", "fno", "futures"}},
         // Research
         {"equity_research",
-         "Equity Research",
+         tr("Equity Research"),
          "Equity research tools",
          {"rsrch", "research", "equity"},
          "",
          {"research", "equity", "fundamental"}},
         {"screener",
-         "Screener",
+         tr("Screener"),
          "Stock screener",
          {"scrn", "screener", "filter", "scan"},
          "",
          {"screener", "filter", "scan"}},
         {"ma_analytics",
-         "M&A Analytics",
+         tr("M&A Analytics"),
          "Mergers and acquisitions",
          {"ma", "mna", "mergers"},
          "",
          {"ma", "mergers", "acquisitions"}},
         {"alt_investments",
-         "Alt. Investments",
+         tr("Alt. Investments"),
          "Alternative investment analysis",
          {"altinv", "alt", "alternatives"},
          "",
          {"alternative", "investments", "hedge"}},
         {"surface_analytics",
-         "Surface Analytics",
+         tr("Surface Analytics"),
          "Options vol surface & correlation",
          {"surface", "volsurface", "3dviz", "3d"},
          "",
          {"surface", "volatility", "correlation", "pca"}},
         // Economics & Data
         {"economics",
-         "Economics",
+         tr("Economics"),
          "Economic indicators",
          {"econ", "economics", "indicators"},
          "",
          {"economics", "macro", "indicators"}},
         {"gov_data",
-         "GOVT Data",
+         tr("GOVT Data"),
          "Government securities & open data",
          {"govt", "gov", "government", "treasury"},
          "",
          {"government", "treasury", "bonds"}},
         {"dbnomics",
-         "DBnomics",
+         tr("DBnomics"),
          "Economic database",
          {"dbn", "dbnomics", "database"},
          "",
          {"dbnomics", "database", "economic"}},
         {"akshare",
-         "AKShare Data",
+         tr("AKShare Data"),
          "Chinese financial data",
          {"aks", "akshare", "chinese"},
          "",
          {"akshare", "chinese", "china"}},
-        {"asia_markets", "Asia Markets", "Asian market data", {"asia", "apac", "asian"}, "", {"asia", "asian", "apac"}},
+        {"asia_markets",
+         tr("Asia Markets"),
+         "Asian market data",
+         {"asia", "apac", "asian"},
+         "",
+         {"asia", "asian", "apac"}},
         // Geopolitics
         {"geopolitics",
-         "Geopolitics",
+         tr("Geopolitics"),
          "Geopolitical analysis",
          {"geo", "geopolitics", "politics"},
          "",
          {"geopolitics", "politics", "global"}},
         {"maritime",
-         "Maritime",
+         tr("Maritime"),
          "Maritime intelligence",
          {"marine", "maritime", "shipping"},
          "",
          {"maritime", "shipping", "vessels"}},
         {"relationship_map",
-         "Relationship Map",
+         tr("Relationship Map"),
          "Entity relationship mapping",
          {"relmap", "relationships", "map"},
          "",
          {"relationship", "map", "network"}},
         // AI / Quant
         {"ai_quant_lab",
-         "AI Quant Lab",
+         tr("AI Quant Lab"),
          "Quantitative analysis lab",
          {"quantlab", "quant", "lab"},
          "",
          {"quant", "quantitative", "lab"}},
         {"quantlib",
-         "QuantLib",
+         tr("QuantLib"),
          "Quantitative finance suite",
          {"qlcore", "ql", "quantlib"},
          "",
          {"quantlib", "math", "finance", "models"}},
         {"agent_config",
-         "Agent Config",
+         tr("Agent Config"),
          "Configure AI agents",
          {"agents", "agent", "config"},
          "",
          {"agents", "ai", "configuration"}},
         // Tools
         {"mcp_servers",
-         "MCP Servers",
+         tr("MCP Servers"),
          "Model Context Protocol servers",
          {"mcp", "servers"},
          "",
          {"mcp", "servers", "protocol"}},
         {"node_editor",
-         "Node Editor",
+         tr("Node Editor"),
          "Visual workflow editor",
          {"nodes", "workflow", "node"},
          "",
          {"nodes", "workflow", "visual"}},
         {"code_editor",
-         "Code Editor",
+         tr("Code Editor"),
          "Code development",
          {"code", "editor", "dev"},
          "",
          {"code", "editor", "programming"}},
         {"excel",
-         "Excel",
+         tr("Excel"),
          "Excel workbook integration",
          {"excel", "spreadsheet", "xls"},
          "",
          {"excel", "spreadsheet", "workbook"}},
         {"report_builder",
-         "Report Builder",
+         tr("Report Builder"),
          "Create reports",
          {"report", "reports", "builder"},
          "",
          {"report", "builder", "document"}},
         {"data_sources",
-         "Data Sources",
+         tr("Data Sources"),
          "Manage data sources",
          {"datasrc", "datasources", "sources"},
          "",
          {"data", "sources", "connections"}},
         {"data_mapping",
-         "Data Mapping",
+         tr("Data Mapping"),
          "API integration & schema transform",
          {"datamap", "mapping", "schema"},
          "",
          {"data", "mapping", "schema", "api"}},
         {"trade_viz",
-         "Trade Visualization",
+         tr("Trade Visualization"),
          "Trade flow visualization",
          {"tradeviz", "tradegraph"},
          "",
          {"trade", "visualization", "flow"}},
         // Community / Info
         {"about",
-         "About",
+         tr("About"),
          "About Fincept Terminal",
          {"about", "info", "version"},
          "",
          {"about", "information", "version"}},
         {"support",
-         "Support",
+         tr("Support"),
          "Support tickets",
          {"support", "ticket", "help"},
          "",
@@ -343,15 +398,15 @@ void CommandBar::build_commands() {
 
 void CommandBar::build_asset_types() {
     asset_types_ = {
-        {"/stock", "stock", "Stock", "Search stocks by symbol or company name"},
-        {"/fund", "fund", "Fund", "Search mutual funds and ETFs"},
-        {"/dr", "dr", "DR", "Search depositary receipts (ADR/GDR)"},
-        {"/index", "index", "Index", "Search market indices"},
-        {"/forex", "forex", "Forex", "Search forex currency pairs"},
-        {"/crypto", "crypto", "Crypto", "Search cryptocurrencies"},
-        {"/futures", "futures", "Futures", "Search futures contracts"},
-        {"/bond", "bond", "Bond", "Search bonds and fixed income"},
-        {"/economic", "economic", "Economic", "Search economic indicators"},
+        {"/stock", "stock", tr("Stock"), tr("Search stocks by symbol or company name")},
+        {"/fund", "fund", tr("Fund"), tr("Search mutual funds and ETFs")},
+        {"/dr", "dr", tr("DR"), tr("Search depositary receipts (ADR/GDR)")},
+        {"/index", "index", tr("Index"), tr("Search market indices")},
+        {"/forex", "forex", tr("Forex"), tr("Search forex currency pairs")},
+        {"/crypto", "crypto", tr("Crypto"), tr("Search cryptocurrencies")},
+        {"/futures", "futures", tr("Futures"), tr("Search futures contracts")},
+        {"/bond", "bond", tr("Bond"), tr("Search bonds and fixed income")},
+        {"/economic", "economic", tr("Economic"), tr("Search economic indicators")},
     };
 }
 
@@ -417,7 +472,7 @@ CommandBar::CommandBar(QWidget* parent) : QWidget(parent) {
 
     input_ = new QLineEdit(this);
     input_->setFixedHeight(24);
-    input_->setPlaceholderText("> Enter Command or /type ...");
+    input_->setPlaceholderText(tr("> Enter Command or /type ..."));
     input_->setStyleSheet(input_ss());
     input_->installEventFilter(this);
     hl->addWidget(input_);
@@ -464,6 +519,8 @@ CommandBar::CommandBar(QWidget* parent) : QWidget(parent) {
     connect(&ThemeManager::instance(), &ThemeManager::theme_changed, this,
             [this](const ThemeTokens&) { refresh_theme(); });
 
+    retranslateUi();
+
     setup_key_actions();
 
     // ── Draft persistence ────────────────────────────────────────────────────
@@ -476,6 +533,22 @@ CommandBar::CommandBar(QWidget* parent) : QWidget(parent) {
     // Restore last draft after the full UI tree is wired up so text-changed
     // logic (mode transitions, dropdown) re-establishes the right state.
     QTimer::singleShot(0, this, &CommandBar::restore_draft);
+}
+
+void CommandBar::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void CommandBar::retranslateUi() {
+    if (input_)
+        input_->setPlaceholderText(tr("> Enter Command or /type ..."));
+    // The command/asset-type registries cache their tr() display labels at
+    // build time. Re-run the builders so a language switch refreshes the
+    // names/descriptions; the dropdown rebuilds from these on the next keystroke.
+    build_commands();
+    build_asset_types();
 }
 
 // ── Draft persistence (cache.db screen_state[key="command_bar"]) ────────────
@@ -626,11 +699,11 @@ bool CommandBar::eventFilter(QObject* obj, QEvent* event) {
     // default bindings here; user rebindings via Settings → Keybindings
     // currently can't fire either (same orphan-QAction issue), so the
     // default bindings are the de-facto contract.
-    const bool is_down   = (key == Qt::Key_Down)   && mods == Qt::NoModifier;
-    const bool is_up     = (key == Qt::Key_Up)     && mods == Qt::NoModifier;
-    const bool is_tab    = (key == Qt::Key_Tab)    && mods == Qt::NoModifier;
-    const bool is_btab   = (key == Qt::Key_Backtab); // Shift+Tab arrives as Backtab
-    const bool is_esc    = (key == Qt::Key_Escape) && mods == Qt::NoModifier;
+    const bool is_down = (key == Qt::Key_Down) && mods == Qt::NoModifier;
+    const bool is_up = (key == Qt::Key_Up) && mods == Qt::NoModifier;
+    const bool is_tab = (key == Qt::Key_Tab) && mods == Qt::NoModifier;
+    const bool is_btab = (key == Qt::Key_Backtab); // Shift+Tab arrives as Backtab
+    const bool is_esc = (key == Qt::Key_Escape) && mods == Qt::NoModifier;
 
     if (!is_down && !is_up && !is_tab && !is_btab && !is_esc)
         return QWidget::eventFilter(obj, event);
@@ -654,17 +727,21 @@ bool CommandBar::eventFilter(QObject* obj, QEvent* event) {
             act->trigger();
     };
 
-    if (is_down)        trigger(KeyAction::NavNext);
-    else if (is_up)     trigger(KeyAction::NavPrev);
-    else if (is_btab)   trigger(KeyAction::NavPrev);
-    else if (is_tab)    trigger(KeyAction::NavAccept);
-    else if (is_esc)    trigger(KeyAction::NavEscape);
+    if (is_down)
+        trigger(KeyAction::NavNext);
+    else if (is_up)
+        trigger(KeyAction::NavPrev);
+    else if (is_btab)
+        trigger(KeyAction::NavPrev);
+    else if (is_tab)
+        trigger(KeyAction::NavAccept);
+    else if (is_esc)
+        trigger(KeyAction::NavEscape);
 
     return true; // consume — keep Tab from walking focus, etc.
 }
 
 // ── slots ────────────────────────────────────────────────────────────────────
-
 
 void CommandBar::execute_index(int index) {
     auto* item = list_->item(index);
@@ -698,6 +775,5 @@ void CommandBar::update_position() {
     dropdown_->move(global_pos);
     dropdown_->resize(w, h);
 }
-
 
 } // namespace fincept::ui

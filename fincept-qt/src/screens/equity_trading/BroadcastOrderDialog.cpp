@@ -1,7 +1,9 @@
 // BroadcastOrderDialog.cpp — multi-account order broadcast
 #include "screens/equity_trading/BroadcastOrderDialog.h"
 
+#include "screens/equity_trading/EquityTypes.h"
 #include "trading/AccountManager.h"
+#include "trading/ActionCenter.h"
 #include "trading/BrokerRegistry.h"
 #include "ui/theme/Theme.h"
 
@@ -18,7 +20,7 @@ using namespace fincept::trading;
 
 BroadcastOrderDialog::BroadcastOrderDialog(const trading::UnifiedOrder& order, QWidget* parent)
     : QDialog(parent), order_(order) {
-    setWindowTitle("Broadcast Order");
+    setWindowTitle(tr("Broadcast Order"));
     setMinimumSize(450, 380);
     setStyleSheet(QString("QDialog { background: %1; color: %2; }"
                           "QCheckBox { color: %2; font-size: 12px; spacing: 6px; }"
@@ -28,8 +30,8 @@ BroadcastOrderDialog::BroadcastOrderDialog(const trading::UnifiedOrder& order, Q
                           "QLabel#resultOk { color: %5; font-size: 11px; }"
                           "QLabel#resultErr { color: %6; font-size: 11px; }"
                           "QPushButton { padding: 8px 16px; font-weight: 700; font-size: 12px; border-radius: 2px; }")
-                      .arg(colors::BG_SURFACE(), colors::TEXT_PRIMARY(), colors::AMBER(),
-                           colors::TEXT_SECONDARY(), colors::POSITIVE(), colors::NEGATIVE()));
+                      .arg(colors::BG_SURFACE(), colors::TEXT_PRIMARY(), colors::AMBER(), colors::TEXT_SECONDARY(),
+                           colors::POSITIVE(), colors::NEGATIVE()));
     setup_ui();
 }
 
@@ -39,16 +41,16 @@ void BroadcastOrderDialog::setup_ui() {
     root->setContentsMargins(16, 16, 16, 16);
 
     // Header
-    auto* header = new QLabel("BROADCAST ORDER");
-    header->setObjectName("header");
-    root->addWidget(header);
+    header_label_ = new QLabel(tr("BROADCAST ORDER"));
+    header_label_->setObjectName("header");
+    root->addWidget(header_label_);
 
     // Order summary
-    const QString side_str = order_.side == OrderSide::Buy ? "BUY" : "SELL";
+    const QString side_str = order_.side == OrderSide::Buy ? tr("BUY") : tr("SELL");
     const QString type_str = order_type_str(order_.order_type);
     auto* info = new QLabel(QString("%1  %2  x%3  %4  @ %5")
                                 .arg(side_str, order_.symbol)
-                                .arg(order_.quantity)
+                                .arg(format_quantity(order_.quantity))
                                 .arg(type_str)
                                 .arg(order_.price > 0 ? QString::number(order_.price, 'f', 2) : "MKT"));
     info->setObjectName("orderInfo");
@@ -61,7 +63,7 @@ void BroadcastOrderDialog::setup_ui() {
     root->addWidget(sep);
 
     // Select All
-    select_all_cb_ = new QCheckBox("Select All");
+    select_all_cb_ = new QCheckBox(tr("Select All"));
     select_all_cb_->setStyleSheet(QString("QCheckBox { color: %1; font-weight: 700; }").arg(colors::AMBER()));
     connect(select_all_cb_, &QCheckBox::toggled, this, &BroadcastOrderDialog::on_select_all);
     root->addWidget(select_all_cb_);
@@ -69,8 +71,8 @@ void BroadcastOrderDialog::setup_ui() {
     // Scrollable account list
     auto* scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
-    scroll->setStyleSheet(QString("QScrollArea { border: 1px solid %1; background: %2; }")
-                              .arg(colors::BORDER_MED(), colors::BG_BASE()));
+    scroll->setStyleSheet(
+        QString("QScrollArea { border: 1px solid %1; background: %2; }").arg(colors::BORDER_MED(), colors::BG_BASE()));
 
     auto* list_widget = new QWidget(this);
     auto* list_layout = new QVBoxLayout(list_widget);
@@ -81,7 +83,7 @@ void BroadcastOrderDialog::setup_ui() {
     for (const auto& account : accounts) {
         auto* broker = BrokerRegistry::instance().get(account.broker_id);
         const QString broker_name = broker ? broker->profile().display_name : account.broker_id;
-        const QString mode_tag = account.trading_mode == "live" ? "[LIVE]" : "[PAPER]";
+        const QString mode_tag = account.trading_mode == "live" ? tr("[LIVE]") : tr("[PAPER]");
         const QString text = QString("%1  [%2]  %3").arg(account.display_name, broker_name, mode_tag);
 
         auto* cb = new QCheckBox(text);
@@ -131,13 +133,13 @@ void BroadcastOrderDialog::setup_ui() {
     auto* btn_row = new QHBoxLayout;
     btn_row->addStretch();
 
-    auto* cancel_btn = new QPushButton("CANCEL");
-    cancel_btn->setStyleSheet(QString("QPushButton { background: %1; color: %2; }")
-                                  .arg(colors::BG_RAISED(), colors::TEXT_PRIMARY()));
-    connect(cancel_btn, &QPushButton::clicked, this, &QDialog::reject);
-    btn_row->addWidget(cancel_btn);
+    cancel_btn_ = new QPushButton(tr("CANCEL"));
+    cancel_btn_->setStyleSheet(
+        QString("QPushButton { background: %1; color: %2; }").arg(colors::BG_RAISED(), colors::TEXT_PRIMARY()));
+    connect(cancel_btn_, &QPushButton::clicked, this, &QDialog::reject);
+    btn_row->addWidget(cancel_btn_);
 
-    place_btn_ = new QPushButton(QString("PLACE %1").arg(order_.side == OrderSide::Buy ? "BUY" : "SELL"));
+    place_btn_ = new QPushButton(order_.side == OrderSide::Buy ? tr("PLACE BUY") : tr("PLACE SELL"));
     place_btn_->setStyleSheet(
         QString("QPushButton { background: %1; color: %2; }")
             .arg(order_.side == OrderSide::Buy ? colors::POSITIVE() : colors::NEGATIVE(), colors::BG_BASE()));
@@ -161,8 +163,51 @@ void BroadcastOrderDialog::on_place_order() {
     }
 
     if (selected.isEmpty()) {
-        status_label_->setText("Select at least one account");
+        status_label_->setText(tr("Select at least one account"));
         status_label_->setStyleSheet(QString("color: %1;").arg(colors::NEGATIVE()));
+        return;
+    }
+
+    // Semi-Auto gate (headless): each account's mode is independent, so queue
+    // orders for Semi-Auto accounts (they surface in the status-bar popover) and
+    // broadcast only the Auto accounts immediately.
+    QStringList immediate;
+    int queued = 0;
+    int queue_failed = 0;
+    for (const QString& acct : selected) {
+        if (ActionCenter::instance().should_queue(acct, "placeorder")) {
+            const QString pid =
+                ActionCenter::instance().queue_order(acct, "placeorder", ActionCenter::serialize_unified_order(order_));
+            if (!pid.isEmpty())
+                ++queued;
+            else
+                ++queue_failed;
+        } else {
+            immediate.append(acct);
+        }
+    }
+    if (immediate.isEmpty()) {
+        // queued == 0: every queue attempt failed — nothing was sent or queued. Say so and
+        // leave the dialog live so the user can retry instead of believing the order is pending.
+        const bool none_queued = (queued == 0);
+        status_label_->setText(none_queued ? tr("Could not queue the order for approval — nothing was sent")
+                               : queue_failed > 0
+                                   ? tr("%1 order(s) queued for approval; %2 could not be queued")
+                                         .arg(queued)
+                                         .arg(queue_failed)
+                                   : tr("%1 order(s) queued for approval").arg(queued));
+        status_label_->setStyleSheet(QString("color: %1;").arg(none_queued ? colors::NEGATIVE() : colors::AMBER()));
+        if (none_queued)
+            return;
+        // Lock the dialog: a second PLACE would queue the same order AGAIN (each queued
+        // copy executes on approval). Switch the button to DONE like the broadcast path.
+        select_all_cb_->setEnabled(false);
+        for (auto* cb : account_cbs_)
+            cb->setEnabled(false);
+        results_shown_ = true;
+        place_btn_->setText(tr("DONE"));
+        disconnect(place_btn_, &QPushButton::clicked, this, &BroadcastOrderDialog::on_place_order);
+        connect(place_btn_, &QPushButton::clicked, this, &QDialog::accept);
         return;
     }
 
@@ -172,20 +217,32 @@ void BroadcastOrderDialog::on_place_order() {
     for (auto* cb : account_cbs_)
         cb->setEnabled(false);
 
-    status_label_->setText(QString("Placing order across %1 account(s)...").arg(selected.size()));
+    QString placing = queued > 0
+                          ? tr("Placing %1 order(s); %2 queued for approval...").arg(immediate.size()).arg(queued)
+                          : tr("Placing order across %1 account(s)...").arg(immediate.size());
+    if (queue_failed > 0)
+        placing += tr(" (%1 could not be queued)").arg(queue_failed);
+    status_label_->setText(placing);
     status_label_->setStyleSheet(QString("color: %1;").arg(colors::AMBER()));
 
     // Run broadcast on background thread (P1: never block UI)
     QPointer<BroadcastOrderDialog> self = this;
     auto order_copy = order_;
-    (void)QtConcurrent::run([self, selected, order_copy]() {
-        auto results = UnifiedTrading::instance().broadcast_order(selected, order_copy);
+    (void)QtConcurrent::run([self, immediate, order_copy, queued]() {
+        auto results = UnifiedTrading::instance().broadcast_order(immediate, order_copy);
+        if (!self)
+            return; // QMetaObject::invokeMethod asserts on a null receiver (dialog closed mid-flight)
         QMetaObject::invokeMethod(
             self,
-            [self, results]() {
+            [self, results, queued]() {
                 if (!self)
                     return;
                 self->show_results(results);
+                // show_results() summarises only the immediate placements; keep the
+                // Semi-Auto accounts' queued orders visible in the final status line.
+                if (queued > 0)
+                    self->status_label_->setText(
+                        self->status_label_->text() + self->tr("  ·  %1 queued for approval").arg(queued));
                 emit self->broadcast_completed(results);
             },
             Qt::QueuedConnection);
@@ -230,21 +287,47 @@ void BroadcastOrderDialog::show_results(const QVector<UnifiedTrading::BroadcastR
 
     // Update status
     if (fail_count == 0) {
-        status_label_->setText(QString("All %1 orders placed successfully").arg(success_count));
+        status_label_->setText(tr("All %1 orders placed successfully").arg(success_count));
         status_label_->setStyleSheet(QString("color: %1;").arg(colors::POSITIVE()));
     } else if (success_count == 0) {
-        status_label_->setText(QString("All %1 orders failed").arg(fail_count));
+        status_label_->setText(tr("All %1 orders failed").arg(fail_count));
         status_label_->setStyleSheet(QString("color: %1;").arg(colors::NEGATIVE()));
     } else {
-        status_label_->setText(QString("%1 succeeded, %2 failed").arg(success_count).arg(fail_count));
+        status_label_->setText(tr("%1 succeeded, %2 failed").arg(success_count).arg(fail_count));
         status_label_->setStyleSheet(QString("color: %1;").arg(colors::WARNING()));
     }
 
     // Re-enable close
-    place_btn_->setText("DONE");
+    results_shown_ = true;
+    place_btn_->setText(tr("DONE"));
     place_btn_->setEnabled(true);
     disconnect(place_btn_, &QPushButton::clicked, this, &BroadcastOrderDialog::on_place_order);
     connect(place_btn_, &QPushButton::clicked, this, &QDialog::accept);
+}
+
+void BroadcastOrderDialog::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QDialog::changeEvent(event);
+}
+
+void BroadcastOrderDialog::retranslateUi() {
+    setWindowTitle(tr("Broadcast Order"));
+    if (header_label_)
+        header_label_->setText(tr("BROADCAST ORDER"));
+    if (select_all_cb_)
+        select_all_cb_->setText(tr("Select All"));
+    if (cancel_btn_)
+        cancel_btn_->setText(tr("CANCEL"));
+    // place_btn_ becomes "DONE" once results are shown; before that it reflects
+    // the order side. Account rows + result lines are data compositions and are
+    // left as-is (re-rendered on the next broadcast).
+    if (place_btn_) {
+        if (results_shown_)
+            place_btn_->setText(tr("DONE"));
+        else
+            place_btn_->setText(order_.side == trading::OrderSide::Buy ? tr("PLACE BUY") : tr("PLACE SELL"));
+    }
 }
 
 } // namespace fincept::screens::equity

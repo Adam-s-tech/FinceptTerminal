@@ -13,6 +13,8 @@
 #include "screens/report_builder/DocumentCanvas.h"
 #include "screens/report_builder/PropertiesPanel.h"
 
+#include <QEvent>
+#include <QLabel>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QSplitter>
@@ -52,6 +54,10 @@ class ReportBuilderScreen : public QWidget, public IStatefulScreen {
     void show_theme_dialog();
     void show_metadata_dialog();
 
+    /// Ask before replacing the in-memory document (New / Open / Recent).
+    /// Returns true if the caller may proceed.
+    bool confirm_replace_document(const QString& title);
+
     // User-driven operations — all go through the service
     void add_component(const QString& type);
     void select_component(int index);
@@ -83,6 +89,12 @@ class ReportBuilderScreen : public QWidget, public IStatefulScreen {
     // Selection — tracked by stable id so it survives mutations from the
     // LLM that shift indices. -1 / 0 = nothing selected.
     int selected_id_ = 0;
+
+    // True while a change that ORIGINATED in the properties panel (a keystroke in one of
+    // its editors) is being pushed through the service. on_component_updated() then skips
+    // rebuilding that panel: rebuilding destroyed the very editor being typed in on every
+    // keystroke, so focus and the caret were lost after each character.
+    bool props_editing_ = false;
 
     // ── Side-panel collapse state ───────────────────────────────────────
     QPushButton* left_toggle_btn_ = nullptr;
@@ -119,6 +131,19 @@ class ReportBuilderScreen : public QWidget, public IStatefulScreen {
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* e) override;
+
+  private:
+    void retranslateUi();
+
+    // Top-toolbar text widgets (cached for retranslateUi)
+    QLabel* toolbar_title_ = nullptr;
+    QPushButton* undo_btn_ = nullptr;
+    QPushButton* redo_btn_ = nullptr;
+    QPushButton* open_btn_ = nullptr;
+    QPushButton* save_btn_ = nullptr;
+    QPushButton* pdf_btn_ = nullptr;
+    QPushButton* preview_btn_ = nullptr;
 };
 
 } // namespace fincept::screens

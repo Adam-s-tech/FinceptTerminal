@@ -3,6 +3,7 @@
 
 #include "core/events/EventBus.h"
 #include "core/session/ScreenStateManager.h"
+#include "core/symbol/SymbolContext.h"
 #include "screens/relationship_map/RelationshipGraphScene.h"
 #include "services/markets/MarketSearchService.h"
 #include "services/relationship_map/RelationshipMapService.h"
@@ -16,6 +17,8 @@
 #include <QShowEvent>
 #include <QVBoxLayout>
 
+#include <utility>
+
 namespace fincept::screens {
 
 using namespace fincept::ui;
@@ -28,6 +31,15 @@ static inline QString MF() {
 static constexpr int kSearchDebounceMs = 300;
 static constexpr int kMaxSearchResults = 10;
 
+/// Hand a ticker to Equity Research. nav.open_symbol navigates first (constructing the
+/// screen if it has never been opened) and then delivers the symbol; the old
+/// equity_research.load_symbol publish never navigated and was lost entirely when that
+/// screen didn't exist yet.
+static void relmap_open_in_equity_research(const QString& ticker) {
+    fincept::EventBus::instance().publish("nav.open_symbol",
+                                          {{"screen_id", QStringLiteral("equity_research")}, {"symbol", ticker}});
+}
+
 /// Convert exchange + symbol to yfinance-compatible ticker.
 static QString to_yfinance_symbol(const QString& symbol, const QString& exchange, const QString& country = {}) {
     if (exchange.toUpper() == "EURONEXT") {
@@ -38,11 +50,10 @@ static QString to_yfinance_symbol(const QString& symbol, const QString& exchange
         return symbol + (it != m.end() ? it.value() : ".PA");
     }
     static const QHash<QString, QString> s = {
-        {"NSE", ".NS"}, {"BSE", ".BO"}, {"HKEX", ".HK"}, {"TSE", ".T"},
-        {"KRX", ".KS"}, {"SGX", ".SI"}, {"ASX", ".AX"}, {"IDX", ".JK"},
-        {"XETR", ".DE"}, {"FWB", ".F"}, {"LSE", ".L"}, {"BME", ".MC"},
-        {"MIL", ".MI"}, {"SIX", ".SW"}, {"VIE", ".VI"}, {"TSX", ".TO"},
-        {"TSXV", ".V"}, {"BMFBOVESPA", ".SA"}, {"BMV", ".MX"}, {"BIST", ".IS"},
+        {"NSE", ".NS"}, {"BSE", ".BO"}, {"HKEX", ".HK"},       {"TSE", ".T"},   {"KRX", ".KS"},
+        {"SGX", ".SI"}, {"ASX", ".AX"}, {"IDX", ".JK"},        {"XETR", ".DE"}, {"FWB", ".F"},
+        {"LSE", ".L"},  {"BME", ".MC"}, {"MIL", ".MI"},        {"SIX", ".SW"},  {"VIE", ".VI"},
+        {"TSX", ".TO"}, {"TSXV", ".V"}, {"BMFBOVESPA", ".SA"}, {"BMV", ".MX"},  {"BIST", ".IS"},
     };
     auto it = s.find(exchange.toUpper());
     return it != s.end() ? symbol + it.value() : symbol;
@@ -62,11 +73,24 @@ RelationshipMapScreen::RelationshipMapScreen(QWidget* parent) : QWidget(parent) 
 void RelationshipMapScreen::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
     hide_dropdown();
+    // A linked symbol that arrived while hidden is analysed now (no Python spawn for
+    // a screen nobody is looking at).
+    if (!pending_group_symbol_.isEmpty())
+        load_group_symbol(std::exchange(pending_group_symbol_, QString()));
+    // Same for the ticker restored from the saved session.
+    if (restore_search_pending_) {
+        restore_search_pending_ = false;
+        if (!has_data_)
+            on_search();
+    }
 }
 
 void RelationshipMapScreen::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
     hide_dropdown();
+    // Don't let a pending typeahead debounce fire an asset search while hidden.
+    if (search_debounce_)
+        search_debounce_->stop();
 }
 
 bool RelationshipMapScreen::eventFilter(QObject* obj, QEvent* event) {
@@ -101,15 +125,17 @@ void RelationshipMapScreen::build_ui() {
     hhl->setContentsMargins(12, 0, 12, 0);
     hhl->setSpacing(10);
 
-    auto* title = new QLabel("CORPORATE INTELLIGENCE MAP");
-    title->setStyleSheet(QString("color: %1; font-size: 12px; font-weight: 700; "
-                                 "letter-spacing: 0.5px; %2")
-                             .arg(colors::AMBER(), MF()));
-    hhl->addWidget(title);
+    header_title_ = new QLabel(tr("CORPORATE INTELLIGENCE MAP"));
+    header_title_->setStyleSheet(QString("color: %1; font-size: 12px; font-weight: 700; "
+                                         "letter-spacing: 0.5px; %2")
+                                     .arg(colors::AMBER(), MF()));
+    hhl->addWidget(header_title_);
 
     // Search with autocomplete
     search_input_ = new QLineEdit;
-    search_input_->setPlaceholderText("Search assets (AAPL, Tesla, RELIANCE...)");
+    search_input_->setPlaceholderText(tr("Search assets (AAPL, Tesla, RELIANCE...)"));
+    search_input_->setAccessibleName(tr("Search assets"));
+    search_input_->setClearButtonEnabled(true);
     search_input_->setFixedWidth(320);
     search_input_->setStyleSheet(
         QString("QLineEdit { background: %1; color: %2; border: 1px solid %3; "
@@ -124,23 +150,39 @@ void RelationshipMapScreen::build_ui() {
 
     // Autocomplete dropdown — child widget, no window flags that steal focus
     search_dropdown_ = new QListWidget(this);
+    search_dropdown_->setAccessibleName(tr("Asset suggestions"));
     search_dropdown_->setFocusPolicy(Qt::NoFocus);
     search_dropdown_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     search_dropdown_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    // One stylesheet for the dropdown AND its per-row item widgets. Item
+    // widgets are descendants of the list, so object-name rules here replace
+    // four setStyleSheet() calls per row (i.e. ~40 full CSS reparses on every
+    // debounced keystroke of the search box).
     search_dropdown_->setStyleSheet(
         QString("QListWidget { background: %1; border: 1px solid %2; font-size: 11px; %3 }"
                 "QListWidget::item { padding: 4px 8px; border-bottom: 1px solid %4; }"
                 "QListWidget::item:selected { background: %5; }"
-                "QListWidget::item:hover { background: %5; }")
-            .arg(colors::BG_SURFACE(), colors::AMBER_DIM(), MF(), colors::BORDER_DIM(), colors::BG_RAISED()));
+                "QListWidget::item:hover { background: %5; }"
+                "QWidget#relmapRow { background: transparent; }"
+                "QLabel { background: transparent; %3 }"
+                "QLabel#relmapSym { color: %6; font-size: 12px; font-weight: 700; }"
+                "QLabel#relmapName { color: %7; font-size: 11px; }"
+                "QLabel#relmapExch { color: %8; font-size: 9px; }"
+                "QLabel#relmapType { color: %6; font-size: 8px; font-weight: 700;"
+                "  background: %5; padding: 1px 4px; border-radius: 2px; }"
+                "QLabel#relmapEmpty { color: %8; font-size: 11px; }")
+            .arg(colors::BG_SURFACE(), colors::AMBER_DIM(), MF(), colors::BORDER_DIM(), colors::BG_RAISED(),
+                 colors::AMBER(), colors::TEXT_SECONDARY(), colors::TEXT_TERTIARY()));
     search_dropdown_->setFixedWidth(420);
     search_dropdown_->setMaximumHeight(320);
     search_dropdown_->hide();
     search_dropdown_->raise();
     auto select_dropdown_item = [this](QListWidgetItem* item) {
-        if (!item) return;
+        if (!item)
+            return;
         QString symbol = item->data(Qt::UserRole).toString();
-        if (symbol.isEmpty()) return;
+        if (symbol.isEmpty())
+            return;
         search_input_focused_ = false;
         search_input_->blockSignals(true);
         search_input_->setText(symbol);
@@ -148,8 +190,8 @@ void RelationshipMapScreen::build_ui() {
         hide_dropdown();
         on_search();
     };
-    connect(search_dropdown_, &QListWidget::itemClicked,    this, select_dropdown_item);
-    connect(search_dropdown_, &QListWidget::itemActivated,  this, select_dropdown_item);
+    connect(search_dropdown_, &QListWidget::itemClicked, this, select_dropdown_item);
+    connect(search_dropdown_, &QListWidget::itemActivated, this, select_dropdown_item);
 
     // Debounce timer
     search_debounce_ = new QTimer(this);
@@ -159,52 +201,56 @@ void RelationshipMapScreen::build_ui() {
             fire_asset_search(pending_query_);
     });
 
-    auto* search_btn = new QPushButton("ANALYZE");
-    search_btn->setCursor(Qt::PointingHandCursor);
-    search_btn->setFixedHeight(28);
-    search_btn->setStyleSheet(
+    search_btn_ = new QPushButton(tr("ANALYZE"));
+    search_btn_->setCursor(Qt::PointingHandCursor);
+    search_btn_->setFixedHeight(28);
+    search_btn_->setStyleSheet(
         QString("QPushButton { background: rgba(217,119,6,0.15); color: %1; border: 1px solid %3; "
                 "padding: 0 14px; font-size: 11px; font-weight: 700; %2 }"
                 "QPushButton:hover { background: %1; color: %4; }")
             .arg(colors::AMBER(), MF(), colors::AMBER_DIM(), colors::BG_BASE()));
-    connect(search_btn, &QPushButton::clicked, this, &RelationshipMapScreen::on_search);
-    hhl->addWidget(search_btn);
+    connect(search_btn_, &QPushButton::clicked, this, &RelationshipMapScreen::on_search);
+    hhl->addWidget(search_btn_);
 
     hhl->addStretch();
 
     // Fit / reset zoom button
-    auto* fit_btn = new QPushButton("FIT");
-    fit_btn->setCursor(Qt::PointingHandCursor);
-    fit_btn->setFixedHeight(28);
-    fit_btn->setToolTip("Fit graph to view (or press Home)");
-    fit_btn->setStyleSheet(
-        QString("QPushButton { background: transparent; color: %1; border: 1px solid %2; "
-                "padding: 0 10px; font-size: 10px; %3 }"
-                "QPushButton:hover { color: %4; border-color: %4; }")
-            .arg(colors::TEXT_SECONDARY(), colors::BORDER_DIM(), MF(), colors::TEXT_PRIMARY()));
-    connect(fit_btn, &QPushButton::clicked, this, [this]() {
-        if (view_) view_->fit_to_content();
+    fit_btn_ = new QPushButton(tr("FIT"));
+    fit_btn_->setCursor(Qt::PointingHandCursor);
+    fit_btn_->setFixedHeight(28);
+    fit_btn_->setToolTip(tr("Fit graph to view (or press Home)"));
+    fit_btn_->setStyleSheet(QString("QPushButton { background: transparent; color: %1; border: 1px solid %2; "
+                                    "padding: 0 10px; font-size: 10px; %3 }"
+                                    "QPushButton:hover { color: %4; border-color: %4; }")
+                                .arg(colors::TEXT_SECONDARY(), colors::BORDER_DIM(), MF(), colors::TEXT_PRIMARY()));
+    connect(fit_btn_, &QPushButton::clicked, this, [this]() {
+        if (view_)
+            view_->fit_to_content();
     });
-    hhl->addWidget(fit_btn);
+    hhl->addWidget(fit_btn_);
 
-    // Layout selector
+    // Layout selector — display labels are translatable; the enum value is
+    // carried in itemData so logic is language-independent.
     layout_combo_ = new QComboBox;
-    layout_combo_->addItem("LAYERED", (int)LayoutMode::Layered);
-    layout_combo_->addItem("RADIAL", (int)LayoutMode::Radial);
-    layout_combo_->addItem("FORCE", (int)LayoutMode::Force);
+    // LAYERED (columns) and RADIAL are implemented. A FORCE entry used to sit here but
+    // never changed anything, so it is gone (a saved Force mode restores to LAYERED).
+    layout_combo_->addItem(tr("LAYERED"), (int)LayoutMode::Layered);
+    layout_combo_->addItem(tr("RADIAL"), (int)LayoutMode::Radial);
     layout_combo_->setStyleSheet(QString("QComboBox { background: %1; color: %2; border: 1px solid %3; "
                                          "padding: 3px 8px; font-size: 10px; %4 }")
                                      .arg(colors::BG_SURFACE(), colors::TEXT_SECONDARY(), colors::BORDER_DIM(), MF()));
     connect(layout_combo_, &QComboBox::currentIndexChanged, this, [this](int idx) {
         layout_mode_ = static_cast<LayoutMode>(layout_combo_->itemData(idx).toInt());
-        if (has_data_)
+        if (has_data_) {
             rebuild_graph();
+            view_->fit_to_content(); // a different arrangement has different extents
+        }
         ScreenStateManager::instance().notify_changed(this);
     });
     hhl->addWidget(layout_combo_);
 
     // Filter toggle
-    filter_btn_ = new QPushButton("FILTERS");
+    filter_btn_ = new QPushButton(tr("FILTERS"));
     filter_btn_->setCursor(Qt::PointingHandCursor);
     filter_btn_->setCheckable(true);
     filter_btn_->setFixedHeight(28);
@@ -227,7 +273,7 @@ void RelationshipMapScreen::build_ui() {
     auto* phl = new QHBoxLayout(prog_row);
     phl->setContentsMargins(12, 2, 12, 2);
 
-    progress_label_ = new QLabel("Ready");
+    progress_label_ = new QLabel(tr("Ready"));
     progress_label_->setStyleSheet(QString("color: %1; font-size: 9px; %2").arg(colors::TEXT_DIM(), MF()));
     phl->addWidget(progress_label_);
 
@@ -281,7 +327,7 @@ void RelationshipMapScreen::build_ui() {
     auto* shl = new QHBoxLayout(status);
     shl->setContentsMargins(12, 0, 12, 0);
 
-    status_nodes_ = new QLabel("READY");
+    status_nodes_ = new QLabel(tr("READY"));
     status_nodes_->setStyleSheet(QString("color: %1; font-size: 9px; %2").arg(colors::TEXT_DIM(), MF()));
     shl->addWidget(status_nodes_);
 
@@ -293,18 +339,29 @@ void RelationshipMapScreen::build_ui() {
 
     shl->addStretch();
 
-    status_brand_ = new QLabel("FINCEPT TERMINAL");
+    status_brand_ = new QLabel(tr("FINCEPT TERMINAL"));
     status_brand_->setStyleSheet(QString("color: %1; font-size: 9px; font-weight: 700; %2").arg(colors::AMBER(), MF()));
     shl->addWidget(status_brand_);
 
     root->addWidget(status);
 
-    // Center card click → navigate to equity research
-    connect(scene_, &relmap::RelationshipGraphScene::center_card_clicked,
-            this, [](const QString& ticker) {
-                fincept::EventBus::instance().publish("equity_research.load_symbol",
-                    {{"symbol", ticker}, {"type", "equity"}});
-            });
+    // Double-click on the centre company or a peer → open it in Equity Research. (A single
+    // click only inspects: it opens the detail panel via node_activated below.)
+    connect(scene_, &relmap::RelationshipGraphScene::symbol_open_requested, this,
+            [](const QString& ticker) { relmap_open_in_equity_research(ticker); });
+    // Any node click opens the right-side detail panel (previously the slot was
+    // never connected, so the panel was unreachable).
+    connect(scene_, &relmap::RelationshipGraphScene::node_activated, this, &RelationshipMapScreen::on_node_selected);
+    // Empty-canvas click dismisses the detail panel (deselect).
+    connect(scene_, &relmap::RelationshipGraphScene::background_clicked, this, [this]() {
+        if (detail_panel_)
+            detail_panel_->hide();
+    });
+    // Live zoom indicator surfaced on the FIT button tooltip.
+    connect(view_, &relmap::RelationshipGraphView::zoom_changed, this, [this](double f) {
+        if (fit_btn_)
+            fit_btn_->setToolTip(tr("Zoom %1% — click to fit (Home)").arg(qRound(f * 100.0)));
+    });
 }
 
 // ── Filter Panel ─────────────────────────────────────────────────────────────
@@ -318,11 +375,11 @@ QWidget* RelationshipMapScreen::build_filter_panel() {
     vl->setContentsMargins(12, 12, 12, 12);
     vl->setSpacing(8);
 
-    auto* title = new QLabel("FILTERS");
-    title->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: 700; "
-                                 "letter-spacing: 0.5px; %2")
-                             .arg(colors::AMBER(), MF()));
-    vl->addWidget(title);
+    filter_title_ = new QLabel(tr("FILTERS"));
+    filter_title_->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: 700; "
+                                         "letter-spacing: 0.5px; %2")
+                                     .arg(colors::AMBER(), MF()));
+    vl->addWidget(filter_title_);
 
     auto make_check = [&](const QString& label, bool& state, NodeCategory cat) {
         auto* cb = new QCheckBox(label);
@@ -339,17 +396,20 @@ QWidget* RelationshipMapScreen::build_filter_panel() {
                 rebuild_graph();
         });
         vl->addWidget(cb);
+        filter_checks_.append(cb); // cached for retranslateUi (declared order)
     };
 
-    make_check("Peers",        filters_.show_peers,         NodeCategory::Peer);
-    make_check("Institutional",filters_.show_institutional, NodeCategory::Institutional);
-    make_check("Mutual Funds", filters_.show_institutional, NodeCategory::MutualFund);
-    make_check("Insiders",     filters_.show_insiders,      NodeCategory::Insider);
-    make_check("Officers",     filters_.show_officers,      NodeCategory::Officer);
-    make_check("Analysts",     filters_.show_analysts,      NodeCategory::Analyst);
-    make_check("Metrics",      filters_.show_metrics,       NodeCategory::Metrics);
-    make_check("Events",       filters_.show_events,        NodeCategory::Event);
-    make_check("Supply Chain", filters_.show_supply_chain,  NodeCategory::SupplyChain);
+    make_check(tr("Peers"), filters_.show_peers, NodeCategory::Peer);
+    make_check(tr("Institutional"), filters_.show_institutional, NodeCategory::Institutional);
+    // Was bound to show_institutional — the same flag as the row above, so the
+    // two checkboxes fought each other and neither reflected the graph.
+    make_check(tr("Mutual Funds"), filters_.show_mutual_funds, NodeCategory::MutualFund);
+    make_check(tr("Insiders"), filters_.show_insiders, NodeCategory::Insider);
+    make_check(tr("Officers"), filters_.show_officers, NodeCategory::Officer);
+    make_check(tr("Analysts"), filters_.show_analysts, NodeCategory::Analyst);
+    make_check(tr("Metrics"), filters_.show_metrics, NodeCategory::Metrics);
+    make_check(tr("Events"), filters_.show_events, NodeCategory::Event);
+    make_check(tr("Supply Chain"), filters_.show_supply_chain, NodeCategory::SupplyChain);
 
     vl->addStretch();
     return panel;
@@ -367,7 +427,7 @@ QWidget* RelationshipMapScreen::build_detail_panel() {
     vl->setSpacing(8);
 
     auto* header = new QHBoxLayout;
-    detail_title_ = new QLabel("SELECT A NODE");
+    detail_title_ = new QLabel(tr("SELECT A NODE"));
     detail_title_->setStyleSheet(
         QString("color: %1; font-size: 12px; font-weight: 700; %2").arg(colors::TEXT_PRIMARY(), MF()));
     header->addWidget(detail_title_);
@@ -419,11 +479,11 @@ QWidget* RelationshipMapScreen::build_legend() {
     vl->setContentsMargins(8, 6, 8, 6);
     vl->setSpacing(3);
 
-    auto* title = new QLabel("LEGEND");
-    title->setStyleSheet(QString("color: %1; font-size: 8px; font-weight: 700; "
-                                 "letter-spacing: 0.5px; %2")
-                             .arg(colors::TEXT_DIM(), MF()));
-    vl->addWidget(title);
+    legend_title_ = new QLabel(tr("LEGEND"));
+    legend_title_->setStyleSheet(QString("color: %1; font-size: 8px; font-weight: 700; "
+                                         "letter-spacing: 0.5px; %2")
+                                     .arg(colors::TEXT_DIM(), MF()));
+    vl->addWidget(legend_title_);
 
     auto add_entry = [&](NodeCategory cat) {
         auto* row = new QWidget(this);
@@ -442,6 +502,7 @@ QWidget* RelationshipMapScreen::build_legend() {
         hl->addWidget(lbl);
         hl->addStretch();
         vl->addWidget(row);
+        legend_entries_.append({lbl, cat}); // cached for retranslateUi
     };
 
     add_entry(NodeCategory::Company);
@@ -468,7 +529,8 @@ void RelationshipMapScreen::on_search() {
     // If the autocomplete dropdown is open, prefer the selected/first result.
     if (!search_dropdown_->isHidden() && search_dropdown_->count() > 0) {
         QListWidgetItem* chosen = search_dropdown_->currentItem();
-        if (!chosen) chosen = search_dropdown_->item(0);
+        if (!chosen)
+            chosen = search_dropdown_->item(0);
         if (chosen) {
             QString symbol = chosen->data(Qt::UserRole).toString();
             if (!symbol.isEmpty()) {
@@ -488,6 +550,7 @@ void RelationshipMapScreen::on_search() {
     search_input_->blockSignals(true);
     search_input_->setText(ticker);
     search_input_->blockSignals(false);
+    requested_ticker_ = ticker;
     progress_bar_->show();
     progress_bar_->setValue(0);
     detail_panel_->hide();
@@ -529,8 +592,10 @@ void RelationshipMapScreen::fire_asset_search(const QString& query) {
                 [this](const QString& request_id, const QString& q,
                        const QList<fincept::services::MarketSearchService::Item>& items) {
                     const QString my_rid = QString::number(reinterpret_cast<quintptr>(this), 16);
-                    if (request_id != my_rid) return;
-                    if (pending_query_ != q) return;
+                    if (request_id != my_rid)
+                        return;
+                    if (pending_query_ != q)
+                        return;
                     on_asset_results(items);
                 });
         search_connected_ = true;
@@ -538,20 +603,18 @@ void RelationshipMapScreen::fire_asset_search(const QString& query) {
     svc.search(query, /*type=*/QStringLiteral("stock"), kMaxSearchResults, rid);
 }
 
-void RelationshipMapScreen::on_asset_results(
-    const QList<fincept::services::MarketSearchService::Item>& results) {
+void RelationshipMapScreen::on_asset_results(const QList<fincept::services::MarketSearchService::Item>& results) {
     search_dropdown_->clear();
 
     if (results.isEmpty()) {
         auto* item = new QListWidgetItem(search_dropdown_);
         item->setFlags(item->flags() & ~Qt::ItemIsSelectable);
         auto* row = new QWidget;
-        row->setStyleSheet("background:transparent;");
+        row->setObjectName(QStringLiteral("relmapRow"));
         auto* rl = new QHBoxLayout(row);
         rl->setContentsMargins(8, 4, 8, 4);
-        auto* lbl = new QLabel("No results found");
-        lbl->setStyleSheet(QString("color:%1;font-size:11px;%2;background:transparent;")
-                               .arg(ui::colors::TEXT_TERTIARY.get(), MF()));
+        auto* lbl = new QLabel(tr("No results found"));
+        lbl->setObjectName(QStringLiteral("relmapEmpty"));
         rl->addWidget(lbl);
         item->setSizeHint(QSize(0, 28));
         search_dropdown_->setItemWidget(item, row);
@@ -560,51 +623,54 @@ void RelationshipMapScreen::on_asset_results(
     }
 
     for (const auto& entry : results) {
-        const QString& symbol   = entry.symbol;
-        const QString& name     = entry.name;
+        const QString& symbol = entry.symbol;
+        const QString& name = entry.name;
         const QString& exchange = entry.exchange;
-        const QString& country  = entry.country;
-        const QString  type     = entry.type.isEmpty() ? QStringLiteral("stock") : entry.type;
+        const QString& country = entry.country;
+        const QString type = entry.type.isEmpty() ? QStringLiteral("stock") : entry.type;
 
-        if (symbol.isEmpty()) continue;
+        if (symbol.isEmpty())
+            continue;
 
         QString yf_symbol = to_yfinance_symbol(symbol, exchange, country);
 
         auto* item = new QListWidgetItem(search_dropdown_);
         item->setData(Qt::UserRole, yf_symbol);
 
+        // Styling comes from the dropdown-level stylesheet via object names —
+        // no per-label setStyleSheet in this loop.
         auto* row = new QWidget;
-        row->setStyleSheet("background:transparent;");
+        row->setObjectName(QStringLiteral("relmapRow"));
         auto* hl = new QHBoxLayout(row);
         hl->setContentsMargins(8, 3, 8, 3);
         hl->setSpacing(8);
 
         auto* sym_lbl = new QLabel(yf_symbol);
-        sym_lbl->setStyleSheet(QString("color:%1;font-size:12px;font-weight:700;%2;background:transparent;")
-                                   .arg(ui::colors::AMBER.get(), MF()));
+        sym_lbl->setObjectName(QStringLiteral("relmapSym"));
         sym_lbl->setFixedWidth(100);
         hl->addWidget(sym_lbl);
 
         auto* name_lbl = new QLabel(name);
-        name_lbl->setStyleSheet(QString("color:%1;font-size:11px;%2;background:transparent;")
-                                    .arg(ui::colors::TEXT_SECONDARY.get(), MF()));
+        name_lbl->setObjectName(QStringLiteral("relmapName"));
+        name_lbl->setTextFormat(Qt::PlainText); // provider-supplied text
         name_lbl->setMaximumWidth(180);
         hl->addWidget(name_lbl, 1);
 
         if (!exchange.isEmpty()) {
             auto* exch_lbl = new QLabel(exchange);
-            exch_lbl->setStyleSheet(QString("color:%1;font-size:9px;%2;background:transparent;")
-                                        .arg(ui::colors::TEXT_TERTIARY.get(), MF()));
+            exch_lbl->setObjectName(QStringLiteral("relmapExch"));
             hl->addWidget(exch_lbl);
         }
 
         auto* type_lbl = new QLabel(type.toUpper());
-        type_lbl->setStyleSheet(QString("color:%1;font-size:8px;font-weight:700;%2;"
-                                        "background:%3;padding:1px 4px;border-radius:2px;")
-                                    .arg(ui::colors::AMBER.get(), MF(), ui::colors::BG_RAISED.get()));
+        type_lbl->setObjectName(QStringLiteral("relmapType"));
         hl->addWidget(type_lbl);
 
         item->setSizeHint(QSize(0, 30));
+        // Accessible text only — the row's visuals come from the item widget,
+        // so this must not be setText() (that would paint underneath it).
+        item->setData(Qt::AccessibleTextRole, QStringLiteral("%1 — %2").arg(yf_symbol, name));
+        item->setToolTip(QStringLiteral("%1 — %2").arg(yf_symbol, name));
         search_dropdown_->setItemWidget(item, row);
     }
 
@@ -614,7 +680,10 @@ void RelationshipMapScreen::on_asset_results(
 }
 
 void RelationshipMapScreen::show_dropdown() {
-    if (search_dropdown_->count() == 0) { hide_dropdown(); return; }
+    if (search_dropdown_->count() == 0) {
+        hide_dropdown();
+        return;
+    }
     // Position below the search input, as a child of this widget
     QPoint pos = search_input_->mapTo(this, QPoint(0, search_input_->height()));
     search_dropdown_->move(pos);
@@ -633,6 +702,9 @@ void RelationshipMapScreen::hide_dropdown() {
 void RelationshipMapScreen::on_progress(int percent, const QString& message) {
     progress_bar_->setValue(percent);
     progress_label_->setText(message);
+    // on_fetch_failed() paints this label red; without resetting it here every
+    // subsequent successful fetch still reported progress in error red.
+    progress_label_->setStyleSheet(QString("color: %1; font-size: 9px; %2").arg(colors::TEXT_DIM(), MF()));
 
     if (percent >= 100) {
         progress_bar_->hide();
@@ -640,11 +712,21 @@ void RelationshipMapScreen::on_progress(int percent, const QString& message) {
 }
 
 void RelationshipMapScreen::on_data_ready(const RelationshipData& payload) {
+    // data_ready is a broadcast from the shared service: a refresh the hub (or anything
+    // else) started for another symbol must not replace the graph the user asked for.
+    if (!requested_ticker_.isEmpty() && payload.company.ticker.compare(requested_ticker_, Qt::CaseInsensitive) != 0)
+        return;
     current_data_ = payload;
     has_data_ = true;
     loaded_ticker_ = payload.company.ticker;
+    // Echo a user-driven analysis to the linked group; one that the group itself
+    // asked for must not be published back.
+    const bool from_group = group_driven_ticker_ == loaded_ticker_.toUpper();
+    group_driven_ticker_.clear();
+    if (!from_group && link_group_ != SymbolGroup::None)
+        SymbolContext::instance().set_group_symbol(link_group_, SymbolRef::equity(loaded_ticker_), this);
     progress_bar_->hide();
-    progress_label_->setText("Complete");
+    progress_label_->setText(tr("Complete"));
     legend_widget_->show();
     rebuild_graph();
     update_status_bar();
@@ -661,8 +743,19 @@ void RelationshipMapScreen::on_data_ready(const RelationshipData& payload) {
 
 void RelationshipMapScreen::on_fetch_failed(const QString& error) {
     progress_bar_->hide();
-    progress_label_->setText("Error: " + error);
+    progress_label_->setText(tr("Error: %1 — press ANALYZE to retry").arg(error.simplified().left(90)));
+    progress_label_->setToolTip(error);
     progress_label_->setStyleSheet(QString("color: %1; font-size: 9px; %2").arg(colors::NEGATIVE(), MF()));
+    // Leave the previous graph up rather than a blank canvas. on_search() cleared
+    // has_data_ while loading; if a graph is still on screen, make it live again so its
+    // filters / layout / node actions keep working instead of going dead.
+    if (!has_data_ && !current_data_.company.ticker.isEmpty() && !scene_->items().isEmpty()) {
+        has_data_ = true;
+        legend_widget_->show();
+        update_status_bar();
+    }
+    if (status_nodes_ && !has_data_)
+        status_nodes_->setText(tr("NO DATA"));
 }
 
 void RelationshipMapScreen::rebuild_graph() {
@@ -670,45 +763,22 @@ void RelationshipMapScreen::rebuild_graph() {
     update_status_bar();
 }
 
-void RelationshipMapScreen::on_node_selected() {
-    auto items = scene_->selectedItems();
-    if (items.isEmpty()) {
+void RelationshipMapScreen::on_node_selected(const QString& label, const QString& sublabel,
+                                             const QString& category_text) {
+    // Driven by RelationshipGraphScene::node_activated (any node click). The
+    // node carries only label/sub/category; rich properties are looked up from
+    // current_data_ by matching the label against the company / peer tickers.
+    if (label.isEmpty()) {
         detail_panel_->hide();
         return;
     }
 
-    // Find the GraphNodeItem
-    for (auto* item : items) {
-        // Dynamic cast to our custom type
-        auto* rect = dynamic_cast<QGraphicsRectItem*>(item);
-        if (!rect)
-            continue;
-
-        // Access node data through scene items — we stored it in the item
-        // Since GraphNodeItem is defined in the .cpp, we use a different approach:
-        // Get the data from item's tooltip or child text items
-        auto children = rect->childItems();
-        QString label, category_text, sublabel;
-        QMap<QString, QString> props;
-
-        if (children.size() >= 2) {
-            auto* badge_item = dynamic_cast<QGraphicsTextItem*>(children[0]);
-            auto* label_item = dynamic_cast<QGraphicsTextItem*>(children[1]);
-            if (badge_item)
-                category_text = badge_item->toPlainText();
-            if (label_item)
-                label = label_item->toPlainText();
-            if (children.size() >= 3) {
-                auto* sub_item = dynamic_cast<QGraphicsTextItem*>(children[2]);
-                if (sub_item)
-                    sublabel = sub_item->toPlainText();
-            }
-        }
-
-        detail_title_->setText(label.isEmpty() ? "NODE" : label);
+    {
+        detail_title_->setText(label);
         detail_category_->setText(category_text);
         detail_category_->setStyleSheet(
-            QString("color: %1; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; %2").arg(colors::AMBER(), MF()));
+            QString("color: %1; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; %2")
+                .arg(colors::AMBER(), MF()));
 
         // Clear and repopulate properties
         auto* layout = detail_props_container_->layout();
@@ -737,57 +807,181 @@ void RelationshipMapScreen::on_node_selected() {
             // Try to match with company
             if (label == current_data_.company.ticker) {
                 auto add_prop = [&](const QString& key, const QString& val) {
-                    auto* row = new QLabel(QString("%1:  %2").arg(key, val));
+                    auto* row = new QLabel(tr("%1:  %2").arg(key, val));
                     row->setStyleSheet(QString("color: %1; font-size: 10px; %2").arg(colors::TEXT_SECONDARY(), MF()));
                     layout->addWidget(row);
                 };
-                add_prop("Sector", current_data_.company.sector);
-                add_prop("Industry", current_data_.company.industry);
-                add_prop("Mkt Cap", QString("$%1B").arg(current_data_.company.market_cap / 1e9, 0, 'f', 1));
-                add_prop("Price", QString("$%1").arg(current_data_.company.current_price, 0, 'f', 2));
-                add_prop("P/E", QString::number(current_data_.company.pe_ratio, 'f', 1));
-                add_prop("ROE", QString("%1%").arg(current_data_.company.roe * 100, 0, 'f', 1));
-                add_prop("Growth", QString("%1%").arg(current_data_.company.revenue_growth * 100, 0, 'f', 1));
-                add_prop("Margins", QString("%1%").arg(current_data_.company.profit_margins * 100, 0, 'f', 1));
-                add_prop("Employees", QString::number(current_data_.company.employees));
-                add_prop("Signal", current_data_.valuation.action);
+                add_prop(tr("Sector"), current_data_.company.sector);
+                add_prop(tr("Industry"), current_data_.company.industry);
+                add_prop(tr("Mkt Cap"), QString("$%1B").arg(current_data_.company.market_cap / 1e9, 0, 'f', 1));
+                add_prop(tr("Price"), QString("$%1").arg(current_data_.company.current_price, 0, 'f', 2));
+                add_prop(tr("P/E"), QString::number(current_data_.company.pe_ratio, 'f', 1));
+                add_prop(tr("ROE"), QString("%1%").arg(current_data_.company.roe * 100, 0, 'f', 1));
+                add_prop(tr("Growth"), QString("%1%").arg(current_data_.company.revenue_growth * 100, 0, 'f', 1));
+                add_prop(tr("Margins"), QString("%1%").arg(current_data_.company.profit_margins * 100, 0, 'f', 1));
+                add_prop(tr("Employees"), QString::number(current_data_.company.employees));
+                add_prop(tr("Signal"), current_data_.valuation.action);
             }
 
             // Try to match peer
             for (const auto& p : current_data_.peers) {
                 if (p.ticker == label) {
                     auto add_prop = [&](const QString& key, const QString& val) {
-                        auto* row = new QLabel(QString("%1:  %2").arg(key, val));
-                        row->setStyleSheet(QString("color: %1; font-size: 10px; %2").arg(colors::TEXT_SECONDARY(), MF()));
+                        auto* row = new QLabel(tr("%1:  %2").arg(key, val));
+                        row->setStyleSheet(
+                            QString("color: %1; font-size: 10px; %2").arg(colors::TEXT_SECONDARY(), MF()));
                         layout->addWidget(row);
                     };
-                    add_prop("Mkt Cap", QString("$%1B").arg(p.market_cap / 1e9, 0, 'f', 1));
-                    add_prop("Price", QString("$%1").arg(p.current_price, 0, 'f', 2));
-                    add_prop("P/E", QString::number(p.pe_ratio, 'f', 1));
-                    add_prop("ROE", QString("%1%").arg(p.roe * 100, 0, 'f', 1));
-                    add_prop("Growth", QString("%1%").arg(p.revenue_growth * 100, 0, 'f', 1));
+                    add_prop(tr("Mkt Cap"), QString("$%1B").arg(p.market_cap / 1e9, 0, 'f', 1));
+                    add_prop(tr("Price"), QString("$%1").arg(p.current_price, 0, 'f', 2));
+                    add_prop(tr("P/E"), QString::number(p.pe_ratio, 'f', 1));
+                    add_prop(tr("ROE"), QString("%1%").arg(p.roe * 100, 0, 'f', 1));
+                    add_prop(tr("Growth"), QString("%1%").arg(p.revenue_growth * 100, 0, 'f', 1));
                     break;
                 }
+            }
+
+            // Tradable nodes (the company and its peers) get actions: open the ticker in
+            // Equity Research, or (for a peer) re-centre this map on it.
+            const bool is_company = label == current_data_.company.ticker;
+            bool is_peer = false;
+            for (const auto& p : std::as_const(current_data_.peers))
+                if (p.ticker == label)
+                    is_peer = true;
+            if (is_company || is_peer) {
+                auto make_action = [&](const QString& text) {
+                    auto* btn = new QPushButton(text);
+                    btn->setCursor(Qt::PointingHandCursor);
+                    btn->setStyleSheet(
+                        QString("QPushButton { background: rgba(217,119,6,0.15); color: %1; border: 1px solid %3; "
+                                "padding: 5px 8px; font-size: 10px; font-weight: 700; %2 }"
+                                "QPushButton:hover { background: %1; color: %4; }")
+                            .arg(colors::AMBER(), MF(), colors::AMBER_DIM(), colors::BG_BASE()));
+                    layout->addWidget(btn);
+                    return btn;
+                };
+                connect(make_action(tr("OPEN IN EQUITY RESEARCH")), &QPushButton::clicked, this,
+                        [label]() { relmap_open_in_equity_research(label); });
+                if (is_peer)
+                    connect(make_action(tr("RE-CENTER MAP ON %1").arg(label)), &QPushButton::clicked, this,
+                            [this, label]() {
+                                search_input_->blockSignals(true);
+                                search_input_->setText(label);
+                                search_input_->blockSignals(false);
+                                on_search();
+                            });
             }
         }
 
         detail_panel_->show();
-        break;
     }
 }
 
 void RelationshipMapScreen::update_status_bar() {
     if (!has_data_) {
-        status_nodes_->setText("READY");
+        status_nodes_->setText(tr("READY"));
         status_quality_->setText("");
         return;
     }
     int node_count = scene_->items().size(); // approximate
-    status_nodes_->setText(QString("%1 ITEMS | %2 PEERS | %3 HOLDERS")
+    status_nodes_->setText(tr("%1 ITEMS | %2 PEERS | %3 HOLDERS")
                                .arg(node_count)
                                .arg(current_data_.peers.size())
                                .arg(current_data_.institutional_holders.size()));
-    status_quality_->setText(QString("QUALITY: %1%").arg(current_data_.data_quality));
+    status_quality_->setText(tr("QUALITY: %1%").arg(current_data_.data_quality));
+}
+
+// ── Localization ──────────────────────────────────────────────────────────────
+
+void RelationshipMapScreen::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void RelationshipMapScreen::retranslateUi() {
+    if (header_title_)
+        header_title_->setText(tr("CORPORATE INTELLIGENCE MAP"));
+    if (search_input_)
+        search_input_->setPlaceholderText(tr("Search assets (AAPL, Tesla, RELIANCE...)"));
+    if (search_btn_)
+        search_btn_->setText(tr("ANALYZE"));
+    if (fit_btn_) {
+        fit_btn_->setText(tr("FIT"));
+        fit_btn_->setToolTip(tr("Fit graph to view (or press Home)"));
+    }
+    if (filter_btn_)
+        filter_btn_->setText(tr("FILTERS"));
+
+    // Layout combo display strings (enum carried in itemData, preserve selection).
+    if (layout_combo_) {
+        const QSignalBlocker block(layout_combo_);
+        const int idx = layout_combo_->currentIndex();
+        const QStringList labels = {tr("LAYERED"), tr("RADIAL")};
+        for (int i = 0; i < layout_combo_->count() && i < labels.size(); ++i)
+            layout_combo_->setItemText(i, labels[i]);
+        layout_combo_->setCurrentIndex(idx);
+    }
+
+    // Filter panel + legend titles + checkbox captions (declared order).
+    if (filter_title_)
+        filter_title_->setText(tr("FILTERS"));
+    if (legend_title_)
+        legend_title_->setText(tr("LEGEND"));
+    const QStringList check_labels = {tr("Peers"),    tr("Institutional"), tr("Mutual Funds"),
+                                      tr("Insiders"), tr("Officers"),      tr("Analysts"),
+                                      tr("Metrics"),  tr("Events"),        tr("Supply Chain")};
+    for (int i = 0; i < filter_checks_.size() && i < check_labels.size(); ++i)
+        if (filter_checks_[i])
+            filter_checks_[i]->setText(check_labels[i]);
+
+    // Detail panel idle title (per-node content refreshes on selection).
+    if (detail_title_ && !detail_panel_->isVisible())
+        detail_title_->setText(tr("SELECT A NODE"));
+
+    // Re-render the graph + status so scene cluster labels and status text pick
+    // up the new language. progress_label_ reflects the last operation's state.
+    if (has_data_) {
+        rebuild_graph();
+        update_status_bar();
+    } else if (status_nodes_) {
+        status_nodes_->setText(tr("READY"));
+    }
+    if (status_brand_)
+        status_brand_->setText(tr("FINCEPT TERMINAL"));
+    // Legend entry captions come from category_label() — re-apply directly.
+    for (const auto& entry : legend_entries_)
+        if (entry.first)
+            entry.first->setText(relmap::category_label(entry.second));
+}
+
+// ── IGroupLinked ──────────────────────────────────────────────────────────────
+
+void RelationshipMapScreen::on_group_symbol_changed(const SymbolRef& ref) {
+    const QString symbol = ref.symbol.trimmed().toUpper();
+    if (symbol.isEmpty())
+        return;
+    if (!isVisible()) {
+        pending_group_symbol_ = symbol;
+        return;
+    }
+    load_group_symbol(symbol);
+}
+
+void RelationshipMapScreen::load_group_symbol(const QString& symbol) {
+    if (has_data_ && symbol == loaded_ticker_.toUpper())
+        return;
+    group_driven_ticker_ = symbol;
+    search_input_->blockSignals(true);
+    search_input_->setText(symbol);
+    search_input_->blockSignals(false);
+    on_search();
+}
+
+SymbolRef RelationshipMapScreen::current_symbol() const {
+    if (loaded_ticker_.isEmpty())
+        return {};
+    return SymbolRef::equity(loaded_ticker_);
 }
 
 // ── IStatefulScreen ───────────────────────────────────────────────────────────
@@ -815,7 +1009,13 @@ void RelationshipMapScreen::restore_state(const QVariantMap& state) {
 
     if (!ticker.isEmpty() && search_input_) {
         search_input_->setText(ticker);
-        on_search();
+        // The router restores state right after constructing the screen, possibly while
+        // it is still hidden (symbol-link materialisation). Analysing then would spawn
+        // the yfinance run for a screen nobody has opened - wait for the first show.
+        if (isVisible())
+            on_search();
+        else
+            restore_search_pending_ = true;
     }
 }
 

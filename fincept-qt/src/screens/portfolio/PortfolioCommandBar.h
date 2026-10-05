@@ -21,7 +21,6 @@ class PortfolioCommandBar : public QWidget {
 
     void set_portfolios(const QVector<portfolio::Portfolio>& portfolios);
     void set_selected_portfolio(const portfolio::Portfolio& p);
-    void set_summary(const portfolio::PortfolioSummary& summary);
     void set_refreshing(bool refreshing);
     void set_detail_view(std::optional<portfolio::DetailView> view);
     void set_has_selection(bool has_selection);
@@ -48,6 +47,7 @@ class PortfolioCommandBar : public QWidget {
     void detail_view_selected(portfolio::DetailView view);
     void ai_analyze_requested();
     void agent_run_requested();
+    void backtest_requested();
 
   private:
     void build_ui();
@@ -84,6 +84,7 @@ class PortfolioCommandBar : public QWidget {
     QAction* export_json_action_ = nullptr;
     QAction* import_action_ = nullptr;
     QAction* ffn_action_ = nullptr;
+    QAction* backtest_action_ = nullptr;
     QPushButton* ai_btn_ = nullptr;
     QPushButton* agent_btn_ = nullptr;
 
@@ -91,11 +92,11 @@ class PortfolioCommandBar : public QWidget {
     QVector<QPushButton*> detail_btns_;
 
     // Containers for show/hide
-    QWidget* row1_ = nullptr;            // selector + refresh/interval/overflow
-    QWidget* row2_ = nullptr;            // BUY/SELL/DIV | detail tabs | AI/AGENT
-    QWidget* trade_cluster_ = nullptr;   // BUY/SELL/DIV
-    QWidget* tabs_container_ = nullptr;  // 9 detail view pills
-    QWidget* tools_cluster_ = nullptr;   // AI/AGENT
+    QWidget* row1_ = nullptr;           // selector + refresh/interval/overflow
+    QWidget* row2_ = nullptr;           // BUY/SELL/DIV | detail tabs | AI/AGENT
+    QWidget* trade_cluster_ = nullptr;  // BUY/SELL/DIV
+    QWidget* tabs_container_ = nullptr; // 9 detail view pills
+    QWidget* tools_cluster_ = nullptr;  // AI/AGENT
 
     // State
     QVector<portfolio::Portfolio> portfolios_;

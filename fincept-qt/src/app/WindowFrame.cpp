@@ -1,30 +1,30 @@
 ﻿#include "app/WindowFrame.h"
 
-#include "screens/ai_chat/AiChatBubble.h"
-#include "screens/ai_chat/AiChatScreen.h"
-#include "services/llm/LlmService.h"
 #include "app/DockScreenRouter.h"
 #include "app/MonitorPickerDialog.h"
+#include "app/TerminalShell.h"
 #include "auth/AuthManager.h"
 #include "auth/InactivityGuard.h"
 #include "auth/PinManager.h"
 #include "auth/lock/LockOverlayController.h"
-#include "core/symbol/IGroupLinked.h"
-#include "core/symbol/SymbolGroup.h"
-#include "screens/common/IStatefulScreen.h"
-#include "core/config/ProfileManager.h"
-#include "core/events/EventBus.h"
-#include "app/TerminalShell.h"
 #include "core/actions/ActionRegistry.h"
 #include "core/actions/builtin_actions.h"
+#include "core/config/ProfileManager.h"
+#include "core/events/EventBus.h"
 #include "core/keys/KeyConfigManager.h"
 #include "core/keys/WindowCycler.h"
-#include "core/window/WindowRegistry.h"
+#include "core/layout/LayoutCatalog.h"
+#include "core/layout/WorkspaceShell.h"
 #include "core/logging/Logger.h"
+#include "core/panel/PanelMaterialiser.h"
 #include "core/session/SessionManager.h"
-#include "screens/common/ComingSoonScreen.h"
+#include "core/symbol/IGroupLinked.h"
+#include "core/symbol/SymbolGroup.h"
+#include "core/window/WindowRegistry.h"
 #include "screens/about/AboutScreen.h"
 #include "screens/agent_config/AgentConfigScreen.h"
+#include "screens/ai_chat/AiChatBubble.h"
+#include "screens/ai_chat/AiChatScreen.h"
 #include "screens/ai_quant_lab/AIQuantLabScreen.h"
 #include "screens/akshare/AkShareScreen.h"
 #include "screens/algo_trading/AlgoTradingScreen.h"
@@ -39,20 +39,22 @@
 #include "screens/backtesting/BacktestingScreen.h"
 #include "screens/chat_mode/ChatModeScreen.h"
 #include "screens/code_editor/CodeEditorScreen.h"
+#include "screens/common/ComingSoonScreen.h"
+#include "screens/common/IStatefulScreen.h"
+#include "screens/crypto_center/CryptoCenterScreen.h"
 #include "screens/crypto_trading/CryptoTradingScreen.h"
 #include "screens/dashboard/DashboardScreen.h"
 #include "screens/data_mapping/DataMappingScreen.h"
 #include "screens/data_sources/DataSourcesScreen.h"
 #include "screens/dbnomics/DBnomicsScreen.h"
 #include "screens/derivatives/DerivativesScreen.h"
-#include "screens/fno/FnoScreen.h"
 #include "screens/docs/DocsScreen.h"
-#include "screens/crypto_center/CryptoCenterScreen.h"
 #include "screens/economics/EconomicsScreen.h"
 #include "screens/equity_research/EquityResearchScreen.h"
 #include "screens/equity_trading/EquityTradingScreen.h"
 #include "screens/excel/ExcelScreen.h"
 #include "screens/file_manager/FileManagerScreen.h"
+#include "screens/fno/FnoScreen.h"
 #include "screens/forum/ForumScreen.h"
 #include "screens/geopolitics/GeopoliticsScreen.h"
 #include "screens/gov_data/GovDataScreen.h"
@@ -79,24 +81,23 @@
 #include "screens/surface_analytics/SurfaceAnalyticsScreen.h"
 #include "screens/trade_viz/TradeVizScreen.h"
 #include "screens/watchlist/WatchlistScreen.h"
-#include "core/layout/LayoutCatalog.h"
-#include "core/layout/WorkspaceShell.h"
-#include "core/panel/PanelMaterialiser.h"
+#include "services/llm/LlmService.h"
 #include "services/updater/UpdateService.h"
-#include "trading/instruments/InstrumentService.h"
 #include "storage/repositories/SettingsRepository.h"
+#include "trading/instruments/InstrumentService.h"
+#include "ui/command/CommandPalette.h"
+#include "ui/command/QuickCommandBar.h"
+#include "ui/components/ComponentBrowserDialog.h"
+#include "ui/debug/DebugOverlay.h"
 #include "ui/navigation/DockStatusBar.h"
 #include "ui/navigation/DockToolBar.h"
 #include "ui/navigation/FKeyBar.h"
-#include "ui/command/QuickCommandBar.h"
-#include "ui/command/CommandPalette.h"
-#include "ui/components/ComponentBrowserDialog.h"
-#include "ui/debug/DebugOverlay.h"
 #include "ui/navigation/NavigationBar.h"
 #include "ui/navigation/StatusBar.h"
 #include "ui/navigation/ToolBar.h"
 #include "ui/pushpins/PushpinBar.h"
 #include "ui/theme/Theme.h"
+#include "ui/widgets/EnterprisePromo.h"
 #include "ui/workspace/LayoutOpenDialog.h"
 #include "ui/workspace/LayoutSaveAsDialog.h"
 
@@ -104,17 +105,21 @@
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QInputDialog>
-#include <QMessageBox>
-#include <QPalette>
-#include <QScreen>
-#include <QShortcut>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QMessageBox>
+#include <QPalette>
+#include <QPointer>
+#include <QScreen>
+#include <QSet>
+#include <QShortcut>
 #include <QStatusBar>
+#include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
 #include <QWindow>
@@ -123,10 +128,85 @@
 #include <DockManager.h>
 #include <DockWidget.h>
 #include <FloatingDockContainer.h>
-
 #include <algorithm>
 
 namespace fincept {
+
+namespace {
+
+/// Binds a QTimer's run state to its host widget's visibility (§P3).
+///
+/// The rule is "start in showEvent, stop in hideEvent", but WindowFrame's header
+/// is shared with the multi-window shell and declares no show/hide overrides, so
+/// the same contract is enforced from an installed event filter instead. Minimise
+/// is covered too: on Windows a minimised top-level gets WindowStateChange, not
+/// Hide, and a minimised window has no reason to keep polling.
+class VisibilityTimerGate final : public QObject {
+  public:
+    VisibilityTimerGate(QTimer* timer, QObject* parent) : QObject(parent), timer_(timer) {}
+
+  protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (timer_) {
+            switch (event->type()) {
+                case QEvent::Show:
+                    timer_->start();
+                    break;
+                case QEvent::Hide:
+                    timer_->stop();
+                    break;
+                case QEvent::WindowStateChange:
+                    if (auto* w = qobject_cast<QWidget*>(watched)) {
+                        if (w->isMinimized())
+                            timer_->stop();
+                        else if (w->isVisible())
+                            timer_->start();
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+  private:
+    QPointer<QTimer> timer_;
+};
+
+/// The frame the user most recently worked in (updated from changeEvent). Only a
+/// fallback for wf_app_event_target() when no frame is the active window.
+QPointer<WindowFrame>& wf_last_active_frame() {
+    static QPointer<WindowFrame> frame;
+    return frame;
+}
+
+/// Picks the ONE frame that should act on an app-wide EventBus event.
+///
+/// Every WindowFrame subscribes to the same bus, so without arbitration a single
+/// publish of nav.switch_screen / equity.open_order_ticket / nav.open_symbol would
+/// navigate (or pop an order ticket in) every open window. Each frame's handler
+/// asks this helper from its queued lambda (GUI thread) and acts only when it is
+/// the answer, so exactly one frame handles each event:
+///   1. the active window, resolved to its owning frame — activeWindow() can be a
+///      floating ADS dock container or a modal dialog rather than the frame
+///      itself, both of which are parented (transitively) to a frame;
+///   2. else the frame the user last worked in (app not focused, e.g. an MCP tool
+///      or automation published the event);
+///   3. else the first registered frame.
+WindowFrame* wf_app_event_target() {
+    for (QWidget* w = QApplication::activeWindow(); w; w = w->parentWidget()) {
+        if (auto* frame = qobject_cast<WindowFrame*>(w))
+            return frame;
+    }
+    if (WindowFrame* last = wf_last_active_frame().data(); last && last->isVisible())
+        return last;
+    const auto frames = WindowRegistry::instance().frames();
+    return frames.isEmpty() ? nullptr : frames.first();
+}
+
+} // namespace
+
 int WindowFrame::next_window_id() {
     // Seed from the max of (persisted window IDs, live window IDs) so a new
     // window never reuses an ID that already owns saved geometry/dock layout.
@@ -160,12 +240,14 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
     // first show — queue the connect via QMetaObject::invokeMethod with
     // QueuedConnection so it runs after the event loop has had a chance
     // to construct the window handle.
-    QMetaObject::invokeMethod(this, [this]() {
-        if (auto* wh = windowHandle()) {
-            connect(wh, &QWindow::screenChanged, this,
-                    [this](QScreen* scr) { emit screen_changed(scr); });
-        }
-    }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            if (auto* wh = windowHandle()) {
+                connect(wh, &QWindow::screenChanged, this, [this](QScreen* scr) { emit screen_changed(scr); });
+            }
+        },
+        Qt::QueuedConnection);
 
     // Show active profile in title bar when using a non-default profile.
     // "Fincept Terminal" is the product brand and is intentionally not
@@ -239,12 +321,21 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
         if (target) {
             QRect geom = target->availableGeometry();
             resize(geom.width() * 9 / 10, geom.height() * 9 / 10);
-            // Only centre-place for the primary window; secondary windows
-            // are positioned by the "new window" action after construction.
-            if (window_id_ == 0)
-                move(geom.center() - rect().center());
-            else
-                move(geom.center() - rect().center());
+            QPoint center = geom.center() - rect().center();
+            if (window_id_ == 0) {
+                move(center);
+            } else {
+                // Cascade secondary windows so they don't stack exactly
+                // on top of the primary when multiple windows fall back
+                // to the same screen (e.g. external monitors disconnected).
+                int offset = window_id_ * 30;
+                QPoint pos = center + QPoint(offset, offset);
+                pos.setX(std::max(pos.x(), geom.x()));
+                pos.setY(std::max(pos.y(), geom.y()));
+                pos.setX(std::min(pos.x(), geom.right() - width()));
+                pos.setY(std::min(pos.y(), geom.bottom() - height()));
+                move(pos);
+            }
         }
     }
 
@@ -261,9 +352,8 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
     // a redundant PIN re-entry. The singleton flag is the source of truth for
     // "user has cleared the PIN gate this session"; the per-window field is
     // a cache so on_auth_state_changed() can skip re-prompting.
-    pin_gate_cleared_ = !auth::InactivityGuard::instance().is_terminal_locked()
-                        && auth::AuthManager::instance().is_authenticated()
-                        && auth::PinManager::instance().has_pin();
+    pin_gate_cleared_ = !auth::InactivityGuard::instance().is_terminal_locked() &&
+                        auth::AuthManager::instance().is_authenticated() && auth::PinManager::instance().has_pin();
 
     auto* master_stack = new QStackedWidget;
 
@@ -309,8 +399,8 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
     // behind the back of the lock screen on the primary.
     connect(&auth::InactivityGuard::instance(), &auth::InactivityGuard::lock_requested, this,
             &WindowFrame::show_lock_screen);
-    connect(&auth::InactivityGuard::instance(), &auth::InactivityGuard::terminal_locked_changed,
-            this, &WindowFrame::apply_lock_state);
+    connect(&auth::InactivityGuard::instance(), &auth::InactivityGuard::terminal_locked_changed, this,
+            &WindowFrame::apply_lock_state);
 
     setCentralWidget(master_stack);
 
@@ -334,8 +424,7 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
     // layout name from WorkspaceShell::current_name() inside
     // update_window_title(), so no signal wiring is needed here.
     WindowCycler::instance().register_window(this);
-    connect(this, &QObject::destroyed, this,
-            [this]() { WindowCycler::instance().unregister_window(this); });
+    connect(this, &QObject::destroyed, this, [this]() { WindowCycler::instance().unregister_window(this); });
 
     dock_router_ = new DockScreenRouter(dock_manager_, this);
     setup_dock_screens();
@@ -344,7 +433,8 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
     // panels and fills the full area. Each tab is a fresh independent screen,
     // not nested into whatever was previously open.
     connect(tab_bar_, &ui::TabBar::tab_changed, this, [this](const QString& id) {
-        if (!locked_) dock_router_->navigate(id, true);
+        if (!locked_)
+            dock_router_->navigate(id, true);
     });
     connect(dock_router_, &DockScreenRouter::screen_changed, tab_bar_, &ui::TabBar::set_active);
 
@@ -353,7 +443,7 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
 
     // Per-screen tool filter wiring removed (Tool RAG / Tier-0 model).
     // The LLM now sees a 6-tool Tier-0 prefix on every turn and discovers
-    // the rest via tool.list — making per-screen scoping unnecessary and
+    // the rest via tool_list — making per-screen scoping unnecessary and
     // counterproductive (it would prevent the LLM from finding tools the
     // user might want regardless of which screen happens to be active).
 
@@ -381,9 +471,36 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
         }
     });
 
+    // Apply "Show AI Chat Bubble" the moment it changes instead of waiting for the
+    // next screen change. settings.changed is published by whoever writes the
+    // setting (e.g. the MCP set_setting tool) and may arrive from a worker
+    // thread, so re-read and apply on the GUI thread. Every frame owns a bubble,
+    // so unlike the navigation events below this one is applied by all frames.
+    EventBus::instance().subscribe(this, "settings.changed", [this](const QVariantMap& d) {
+        const QString key = d.value("key").toString();
+        if (!key.isEmpty() && key != QLatin1String("appearance.show_chat_bubble"))
+            return;
+        QMetaObject::invokeMethod(
+            this,
+            [this]() {
+                // Chat mode hides the bubble on purpose; leaving it re-applies the setting.
+                if (!chat_bubble_ || chat_mode_)
+                    return;
+                auto r = SettingsRepository::instance().get("appearance.show_chat_bubble");
+                const bool show = !r.is_ok() || r.value() != "false";
+                chat_bubble_->setVisible(show);
+                if (show) {
+                    chat_bubble_->reposition();
+                    chat_bubble_->raise();
+                }
+            },
+            Qt::QueuedConnection);
+    });
+
     connect(toolbar, &ui::ToolBar::chat_mode_toggled, this, &WindowFrame::toggle_chat_mode);
     connect(toolbar, &ui::ToolBar::navigate_to, this, [this](const QString& id) {
-        if (!locked_) dock_router_->navigate(id, true);
+        if (!locked_)
+            dock_router_->navigate(id, true);
     });
 
     // Debounced dock-layout save: ADS emits a burst of signals during
@@ -395,6 +512,15 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
     connect(dock_layout_save_timer_, &QTimer::timeout, this, [this]() {
         if (!dock_manager_)
             return;
+        // Drop hidden/closed panels before serialising so the saved layout is
+        // exactly the visible grid — otherwise closed areas accumulate into
+        // dozens of phantom splits that corrupt the restored arrangement.
+        // prune emits dockWidgetRemoved/viewToggled (→ schedule_dock_layout_save);
+        // suppress that re-entrant restart while we save the freshly-pruned tree.
+        suppress_layout_save_ = true;
+        if (dock_router_)
+            dock_router_->prune_hidden_panels();
+        suppress_layout_save_ = false;
         // SessionManager.save_dock_layout fans out to WorkspaceSnapshotRing
         // (60s rate-limited auto snapshot). That covers what the legacy
         // 5-min WorkspaceManager autosave used to do, with better cadence.
@@ -403,7 +529,8 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
 
     connect(toolbar, &ui::ToolBar::dock_command, this,
             [this](const QString& action, const QString& primary, const QString& secondary) {
-                if (locked_) return;
+                if (locked_)
+                    return;
                 if (action == "add")
                     dock_router_->add_alongside(primary, secondary);
                 else if (action == "remove")
@@ -414,13 +541,88 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
             });
 
     // MCP navigation tool → dock_router (cross-thread safe)
-    EventBus::instance().subscribe("nav.switch_screen", [this](const QVariantMap& nav_data) {
+    //
+    // The three app-wide subscriptions below (nav.switch_screen,
+    // equity.open_order_ticket, nav.open_symbol) are registered by EVERY frame, so
+    // each queued handler first asks wf_app_event_target() whether it is the one
+    // frame that should act — otherwise one publish would act in all open windows.
+    EventBus::instance().subscribe(this, "nav.switch_screen", [this](const QVariantMap& nav_data) {
         QString screen_id = nav_data["screen_id"].toString();
+        // Optional: callers that want a clean "take me there" switch (replace the
+        // current view) rather than the default auto-tiled split set exclusive=true.
+        const bool exclusive = nav_data.value("exclusive", false).toBool();
         if (!screen_id.isEmpty())
             QMetaObject::invokeMethod(
-                dock_router_, [this, screen_id]() {
-                    if (!locked_) dock_router_->navigate(screen_id);
-                }, Qt::QueuedConnection);
+                dock_router_,
+                [this, screen_id, exclusive]() {
+                    if (locked_ || wf_app_event_target() != this)
+                        return;
+                    dock_router_->navigate(screen_id, exclusive);
+                },
+                Qt::QueuedConnection);
+    });
+
+    // Equity Research "BUY/SELL" → reuse the Equity Trading order ticket without
+    // leaving Research. We materialise the trading screen (hidden — no tab switch)
+    // if it doesn't exist yet, then open its app-modal ticket, which pops over the
+    // current tab. The trading screen owns the form + the paper/live placement path.
+    EventBus::instance().subscribe(this, "equity.open_order_ticket", [this](const QVariantMap& d) {
+        const QString symbol = d.value("symbol").toString();
+        if (symbol.isEmpty())
+            return;
+        const QString exchange = d.value("exchange").toString();
+        const QStringList match_exchanges = d.value("match_exchanges").toStringList();
+        const bool is_buy = d.value("is_buy").toBool();
+        const double price = d.value("price").toDouble();
+        QMetaObject::invokeMethod(
+            this,
+            [this, symbol, exchange, match_exchanges, is_buy, price]() {
+                if (locked_ || !dock_router_ || wf_app_event_target() != this)
+                    return;
+                const QString id = QStringLiteral("equity_trading");
+                if (!dock_router_->screen_widget(id))
+                    dock_router_->materialize_now(id); // create hidden, don't raise
+                if (auto* trading = qobject_cast<screens::EquityTradingScreen*>(dock_router_->screen_widget(id)))
+                    trading->open_external_order_ticket(symbol, exchange, match_exchanges, is_buy, price);
+            },
+            Qt::QueuedConnection);
+    });
+
+    // "Open this symbol in <screen>" — the reliable way for one panel to hand a
+    // ticker to another. Publishing nav.switch_screen followed by a screen's own
+    // load event loses the symbol whenever the target hasn't been constructed
+    // yet: nav.switch_screen navigates on a queued call, so the second publish
+    // runs before the target exists to receive it. Here navigate() runs first
+    // (it materialises the screen synchronously), then the symbol is delivered
+    // through IGroupLinked — the same entry point symbol-group linking uses.
+    // Payload: screen_id, symbol (both required); asset_class (default
+    // "equity"; crypto_trading only accepts "crypto"), exchange, exclusive.
+    EventBus::instance().subscribe(this, "nav.open_symbol", [this](const QVariantMap& d) {
+        const QString screen_id = d.value("screen_id").toString();
+        SymbolRef ref;
+        ref.symbol = d.value("symbol").toString().trimmed();
+        ref.asset_class = d.value("asset_class", QStringLiteral("equity")).toString();
+        ref.exchange = d.value("exchange").toString();
+        const bool exclusive = d.value("exclusive", false).toBool();
+        if (screen_id.isEmpty() || !ref.is_valid())
+            return;
+        QMetaObject::invokeMethod(
+            this,
+            [this, screen_id, ref, exclusive]() {
+                // Only the target frame (see wf_app_event_target) acts; the other
+                // frames' copies of this handler are no-ops.
+                if (locked_ || !dock_router_ || wf_app_event_target() != this)
+                    return;
+                dock_router_->navigate(screen_id, exclusive);
+                auto* linked = dynamic_cast<IGroupLinked*>(dock_router_->screen_widget(screen_id));
+                if (!linked) {
+                    LOG_WARN("WindowFrame",
+                             QString("nav.open_symbol: '%1' does not accept a symbol (no IGroupLinked)").arg(screen_id));
+                    return;
+                }
+                linked->on_group_symbol_changed(ref);
+            },
+            Qt::QueuedConnection);
     });
 
     // ── Keyboard shortcuts via ActionRegistry (Phase 4) ───────────────────────
@@ -438,44 +640,97 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
     // time. The registry resolves the focused frame live at invoke time.
     auto& km = KeyConfigManager::instance();
     auto& reg = ActionRegistry::instance();
+    QSet<QString> key_bound_ids; // registry ids whose hotkey is owned by a KeyAction
     for (KeyAction a : km.all_actions()) {
         const QString action_id = actions::action_id_for(a);
         if (action_id.isEmpty())
-            continue;                                  // per-screen action; handled elsewhere
+            continue; // per-screen action; handled elsewhere
         if (!reg.contains(action_id)) {
-            LOG_WARN("WindowFrame", QString("KeyAction → action_id mapping references unregistered id: %1")
-                                        .arg(action_id));
+            LOG_WARN("WindowFrame",
+                     QString("KeyAction → action_id mapping references unregistered id: %1").arg(action_id));
             continue;
         }
+        key_bound_ids.insert(action_id);
         auto* act = km.action(a);
         if (!act)
             continue;
         // LockNow runs even when this frame isn't focused (e.g. user pressed
         // it from a dialog) — it's a global "secure my session" command.
         // Everything else is window-scoped so only the focused frame fires.
-        act->setShortcutContext(a == KeyAction::LockNow ? Qt::ApplicationShortcut
-                                                        : Qt::WindowShortcut);
+        act->setShortcutContext(a == KeyAction::LockNow ? Qt::ApplicationShortcut : Qt::WindowShortcut);
         addAction(act);
-        connect(act, &QAction::triggered, this, [action_id]() {
+        connect(act, &QAction::triggered, this, [this, action_id]() {
+            // KeyConfigManager owns ONE QAction per KeyAction and every frame
+            // connects to it, so a single key press reaches this lambda once per
+            // open window. Without this guard toggles (F11, F10, F9, always-on-top)
+            // cancelled themselves out and "new window" / "cycle windows" ran N
+            // times. Only the frame the action resolves to handles it.
+            WindowFrame* target = wf_app_event_target();
+            if (target != this)
+                return;
             // Build a fresh context every invocation so the focused frame
             // is resolved live rather than captured. This is the bug-fix
             // that motivated the refactor.
             CommandContext ctx;
             ctx.shell = &TerminalShell::instance();
-            ctx.focused_frame = WindowCycler::instance().focused_frame();
+            ctx.focused_frame = target;
             // ctx.focused_panel left null — Phase 7 wires PanelRegistry's
             // focused-panel lookup once panels are UUID-keyed.
             auto r = ActionRegistry::instance().invoke(action_id, ctx);
             if (r.is_err()) {
-                LOG_DEBUG("WindowFrame", QString("Action %1 returned error: %2")
-                                             .arg(action_id, QString::fromStdString(r.error())));
+                LOG_DEBUG("WindowFrame",
+                          QString("Action %1 returned error: %2").arg(action_id, QString::fromStdString(r.error())));
+            }
+        });
+    }
+
+    // Registry actions that declare a default hotkey but have no KeyAction
+    // (cmdbar.toggle = Ctrl+\, palette.open = Ctrl+Shift+P). Nothing bound their
+    // ActionDef::default_hotkey, so the documented Ctrl+\ did nothing. Each frame
+    // owns its own QAction here with window scope, so only the active window fires.
+    for (const QString& action_id : reg.all_ids()) {
+        if (key_bound_ids.contains(action_id))
+            continue;
+        const ActionDef* def = reg.find(action_id);
+        if (!def || def->default_hotkey.isEmpty())
+            continue;
+        // Never share a sequence with a KeyAction: two QActions on one key in the
+        // same window make Qt treat the shortcut as ambiguous and fire neither.
+        bool clashes = false;
+        for (KeyAction a : km.all_actions()) {
+            if (km.key(a) == def->default_hotkey) {
+                clashes = true;
+                break;
+            }
+        }
+        if (clashes) {
+            LOG_WARN("WindowFrame", QString("Hotkey for %1 (%2) is already bound to a KeyAction — not binding it")
+                                        .arg(action_id, def->default_hotkey.toString()));
+            continue;
+        }
+        auto* hotkey_act = new QAction(this);
+        hotkey_act->setShortcut(def->default_hotkey);
+        hotkey_act->setShortcutContext(Qt::WindowShortcut);
+        addAction(hotkey_act);
+        connect(hotkey_act, &QAction::triggered, this, [this, action_id]() {
+            // Shell surfaces (command bar, palette): not on the login/lock/chat stacks.
+            if (locked_ || !stack_ || stack_->currentIndex() != 1)
+                return;
+            CommandContext ctx;
+            ctx.shell = &TerminalShell::instance();
+            ctx.focused_frame = this;
+            auto r = ActionRegistry::instance().invoke(action_id, ctx);
+            if (r.is_err()) {
+                LOG_DEBUG("WindowFrame",
+                          QString("Action %1 returned error: %2").arg(action_id, QString::fromStdString(r.error())));
             }
         });
     }
 
     // Toolbar actions
     connect(toolbar, &ui::ToolBar::action_triggered, this, [this](const QString& action) {
-        if (locked_) return;
+        if (locked_)
+            return;
         if (action == "browse_components") {
             // Same path as the keyboard shortcut so the behavior stays in one
             // place — the KeyConfigManager action will be triggered directly.
@@ -499,6 +754,20 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
             w->show();
             w->raise();
             w->activateWindow();
+        } else if (action == "close_window") {
+            // Same as the titlebar close button — WA_DeleteOnClose handles
+            // teardown, closeEvent persists this window's layout. If this is
+            // the last window, the app honours general.on_last_window_close
+            // (quit or surface the Launchpad), exactly like a manual close.
+            close();
+        } else if (action == "close_all_windows") {
+            // Snapshot the registry first: each close() schedules the frame's
+            // destruction (WA_DeleteOnClose → deleteLater) which unregisters it,
+            // so iterating the live registry would be unsafe. The copy is stable.
+            const auto frames = WindowRegistry::instance().frames();
+            for (WindowFrame* w : frames)
+                if (w)
+                    w->close();
         } else if (action.startsWith("move_to_monitor:")) {
             // Move this window to the named monitor. We resolve by QScreen::name
             // (not index) because index ordering flips on plug/unplug events.
@@ -539,8 +808,8 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
         } else if (action == "perspective_save") {
             if (dock_manager_) {
                 bool ok = false;
-                const QString name =
-                    QInputDialog::getText(this, tr("Save Layout"), tr("Layout name:"), QLineEdit::Normal, QString(), &ok);
+                const QString name = QInputDialog::getText(this, tr("Save Layout"), tr("Layout name:"),
+                                                           QLineEdit::Normal, QString(), &ok);
                 if (ok && !name.trimmed().isEmpty()) {
                     dock_manager_->addPerspective(name.trimmed());
                     LOG_INFO("WindowFrame", QString("Saved perspective: %1").arg(name.trimmed()));
@@ -594,7 +863,8 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
                 showFullScreen();
         } else if (action == "focus_mode") {
             // Auth screens must never reveal the shell via focus-mode toggle.
-            if (stack_ && stack_->currentIndex() == 0) return;
+            if (stack_ && stack_->currentIndex() == 0)
+                return;
             focus_mode_ = !focus_mode_;
             if (dock_toolbar_)
                 dock_toolbar_->setVisible(!focus_mode_);
@@ -603,11 +873,7 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
         } else if (action == "always_on_top") {
             set_always_on_top(!always_on_top_);
         } else if (action == "refresh") {
-            if (dock_manager_) {
-                auto* focused = dock_manager_->focusedDockWidget();
-                if (focused && focused->widget())
-                    QMetaObject::invokeMethod(focused->widget(), "refresh", Qt::QueuedConnection);
-            }
+            refresh_focused_panel(); // same path as the F5 shortcut
         } else if (action == "layout_new" || action == "layout_save_as") {
             // Both routes prompt for a name then save. layout.new = blank
             // workspace under that name; layout.save_as = capture-current
@@ -618,12 +884,11 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
                 ctx.shell = &TerminalShell::instance();
                 ctx.focused_frame = this;
                 ctx.args.insert(QStringLiteral("name"), dlg.name());
-                const QString action_id = (action == "layout_new")
-                    ? QStringLiteral("layout.new") : QStringLiteral("layout.save_as");
+                const QString action_id =
+                    (action == "layout_new") ? QStringLiteral("layout.new") : QStringLiteral("layout.save_as");
                 auto r = ActionRegistry::instance().invoke(action_id, ctx);
                 if (r.is_err())
-                    LOG_WARN("WindowFrame", QString("%1 failed: %2")
-                                                .arg(action_id, QString::fromStdString(r.error())));
+                    LOG_WARN("WindowFrame", QString("%1 failed: %2").arg(action_id, QString::fromStdString(r.error())));
             }
         } else if (action == "layout_open") {
             ui::LayoutOpenDialog dlg(this);
@@ -634,8 +899,7 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
                 ctx.args.insert(QStringLiteral("name"), dlg.selected_id().to_string());
                 auto r = ActionRegistry::instance().invoke(QStringLiteral("layout.switch"), ctx);
                 if (r.is_err())
-                    LOG_WARN("WindowFrame", QString("layout.switch failed: %1")
-                                                .arg(QString::fromStdString(r.error())));
+                    LOG_WARN("WindowFrame", QString("layout.switch failed: %1").arg(QString::fromStdString(r.error())));
             }
         } else if (action == "layout_save") {
             // If a layout is currently loaded, save under its name. Otherwise
@@ -655,35 +919,32 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
             ctx.args.insert(QStringLiteral("name"), target);
             auto r = ActionRegistry::instance().invoke(QStringLiteral("layout.save"), ctx);
             if (r.is_err())
-                LOG_WARN("WindowFrame", QString("layout.save failed: %1")
-                                            .arg(QString::fromStdString(r.error())));
+                LOG_WARN("WindowFrame", QString("layout.save failed: %1").arg(QString::fromStdString(r.error())));
         } else if (action == "import_data") {
-            QString path = QFileDialog::getOpenFileName(
-                this, tr("Import Layout"), QDir::homePath(),
-                tr("Fincept Layout (*.flayout *.fwsp);;All Files (*)"));
+            QString path = QFileDialog::getOpenFileName(this, tr("Import Layout"), QDir::homePath(),
+                                                        tr("Fincept Layout (*.flayout *.fwsp);;All Files (*)"));
             if (!path.isEmpty()) {
                 auto r = LayoutCatalog::instance().import_from(path);
                 if (r.is_err())
-                    QMessageBox::warning(this, tr("Import Failed"),
-                                         QString::fromStdString(r.error()));
+                    QMessageBox::warning(this, tr("Import Failed"), QString::fromStdString(r.error()));
             }
         } else if (action == "export_data") {
             const LayoutId cur_id = layout::WorkspaceShell::current_id();
             if (cur_id.is_null()) {
-                QMessageBox::information(
-                    this, tr("Export Layout"),
-                    tr("Open or save a layout first, then export it."));
+                QMessageBox::information(this, tr("Export Layout"), tr("Open or save a layout first, then export it."));
             } else {
-                QString path = QFileDialog::getSaveFileName(
-                    this, tr("Export Layout"), QDir::homePath(),
-                    tr("Fincept Layout (*.flayout)"));
+                QString path = QFileDialog::getSaveFileName(this, tr("Export Layout"), QDir::homePath(),
+                                                            tr("Fincept Layout (*.flayout)"));
                 if (!path.isEmpty()) {
                     auto r = LayoutCatalog::instance().export_to(cur_id, path);
                     if (r.is_err())
-                        QMessageBox::warning(this, tr("Export Failed"),
-                                             QString::fromStdString(r.error()));
+                        QMessageBox::warning(this, tr("Export Failed"), QString::fromStdString(r.error()));
                 }
             }
+        } else if (action == "check_updates") {
+            // Help ▸ Check for Updates. silent=false so the user gets a result
+            // either way — a menu-triggered check that says nothing reads as broken.
+            services::UpdateService::instance().check_for_updates(/*silent=*/false);
         } else if (action == "screenshot") {
             QScreen* scr = this->screen();
             if (!scr)
@@ -709,6 +970,9 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
         stack_->setCurrentIndex(0);
         auth_stack_->setCurrentIndex(3); // PricingScreen
     });
+
+    // Toolbar UPGRADE → Enterprise (the private edition) promo dialog.
+    connect(toolbar, &ui::ToolBar::upgrade_clicked, this, [this]() { ui::UpgradeDialog::show_now(this); });
 
     // Auth state
     connect(&auth::AuthManager::instance(), &auth::AuthManager::auth_state_changed, this,
@@ -736,7 +1000,10 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
     // conflicts with restoreState's layout.
     // Layout version: bump this whenever the dock layout format changes to
     // automatically discard stale/corrupt saved state from previous versions.
-    static constexpr int kDockLayoutVersion = 4;
+    // v5: closed panels are now pruned before save (prune_hidden_panels), so
+    // pre-v5 blobs — bloated with dozens of phantom closed single-widget areas
+    // that reshuffle the restored grid — are discarded rather than restored.
+    static constexpr int kDockLayoutVersion = 5;
     bool dock_restored = false;
 
     if (dock_manager_) {
@@ -744,25 +1011,42 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
         SessionManager::instance().load_perspectives(persp_settings);
         dock_manager_->loadPerspectives(persp_settings);
 
+        // Suppress the debounced dock-layout save during bulk registration
+        // and restoreState. These operations fire dockWidgetAdded and
+        // viewToggled dozens of times — each restarts the 500ms timer, and
+        // the eventual save would just re-write the state we're loading.
+        suppress_layout_save_ = true;
+
         const int saved_version = SessionManager::instance().dock_layout_version(window_id_);
         if (saved_version == kDockLayoutVersion) {
             const QByteArray saved_dock = SessionManager::instance().load_dock_layout(window_id_);
             if (!saved_dock.isEmpty()) {
                 dock_router_->ensure_all_registered();
+                // Also suppress screen construction during restoreState —
+                // ADS toggles each restored widget visible, which fires
+                // visibilityChanged→materialize_screen. Constructing all
+                // visible screens inline blocks the first paint for seconds.
+                // Screens are materialized progressively after show().
+                dock_router_->set_suppress_materialize(true);
                 dock_restored = dock_manager_->restoreState(saved_dock);
+                dock_router_->set_suppress_materialize(false);
 
-                // Sanity check: if restoreState produced an unreasonable number
-                // of visible dock areas (>6), the layout is likely corrupt.
-                if (dock_restored && dock_manager_->openedDockAreas().size() > 6) {
+                // Sanity check: a genuinely corrupt blob restores into dozens of
+                // areas (the pre-prune bug produced 28-33). A legit layout now
+                // tops out around the 4-panel auto-grid plus a few floating /
+                // torn-off panels, so 6 was too tight — it would nuke a valid
+                // grid+float layout. prune_hidden_panels() keeps saved blobs at
+                // visible-panel count, so this is only a backstop for true bloat.
+                if (dock_restored && dock_manager_->openedDockAreas().size() > 16) {
                     LOG_WARN("WindowFrame", QString("Dock layout corrupt: %1 open areas — resetting")
-                                               .arg(dock_manager_->openedDockAreas().size()));
+                                                .arg(dock_manager_->openedDockAreas().size()));
                     dock_restored = false;
                 }
             }
         } else if (saved_version != 0) {
             LOG_INFO("WindowFrame", QString("Dock layout version mismatch (saved %1, expected %2) — resetting")
-                                       .arg(saved_version)
-                                       .arg(kDockLayoutVersion));
+                                        .arg(saved_version)
+                                        .arg(kDockLayoutVersion));
         }
 
         if (!dock_restored) {
@@ -770,6 +1054,8 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
             for (auto* dw : dock_manager_->dockWidgetsMap())
                 dw->toggleView(false);
         }
+
+        suppress_layout_save_ = false;
 
         // Save the current version so next startup knows the format.
         SessionManager::instance().set_dock_layout_version(window_id_, kDockLayoutVersion);
@@ -787,16 +1073,14 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
         // InactivityGuard flag (which is the single source of truth for
         // "is the terminal locked?"); skipping the prompt here just
         // mirrors the unlocked state into the new frame.
-        if (auth_mgr.is_authenticated() && auth::PinManager::instance().has_pin()
-            && !pin_gate_cleared_) {
+        if (auth_mgr.is_authenticated() && auth::PinManager::instance().has_pin() && !pin_gate_cleared_) {
             LOG_INFO("WindowFrame", "Session restored — showing PIN unlock");
             lock_screen_->show_unlock();
             locked_ = true;
             set_shell_visible(false);
             stack_->setCurrentIndex(3);
         } else if (auth_mgr.is_authenticated() && auth::PinManager::instance().has_pin()) {
-            LOG_INFO("WindowFrame",
-                     "Session already unlocked — skipping PIN prompt for additional window");
+            LOG_INFO("WindowFrame", "Session already unlocked — skipping PIN prompt for additional window");
             set_shell_visible(true);
             stack_->setCurrentIndex(1);
         } else if (auth_mgr.is_authenticated()) {
@@ -816,24 +1100,81 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
         // If apply_layout subsequently fails, the caller is responsible for
         // falling back to a default screen.
         if (!dock_restored && adopted_uuid.is_null()) {
-            dock_router_->navigate("dashboard");
-            LOG_INFO("WindowFrame", "Applied clean default dock layout");
+            // Defer navigation so the window can paint its chrome (toolbar,
+            // tab bar, status bar) before the first screen factory runs.
+            // DashboardScreen construction can take 200-500ms; without this
+            // the user sees a blank frame for that entire duration.
+            // Skip it when something has already been opened in the meantime —
+            // e.g. a panel torn off / moved into this brand-new window — so the
+            // user doesn't get an unrequested Dashboard tiled next to it.
+            QTimer::singleShot(0, this, [this]() {
+                if (dock_router_->current_screen_id().isEmpty())
+                    dock_router_->navigate("dashboard");
+            });
+            LOG_INFO("WindowFrame", "Deferred default dashboard navigate to after first paint");
         } else if (!dock_restored) {
-            LOG_INFO("WindowFrame",
-                     QString("Deferring default navigate — frame spawned with adopted uuid %1 "
-                             "(apply_layout will populate)").arg(adopted_uuid.to_string()));
+            LOG_INFO("WindowFrame", QString("Deferring default navigate — frame spawned with adopted uuid %1 "
+                                            "(apply_layout will populate)")
+                                        .arg(adopted_uuid.to_string()));
         } else {
-            // Restore last-active screen as the focused tab and sync tab bar.
-            // Per-window key so multi-window users don't override each other.
+            // Dock layout restored — tabs are positioned but screens are
+            // still placeholders (materialize was suppressed above). Defer
+            // construction: materialize the active panel first so the user
+            // sees content quickly, then fill in remaining visible panels.
             const QString last = SessionManager::instance().last_screen(window_id_);
-            if (!last.isEmpty()) {
-                auto* dw = dock_router_->find_dock_widget(last);
-                if (dw && !dw->isClosed()) {
-                    dw->raise();
-                    dw->setAsCurrentTab();
+            QTimer::singleShot(0, this, [this, last]() {
+                if (!dock_router_ || !dock_manager_)
+                    return;
+                // Active panel first — user sees populated content immediately
+                if (!last.isEmpty()) {
+                    dock_router_->materialize_now(last);
+                    if (auto* dw = dock_router_->find_dock_widget(last)) {
+                        if (!dw->isClosed()) {
+                            dw->raise();
+                            dw->setAsCurrentTab();
+                        }
+                    }
+                    tab_bar_->set_active(last);
                 }
-                tab_bar_->set_active(last);
-            }
+
+                // Remaining visible panels — ONE PER EVENT-LOOP TURN. Doing the
+                // whole loop in a single tick re-froze the window the instant
+                // the first panel painted: a 4-panel layout constructed three
+                // heavy screens back to back with no chance to repaint between
+                // them. Snapshot the ids first so the walk is stable while the
+                // dock map changes underneath it.
+                QStringList pending;
+                for (const auto& entry : dock_manager_->dockWidgetsMap().toStdMap()) {
+                    if (entry.first == last)
+                        continue;
+                    if (entry.second && !entry.second->isClosed())
+                        pending << entry.first;
+                }
+                if (pending.isEmpty())
+                    return;
+
+                // Copyable, self-rescheduling functor: materialise the head,
+                // then post itself again with the tail. QPointer + the `frame`
+                // context object mean a closed window simply drops the rest.
+                struct MaterialiseWalk {
+                    QPointer<WindowFrame> frame;
+                    QStringList todo;
+                    void operator()() const {
+                        if (!frame || todo.isEmpty())
+                            return;
+                        auto* router = frame->dock_router();
+                        if (!router)
+                            return;
+                        // The user may have closed this panel on an earlier tick.
+                        if (auto* dw = router->find_dock_widget(todo.front()); dw && !dw->isClosed())
+                            router->materialize_now(todo.front());
+                        const QStringList rest = todo.mid(1);
+                        if (!rest.isEmpty())
+                            QTimer::singleShot(0, frame.data(), MaterialiseWalk{frame, rest});
+                    }
+                };
+                QTimer::singleShot(0, this, MaterialiseWalk{this, pending});
+            });
         }
     } else {
         on_auth_state_changed();
@@ -842,8 +1183,7 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
     // Periodic refresh of user credits/plan (every 3 minutes). Skip while
     // the terminal is locked — we shouldn't be making authenticated API
     // calls behind the back of the PIN gate, and the user can't see the
-    // refreshed data anyway. The timer keeps running (cheap) but the
-    // callback short-circuits.
+    // refreshed data anyway.
     user_refresh_timer_ = new QTimer(this);
     user_refresh_timer_->setInterval(3 * 60 * 1000);
     connect(user_refresh_timer_, &QTimer::timeout, this, []() {
@@ -854,7 +1194,14 @@ WindowFrame::WindowFrame(int window_id, QWidget* parent, const WindowId& adopted
             return;
         auth.refresh_user_data();
     });
-    user_refresh_timer_->start();
+    // §P3: no timer->start() in a constructor. Starting it here made every
+    // window fire an authenticated network refresh every 3 minutes for the
+    // whole process lifetime — including windows that were minimised or never
+    // shown. WindowFrame's header is shared with the multi-window shell, so
+    // rather than add showEvent/hideEvent overrides to it we gate the timer
+    // with an event filter that owns exactly the same lifecycle (and also
+    // covers minimise, which sends WindowStateChange rather than Hide).
+    installEventFilter(new VisibilityTimerGate(user_refresh_timer_, this));
 
     // Confetti overlay (parented to central widget so it covers the whole app)
     // Refresh user data when app regains focus (updates toolbar credits/plan)
@@ -934,8 +1281,7 @@ void WindowFrame::set_always_on_top(bool on) {
     if (isVisible() || true) // always re-show; isVisible is false after the flag change
         show();
     SessionManager::instance().save_window_flag(window_id_, "always_on_top", on);
-    LOG_INFO("WindowFrame",
-             QString("Window %1 always-on-top = %2").arg(window_id_).arg(on ? "on" : "off"));
+    LOG_INFO("WindowFrame", QString("Window %1 always-on-top = %2").arg(window_id_).arg(on ? "on" : "off"));
 }
 
 void WindowFrame::move_to_screen(QScreen* target) {
@@ -962,8 +1308,7 @@ void WindowFrame::move_to_screen(QScreen* target) {
     else if (was_maximised)
         showMaximized();
 
-    LOG_INFO("WindowFrame", QString("Moved window %1 to monitor '%2'")
-                               .arg(window_id_).arg(target->name()));
+    LOG_INFO("WindowFrame", QString("Moved window %1 to monitor '%2'").arg(window_id_).arg(target->name()));
 }
 
 WindowId WindowFrame::frame_uuid() const {
@@ -981,9 +1326,8 @@ void WindowFrame::adopt_frame_uuid(const WindowId& id) {
         // The frame already minted (or adopted) a different UUID — too late,
         // any panels created so far carry the old frame_id. Log and bail
         // rather than corrupting the PanelRegistry view.
-        LOG_WARN("WindowFrame",
-                 QString("adopt_frame_uuid: refusing to overwrite existing %1 with %2")
-                     .arg(frame_uuid_.to_string(), id.to_string()));
+        LOG_WARN("WindowFrame", QString("adopt_frame_uuid: refusing to overwrite existing %1 with %2")
+                                    .arg(frame_uuid_.to_string(), id.to_string()));
         return;
     }
     frame_uuid_ = id;
@@ -1019,6 +1363,14 @@ constexpr const char* kActiveForWorkProp = "fincept.active_for_work";
 } // namespace
 
 void WindowFrame::closeEvent(QCloseEvent* event) {
+    // Synchronously persist every open tab's UI state BEFORE anything else.
+    // Panels visible at quit never get visibilityChanged(false), so their
+    // per-screen save would otherwise never fire — and an async save here
+    // would race process exit. This guarantees each tab reopens with the
+    // exact config it had (FNO underlying/expiry/broker, equity symbol/
+    // watchlist, active sub-tab, …).
+    if (dock_router_)
+        dock_router_->flush_all_screen_states();
     // Force an immediate snapshot bypassing the 60s rate limit so a real
     // shutdown always has fresh state to restore from. Per Phase 6 the
     // legacy WorkspaceManager autosave is gone — the snapshot ring is the
@@ -1031,34 +1383,63 @@ void WindowFrame::closeEvent(QCloseEvent* event) {
     if (QScreen* scr = screen())
         SessionManager::instance().save_screen_name(window_id_, scr->name());
     if (dock_manager_) {
+        // Persist only the visible grid — drop closed panels so the saved
+        // layout doesn't carry phantom areas that corrupt the restored
+        // arrangement (see DockScreenRouter::prune_hidden_panels).
+        suppress_layout_save_ = true;
+        if (dock_router_)
+            dock_router_->prune_hidden_panels();
+        suppress_layout_save_ = false;
         SessionManager::instance().save_dock_layout(window_id_, dock_manager_->saveState());
         QSettings tmp;
         dock_manager_->savePerspectives(tmp);
         SessionManager::instance().save_perspectives(tmp);
     }
 
-    // Persist the set of still-open windows (this one minus itself, since
-    // we're about to be destroyed). On next launch, main.cpp will iterate
-    // this list and restore each secondary window. We also save the count
-    // for legacy callers.
+    // ── Persist the window set for next launch ─────────────────────────────
     //
-    // WindowRegistry is the source of truth for live frames as of Phase 1
-    // (decision 1.7); the previous QApplication::topLevelWidgets() walk
-    // worked but pulled in non-WindowFrame toplevels (dialogs, ADS floats)
-    // that needed to be cast away. Registry is cleaner and faster.
-    QList<int> open_ids;
-    for (int id : WindowRegistry::instance().frame_ids()) {
-        if (id != window_id_)
-            open_ids.append(id);
+    // During app quit, multiple closeEvents fire before any window is
+    // destroyed (WA_DeleteOnClose uses deleteLater). If each saves "all
+    // except self", the last writer wins with an arbitrary subset — e.g.
+    // window 0 saves [1,2], then window 2 saves [0,1], and on restart
+    // main.cpp creates window 0 (unconditional) + 0,1 from the list =
+    // phantom window. Fix: accumulate closing window IDs in a process-
+    // level batch; a deferred handler runs after all closeEvents in the
+    // current event-loop iteration and saves the correct surviving set.
+    //
+    // Synchronous fallback: save all IDs (including self) immediately so
+    // that if the deferred timer doesn't fire during shutdown, we still
+    // have a complete session snapshot. The deferred handler overwrites
+    // with the precise surviving set if it does fire.
+    {
+        static QSet<int> s_closing_batch;
+        static bool s_drain_queued = false;
+        s_closing_batch.insert(window_id_);
+
+        QList<int> all_ids = WindowRegistry::instance().frame_ids();
+        std::sort(all_ids.begin(), all_ids.end());
+        SessionManager::instance().save_window_ids(all_ids);
+
+        if (!s_drain_queued) {
+            s_drain_queued = true;
+            QTimer::singleShot(0, qApp, []() {
+                s_drain_queued = false;
+                QList<int> all = WindowRegistry::instance().frame_ids();
+                QList<int> surviving;
+                for (int id : all) {
+                    if (!s_closing_batch.contains(id))
+                        surviving.append(id);
+                }
+                // All windows closing (app quit) → save the full set so
+                // next launch can restore the complete session.
+                if (surviving.isEmpty())
+                    surviving = all;
+                std::sort(surviving.begin(), surviving.end());
+                SessionManager::instance().save_window_ids(surviving);
+                s_closing_batch.clear();
+            });
+        }
     }
-    // Ensure this window is still saved for next run if it's the last one
-    // being closed — user would expect to land back in their last layout,
-    // including the primary window's dock state.
-    if (open_ids.isEmpty())
-        open_ids.append(window_id_);
-    std::sort(open_ids.begin(), open_ids.end());
-    SessionManager::instance().save_window_ids(open_ids);
-    SessionManager::instance().save_window_count(static_cast<int>(open_ids.size()));
 
     // Phase 2: force a workspace snapshot at close. The save_* calls above
     // each request a snapshot but the ring rate-limits to 60s — closing a
@@ -1083,6 +1464,13 @@ void WindowFrame::changeEvent(QEvent* event) {
     // workspace/screen suffix picks up the new locale immediately.
     if (event->type() == QEvent::LanguageChange) {
         update_window_title();
+        return;
+    }
+    // Remember the frame the user last worked in — the fallback target for
+    // app-wide events published while no frame is the active window.
+    if (event->type() == QEvent::ActivationChange) {
+        if (isActiveWindow())
+            wf_last_active_frame() = this;
         return;
     }
     if (event->type() != QEvent::WindowStateChange)

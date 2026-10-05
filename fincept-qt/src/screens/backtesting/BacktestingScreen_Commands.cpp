@@ -9,11 +9,10 @@
 // Part of the partial-class split of BacktestingScreen.cpp; helpers shared
 // across split files live in BacktestingScreen_internal.h.
 
-#include "screens/backtesting/BacktestingScreen.h"
-#include "screens/backtesting/BacktestingScreen_internal.h"
-
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
+#include "screens/backtesting/BacktestingScreen.h"
+#include "screens/backtesting/BacktestingScreen_internal.h"
 #include "services/backtesting/BacktestingService.h"
 #include "ui/theme/Theme.h"
 
@@ -37,7 +36,7 @@ void BacktestingScreen::on_provider_changed(int index) {
     // Clear stale strategies and show loading state
     strategies_.clear();
     strategy_category_combo_->clear();
-    strategy_category_combo_->addItem("Loading...");
+    strategy_category_combo_->addItem(tr("Loading..."));
     strategy_combo_->clear();
 
     const auto& slug = providers_[index].slug;
@@ -60,9 +59,13 @@ void BacktestingScreen::update_provider_buttons() {
 
         // Same pill template as the brand / RUN / status chips so geometry is
         // identical regardless of selection state.
-        provider_buttons_[i]->setStyleSheet(
-            pill_qss("QPushButton", fg, bg, border, ui::fonts::TINY, ui::fonts::DATA_FAMILY, weight) +
-            QString("QPushButton:hover { background:rgba(%1,0.15); }").arg(rgb));
+        // P7: setStyleSheet always reparses + repolishes, even for an identical
+        // string. This runs for every provider on every provider change, so skip
+        // the 4 buttons whose skin didn't actually change.
+        const QString ss = pill_qss("QPushButton", fg, bg, border, ui::fonts::TINY, ui::fonts::DATA_FAMILY, weight) +
+                           QString("QPushButton:hover { background:rgba(%1,0.15); }").arg(rgb);
+        if (provider_buttons_[i]->styleSheet() != ss)
+            provider_buttons_[i]->setStyleSheet(ss);
     }
 }
 
@@ -102,15 +105,20 @@ void BacktestingScreen::update_section_visibility() {
     const bool is_backtest_family = (cmd == "backtest" || cmd == "optimize" || cmd == "walk_forward");
     const bool needs_benchmark = is_backtest_family || cmd == "returns";
 
-    if (execution_section_) execution_section_->setVisible(is_backtest_family);
-    if (advanced_section_)  advanced_section_->setVisible(is_backtest_family);
-    if (benchmark_section_) benchmark_section_->setVisible(needs_benchmark);
-    if (strategy_section_)  strategy_section_->setVisible(is_backtest_family);
+    if (execution_section_)
+        execution_section_->setVisible(is_backtest_family);
+    if (advanced_section_)
+        advanced_section_->setVisible(is_backtest_family);
+    if (benchmark_section_)
+        benchmark_section_->setVisible(needs_benchmark);
+    if (strategy_section_)
+        strategy_section_->setVisible(is_backtest_family);
 
     // Show explicit MIN/MAX/STEP rows under each strategy param only for `optimize`.
     const bool is_optimize = (cmd == "optimize");
     for (auto* row : param_range_rows_)
-        if (row) row->setVisible(is_optimize);
+        if (row)
+            row->setVisible(is_optimize);
 }
 
 void BacktestingScreen::update_command_buttons() {
@@ -122,7 +130,9 @@ void BacktestingScreen::update_command_buttons() {
         bool active = (i == active_command_);
         bool enabled = supported.contains(cmd.id);
         command_buttons_[i]->setEnabled(enabled);
-        command_buttons_[i]->setStyleSheet(
+        // P7: only 2 of the 11 command pills change skin per command switch —
+        // skip the identical 9 rather than reparsing every stylesheet each time.
+        const QString cmd_ss =
             QString("QPushButton { text-align:left; padding:6px 10px; border:none;"
                     "border-left:1px solid %1; color:%2;"
                     "font-size:%3px; font-family:%4; font-weight:%5; background:%6; }"
@@ -140,12 +150,43 @@ void BacktestingScreen::update_command_buttons() {
                             : "transparent")
                 .arg(QString("%1,%2,%3").arg(cmd.color.red()).arg(cmd.color.green()).arg(cmd.color.blue()))
                 .arg(cmd.color.name())
-                .arg(ui::colors::TEXT_DIM()));
+                .arg(ui::colors::TEXT_DIM());
+        if (command_buttons_[i]->styleSheet() != cmd_ss)
+            command_buttons_[i]->setStyleSheet(cmd_ss);
     }
 }
 // ── Gather args ──────────────────────────────────────────────────────────────
 
 QJsonObject BacktestingScreen::gather_strategy_params() {
+    // Custom combo: build comboConfig JSON instead of flat params
+    auto strategy_id = strategy_combo_->currentData().toString();
+    if (strategy_id == "custom_combo" && combo_rows_[0].type && combo_rows_[1].type) {
+        QJsonObject params;
+        QJsonArray indicators;
+
+        int n_indicators = (combo_ind3_enabled_ && combo_ind3_enabled_->isChecked()) ? 3 : 2;
+        for (int i = 0; i < n_indicators; ++i) {
+            const auto& r = combo_rows_[i];
+            if (!r.type)
+                continue;
+            QJsonObject ind;
+            ind["type"] = r.type->currentText();
+            ind["period"] = r.period ? r.period->value() : 14;
+            ind["condition"] = r.cond->currentText();
+            ind["threshold"] = r.val->value();
+            const QString cond = r.cond->currentText();
+            ind["exitCondition"] = (cond == "below" || cond == "cross_up") ? QString("above") : QString("below");
+            ind["exitThreshold"] = (r.type->currentText() == "rsi") ? 70.0 : r.val->value();
+            indicators.append(ind);
+        }
+
+        QJsonObject combo_config;
+        combo_config["indicators"] = indicators;
+        combo_config["logic"] = combo_logic_ ? combo_logic_->currentText() : QString("and");
+        params["comboConfig"] = combo_config;
+        return params;
+    }
+
     QJsonObject params;
     for (auto* spin : param_spinboxes_) {
         auto name = spin->property("param_name").toString();
@@ -172,6 +213,10 @@ QJsonObject BacktestingScreen::gather_args() {
     args["symbols"] = symbols;
     args["startDate"] = start;
     args["endDate"] = end;
+    if (interval_combo_)
+        args["interval"] = interval_combo_->currentText();
+    if (!pending_weights_.isEmpty() && pending_weights_.size() == symbols.size())
+        args["weights"] = pending_weights_;
 
     // ── Command-specific args ──
     if (cmd_id == "backtest" || cmd_id == "optimize" || cmd_id == "walk_forward") {
@@ -180,8 +225,12 @@ QJsonObject BacktestingScreen::gather_args() {
         args["slippage"] = slippage_spin_->value() / 100.0;
         args["leverage"] = leverage_spin_->value();
         args["positionSizing"] = pos_sizing_combo_->currentText();
+        if (pos_sizing_value_spin_)
+            args["positionSizeValue"] = pos_sizing_value_spin_->value();
         args["allowShort"] = allow_short_check_->isChecked();
         args["benchmarkSymbol"] = benchmark_edit_->text().trimmed();
+        if (risk_free_spin_)
+            args["riskFreeRate"] = risk_free_spin_->value() / 100.0;
 
         if (stop_loss_spin_->value() > 0)
             args["stopLoss"] = stop_loss_spin_->value() / 100.0;
@@ -199,8 +248,8 @@ QJsonObject BacktestingScreen::gather_args() {
 
     if (cmd_id == "optimize") {
         args["optimizeObjective"] = opt_objective_combo_->currentText();
-        args["optimizeMethod"]    = opt_method_combo_->currentText();
-        args["maxIterations"]     = opt_iterations_spin_->value();
+        args["optimizeMethod"] = opt_method_combo_->currentText();
+        args["maxIterations"] = opt_iterations_spin_->value();
 
         // Build paramRanges from the explicit per-param MIN/MAX/STEP editor.
         // rebuild_strategy_params keeps param_spinboxes_ and the three range
@@ -208,16 +257,19 @@ QJsonObject BacktestingScreen::gather_args() {
         QJsonObject ranges;
         for (int i = 0; i < param_spinboxes_.size(); ++i) {
             auto name = param_spinboxes_[i]->property("param_name").toString();
-            if (name.isEmpty()) continue;
-            if (i >= param_min_spinboxes_.size() || i >= param_max_spinboxes_.size()
-                || i >= param_step_spinboxes_.size()) continue;
+            if (name.isEmpty())
+                continue;
+            if (i >= param_min_spinboxes_.size() || i >= param_max_spinboxes_.size() ||
+                i >= param_step_spinboxes_.size())
+                continue;
             double mn = param_min_spinboxes_[i]->value();
             double mx = param_max_spinboxes_[i]->value();
             double st = qMax(0.0001, param_step_spinboxes_[i]->value());
-            if (mx < mn) std::swap(mn, mx);
+            if (mx < mn)
+                std::swap(mn, mx);
             QJsonObject range;
-            range["min"]  = mn;
-            range["max"]  = mx;
+            range["min"] = mn;
+            range["max"] = mx;
             range["step"] = st;
             ranges[name] = range;
         }
@@ -244,32 +296,32 @@ QJsonObject BacktestingScreen::gather_args() {
         // vectorbt uses long mode names ('crossover_signals'); zipline uses both
         // long and short forms. The params keys are the same across providers.
         if (m == "crossover_signals" || m == "crossover") {
-            params["fast_period"]   = is_fast_period_spin_->value();
-            params["slow_period"]   = is_slow_period_spin_->value();
-            params["fastPeriod"]    = is_fast_period_spin_->value(); // zipline alias
-            params["slowPeriod"]    = is_slow_period_spin_->value();
-            params["ma_type"]       = is_ma_type_combo_->currentText();
-            params["maType"]        = is_ma_type_combo_->currentText();
+            params["fast_period"] = is_fast_period_spin_->value();
+            params["slow_period"] = is_slow_period_spin_->value();
+            params["fastPeriod"] = is_fast_period_spin_->value(); // zipline alias
+            params["slowPeriod"] = is_slow_period_spin_->value();
+            params["ma_type"] = is_ma_type_combo_->currentText();
+            params["maType"] = is_ma_type_combo_->currentText();
             params["fast_indicator"] = is_ma_type_combo_->currentText(); // vectorbt key
             params["slow_indicator"] = is_ma_type_combo_->currentText();
         } else if (m == "threshold_signals" || m == "threshold") {
             params["period"] = is_period_spin_->value();
-            params["lower"]  = is_lower_spin_->value();
-            params["upper"]  = is_upper_spin_->value();
+            params["lower"] = is_lower_spin_->value();
+            params["upper"] = is_upper_spin_->value();
         } else if (m == "breakout_signals" || m == "breakout") {
-            params["period"]  = is_period_spin_->value();
+            params["period"] = is_period_spin_->value();
             params["channel"] = is_channel_combo_->currentText();
         } else if (m == "mean_reversion_signals" || m == "mean_reversion") {
-            params["period"]  = is_period_spin_->value();
+            params["period"] = is_period_spin_->value();
             params["z_entry"] = is_z_entry_spin_->value();
-            params["z_exit"]  = is_z_exit_spin_->value();
+            params["z_exit"] = is_z_exit_spin_->value();
         } else if (m == "signal_filter" || m == "filter") {
-            params["base_indicator"]   = ind_signal_indicator_combo_->currentData().toString();
-            params["base_period"]      = is_period_spin_->value();
+            params["base_indicator"] = ind_signal_indicator_combo_->currentData().toString();
+            params["base_period"] = is_period_spin_->value();
             params["filter_indicator"] = is_filter_indicator_combo_->currentText();
-            params["filter_period"]    = is_filter_period_spin_->value();
+            params["filter_period"] = is_filter_period_spin_->value();
             params["filter_threshold"] = is_filter_threshold_spin_->value();
-            params["filter_type"]      = is_filter_type_combo_->currentText();
+            params["filter_type"] = is_filter_type_combo_->currentText();
         }
         args["params"] = params;
     }
@@ -281,16 +333,16 @@ QJsonObject BacktestingScreen::gather_args() {
         // Send only the params the chosen generator consumes so the JSON stays
         // unambiguous; Python providers use defaults for anything missing.
         if (lt == "FIXLB") {
-            params["horizon"]   = labels_horizon_spin_->value();
+            params["horizon"] = labels_horizon_spin_->value();
             params["threshold"] = labels_threshold_spin_->value();
         } else if (lt == "MEANLB" || lt == "TRENDLB") {
-            params["window"]    = labels_window_spin_->value();
+            params["window"] = labels_window_spin_->value();
             params["threshold"] = labels_threshold_spin_->value();
         } else if (lt == "LEXLB") {
-            params["window"]    = labels_window_spin_->value();
+            params["window"] = labels_window_spin_->value();
         } else if (lt == "BOLB") {
-            params["window"]    = labels_window_spin_->value();
-            params["alpha"]     = labels_alpha_spin_->value();
+            params["window"] = labels_window_spin_->value();
+            params["alpha"] = labels_alpha_spin_->value();
         }
         args["params"] = params;
     }
@@ -304,23 +356,23 @@ QJsonObject BacktestingScreen::gather_args() {
         // Sending both keeps the JSON contract provider-agnostic.
         if (st == "RollingSplitter") {
             params["window_len"] = splitter_window_spin_->value();
-            params["windowLen"]  = splitter_window_spin_->value();
-            params["test_len"]   = splitter_test_spin_->value();
-            params["testLen"]    = splitter_test_spin_->value();
-            params["step"]       = splitter_step_spin_->value();
-        } else if (st == "ExpandingSplitter") {
-            params["min_len"]  = splitter_min_spin_->value();
-            params["minLen"]   = splitter_min_spin_->value();
+            params["windowLen"] = splitter_window_spin_->value();
             params["test_len"] = splitter_test_spin_->value();
-            params["testLen"]  = splitter_test_spin_->value();
-            params["step"]     = splitter_step_spin_->value();
+            params["testLen"] = splitter_test_spin_->value();
+            params["step"] = splitter_step_spin_->value();
+        } else if (st == "ExpandingSplitter") {
+            params["min_len"] = splitter_min_spin_->value();
+            params["minLen"] = splitter_min_spin_->value();
+            params["test_len"] = splitter_test_spin_->value();
+            params["testLen"] = splitter_test_spin_->value();
+            params["step"] = splitter_step_spin_->value();
         } else if (st == "PurgedKFoldSplitter" || st == "PurgedKFold") {
-            params["n_splits"]    = splitter_n_splits_spin_->value();
-            params["nSplits"]     = splitter_n_splits_spin_->value();
-            params["purge_len"]   = splitter_purge_spin_->value();
-            params["purgeLen"]    = splitter_purge_spin_->value();
+            params["n_splits"] = splitter_n_splits_spin_->value();
+            params["nSplits"] = splitter_n_splits_spin_->value();
+            params["purge_len"] = splitter_purge_spin_->value();
+            params["purgeLen"] = splitter_purge_spin_->value();
             params["embargo_len"] = splitter_embargo_spin_->value();
-            params["embargoLen"]  = splitter_embargo_spin_->value();
+            params["embargoLen"] = splitter_embargo_spin_->value();
         }
         args["params"] = params;
     }
@@ -328,9 +380,10 @@ QJsonObject BacktestingScreen::gather_args() {
     if (cmd_id == "returns") {
         const QString at = returns_type_combo_->currentText();
         args["analysisType"] = at;
-        // Benchmark is consumed by returns_stats for alpha/beta/info-ratio.
         if (!benchmark_edit_->text().trimmed().isEmpty())
             args["benchmarkSymbol"] = benchmark_edit_->text().trimmed();
+        if (risk_free_spin_)
+            args["riskFreeRate"] = risk_free_spin_->value() / 100.0;
 
         QJsonObject params;
         if (at == "rolling") {
@@ -338,8 +391,9 @@ QJsonObject BacktestingScreen::gather_args() {
             // vectorbt reads `metric` (singular string); zipline reads
             // `metrics` (list, used as a set-membership check). Send both.
             const QString m = returns_metric_combo_->currentText();
-            params["metric"]  = m;
-            QJsonArray ml; ml.append(m);
+            params["metric"] = m;
+            QJsonArray ml;
+            ml.append(m);
             params["metrics"] = ml;
         } else if (at == "ranges") {
             params["threshold"] = returns_threshold_spin_->value();
@@ -361,16 +415,16 @@ QJsonObject BacktestingScreen::gather_args() {
         if (g == "RANDNX") {
             params["min_hold"] = signal_min_hold_spin_->value();
             params["max_hold"] = signal_max_hold_spin_->value();
-            params["minHold"]  = signal_min_hold_spin_->value();
-            params["maxHold"]  = signal_max_hold_spin_->value();
+            params["minHold"] = signal_min_hold_spin_->value();
+            params["maxHold"] = signal_max_hold_spin_->value();
         }
         if (g == "RPROB" || g == "RPROBX") {
             params["entry_prob"] = signal_entry_prob_spin_->value();
-            params["entryProb"]  = signal_entry_prob_spin_->value();
+            params["entryProb"] = signal_entry_prob_spin_->value();
         }
         if (g == "RPROBX") {
             params["exit_prob"] = signal_exit_prob_spin_->value();
-            params["exitProb"]  = signal_exit_prob_spin_->value();
+            params["exitProb"] = signal_exit_prob_spin_->value();
         }
         args["params"] = params;
     }
@@ -382,19 +436,19 @@ QJsonObject BacktestingScreen::gather_args() {
         const QString lt = l2s_label_type_combo_->currentText();
         args["labelType"] = lt;
         args["entryLabel"] = l2s_entry_label_spin_->value();
-        args["exitLabel"]  = l2s_exit_label_spin_->value();
+        args["exitLabel"] = l2s_exit_label_spin_->value();
         QJsonObject params;
         if (lt == "FIXLB") {
-            params["horizon"]   = labels_horizon_spin_->value();
+            params["horizon"] = labels_horizon_spin_->value();
             params["threshold"] = labels_threshold_spin_->value();
         } else if (lt == "MEANLB" || lt == "TRENDLB") {
-            params["window"]    = labels_window_spin_->value();
+            params["window"] = labels_window_spin_->value();
             params["threshold"] = labels_threshold_spin_->value();
         } else if (lt == "LEXLB") {
-            params["window"]    = labels_window_spin_->value();
+            params["window"] = labels_window_spin_->value();
         } else if (lt == "BOLB") {
-            params["window"]    = labels_window_spin_->value();
-            params["alpha"]     = labels_alpha_spin_->value();
+            params["window"] = labels_window_spin_->value();
+            params["alpha"] = labels_alpha_spin_->value();
         }
         args["params"] = params;
     }
@@ -426,20 +480,29 @@ void BacktestingScreen::on_run() {
 
     // Validate command is supported by current provider
     if (!provider_info.commands.contains(command_id)) {
-        display_error(
-            QString("Command '%1' is not supported by provider '%2'").arg(command_id, provider_info.display_name));
+        display_error(tr("Command '%1' is not supported by provider '%2'").arg(command_id, provider_info.display_name));
         return;
     }
 
     // Validate symbols not empty
     if (symbols_edit_->text().trimmed().isEmpty()) {
-        display_error("Please enter at least one symbol (e.g. SPY, AAPL)");
+        display_error(tr("Please enter at least one symbol (e.g. SPY, AAPL)"));
+        return;
+    }
+
+    // Date sanity: an inverted range reaches the Python provider as an empty download and
+    // comes back as a generic "no data" failure minutes later.
+    if (start_date_->date() >= end_date_->date()) {
+        display_error(tr("Start date must be before the end date."));
         return;
     }
 
     is_running_ = true;
+    running_provider_ = provider_info.slug;
+    running_command_ = command_id;
     run_button_->setEnabled(false);
-    set_status_state("EXECUTING...", ui::colors::WARNING, "rgba(217,119,6,0.08)");
+    set_status_state(tr("EXECUTING…  0s"), ui::colors::WARNING, "rgba(217,119,6,0.08)");
+    start_run_ticker();
 
     auto args = gather_args();
 

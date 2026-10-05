@@ -1,6 +1,7 @@
 #include "screens/dashboard/widgets/PolymarketPriceWidget.h"
 
 #include "datahub/DataHub.h"
+#include "services/polymarket/PolymarketWebSocket.h"
 #include "ui/theme/Theme.h"
 
 #include <QDialog>
@@ -77,8 +78,7 @@ void PolymarketPriceWidget::build_rows() {
     if (entries_.isEmpty()) {
         auto* hint = new QLabel(tr("No markets configured — click gear to add"));
         hint->setStyleSheet(
-            QString("color:%1;font-size:10px;background:transparent;padding:4px 0;")
-                .arg(ui::colors::TEXT_TERTIARY()));
+            QString("color:%1;font-size:10px;background:transparent;padding:4px 0;").arg(ui::colors::TEXT_TERTIARY()));
         vl->addWidget(hint);
         vl->addStretch(1);
         return;
@@ -97,6 +97,10 @@ void PolymarketPriceWidget::build_rows() {
         r.pct->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         grid->addWidget(r.label, i, 0);
         grid->addWidget(r.pct, i, 1);
+        // The label's tooltip used to be the asset id; keep it in the new one.
+        link_screen(r.label, QStringLiteral("polymarket"),
+                    e.asset_id + QStringLiteral(" | ") + tr("Double-click to open the Polymarket screen"));
+        link_screen(r.pct, QStringLiteral("polymarket"), tr("Double-click to open the Polymarket screen"));
         rows_.insert(e.asset_id, r);
     }
     vl->addLayout(grid);
@@ -107,6 +111,20 @@ void PolymarketPriceWidget::build_rows() {
 void PolymarketPriceWidget::hub_resubscribe() {
     auto& hub = datahub::DataHub::instance();
     hub.unsubscribe(this);
+
+    // `prediction:polymarket:price:*` is push-only: the hub never fetches it,
+    // PolymarketWebSocket publishes only for tokens it has been asked to stream.
+    // Nothing on the dashboard asked, so the tile sat at "—" forever unless the
+    // Polymarket screen happened to be streaming the same tokens. Ask for them
+    // here. This is additive and idempotent (the socket keeps a set); we never
+    // unsubscribe because the token set is shared with the Polymarket screen.
+    QStringList token_ids;
+    token_ids.reserve(entries_.size());
+    for (const auto& e : entries_)
+        token_ids.append(e.asset_id);
+    if (!token_ids.isEmpty())
+        services::polymarket::PolymarketWebSocket::instance().subscribe(token_ids);
+
     for (const auto& e : entries_) {
         const QString topic = QStringLiteral("prediction:polymarket:price:") + e.asset_id;
         const QString asset_copy = e.asset_id;
@@ -148,8 +166,7 @@ void PolymarketPriceWidget::on_price(const QString& asset_id, double price) {
         col = ui::colors::POSITIVE();
     else if (pct <= 35)
         col = ui::colors::NEGATIVE();
-    it->pct->setStyleSheet(
-        QString("color:%1;font-size:11px;font-weight:700;background:transparent;").arg(col.name()));
+    it->pct->setStyleSheet(QString("color:%1;font-size:11px;font-weight:700;background:transparent;").arg(col.name()));
     set_loading(false);
 }
 
@@ -198,17 +215,24 @@ void PolymarketPriceWidget::on_theme_changed() {
 
 void PolymarketPriceWidget::apply_styles() {
     const QString label_css =
-        QString("color:%1;font-size:11px;font-weight:600;background:transparent;")
-            .arg(ui::colors::TEXT_PRIMARY());
+        QString("color:%1;font-size:11px;font-weight:600;background:transparent;").arg(ui::colors::TEXT_PRIMARY());
     const QString pct_css =
-        QString("color:%1;font-size:11px;font-weight:700;background:transparent;")
-            .arg(ui::colors::TEXT_TERTIARY());
+        QString("color:%1;font-size:11px;font-weight:700;background:transparent;").arg(ui::colors::TEXT_TERTIARY());
     for (auto it = rows_.begin(); it != rows_.end(); ++it) {
         if (it->label)
             it->label->setStyleSheet(label_css);
         if (it->pct && it->pct->text() == "—")
             it->pct->setStyleSheet(pct_css);
     }
+}
+
+void PolymarketPriceWidget::retranslateUi() {
+    BaseWidget::retranslateUi();
+    set_title(tr("POLYMARKET"));
+    // Only the "no markets configured" hint is translatable; rebuilding
+    // populated rows blanked every probability until the next push.
+    if (entries_.isEmpty())
+        build_rows();
 }
 
 } // namespace fincept::screens::widgets

@@ -5,14 +5,20 @@
 #include "ui/theme/Theme.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QDesktopServices>
 #include <QDir>
+#include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLocale>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSysInfo>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -67,7 +73,7 @@ static QWidget* makePanel() {
 }
 
 static QLabel* makePanelHeader(const QString& icon, const QString& title, const QString& iconColor) {
-    auto* lbl = new QLabel(QString("%1  %2").arg(icon, title));
+    auto* lbl = new QLabel(icon.isEmpty() ? title : QString("%1  %2").arg(icon, title));
     lbl->setStyleSheet(QString("color: %1; font-size: 11px; font-weight: bold; letter-spacing: 0.5px; "
                                "background: %2; padding: 10px 14px; border-bottom: 1px solid %3; "
                                "font-family: 'Consolas','Courier New',monospace;")
@@ -82,6 +88,32 @@ static QLabel* makeBullet(const QString& text) {
                            .arg(ui::colors::TEXT_SECONDARY()));
     lbl->setWordWrap(true);
     return lbl;
+}
+
+// A clickable link label: shows `text`, opens `href` (https:// or mailto:) in the
+// system handler. The contact addresses and licence/Enterprise footers used to be
+// plain QLabels that looked like links but did nothing when clicked.
+static QLabel* makeLinkLabel(const QString& text, const QString& href, const QString& style) {
+    auto* lbl = new QLabel(QString("<a href=\"%1\" style=\"color:%2;text-decoration:none;\">%3</a>")
+                               .arg(href, ui::colors::CYAN(), text.toHtmlEscaped()));
+    lbl->setTextFormat(Qt::RichText);
+    lbl->setOpenExternalLinks(true);
+    lbl->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    lbl->setCursor(Qt::PointingHandCursor);
+    lbl->setStyleSheet(style);
+    return lbl;
+}
+
+// Re-apply icon + title to a panel header (mirrors makePanelHeader's text format).
+static void setPanelHeaderText(QLabel* lbl, const QString& icon, const QString& title) {
+    if (lbl)
+        lbl->setText(icon.isEmpty() ? title : QString("%1  %2").arg(icon, title));
+}
+
+// Re-apply bullet text (mirrors makeBullet's "■  %1" format).
+static void setBulletText(QLabel* lbl, const QString& text) {
+    if (lbl)
+        lbl->setText(QString("■  %1").arg(text));
 }
 
 // ── Constructor ───────────────────────────────────────────────────────────────
@@ -112,7 +144,8 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
         pvl->setContentsMargins(0, 0, 0, 0);
         pvl->setSpacing(0);
 
-        pvl->addWidget(makePanelHeader("ℹ", "VERSION INFORMATION", ui::colors::AMBER));
+        version_header_ = makePanelHeader("ℹ", tr("VERSION INFORMATION"), ui::colors::AMBER);
+        pvl->addWidget(version_header_);
 
         auto* body = new QWidget(this);
         body->setStyleSheet("background: transparent;");
@@ -121,14 +154,14 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
 
         auto* left = new QVBoxLayout;
         left->setSpacing(4);
-        auto* name = new QLabel("Fincept Terminal");
-        name->setStyleSheet(QString("color: %1; font-size: 15px; font-weight: bold; background: transparent; "
-                                    "font-family: 'Consolas','Courier New',monospace;")
-                                .arg(ui::colors::TEXT_PRIMARY()));
-        left->addWidget(name);
-        auto* sub = new QLabel("NATIVE DESKTOP FINANCIAL INTELLIGENCE TERMINAL");
-        sub->setStyleSheet(MUTED());
-        left->addWidget(sub);
+        app_name_ = new QLabel(QStringLiteral("Fincept Terminal"));
+        app_name_->setStyleSheet(QString("color: %1; font-size: 15px; font-weight: bold; background: transparent; "
+                                         "font-family: 'Consolas','Courier New',monospace;")
+                                     .arg(ui::colors::TEXT_PRIMARY()));
+        left->addWidget(app_name_);
+        app_subtitle_ = new QLabel(tr("NATIVE DESKTOP FINANCIAL INTELLIGENCE TERMINAL"));
+        app_subtitle_->setStyleSheet(MUTED());
+        left->addWidget(app_subtitle_);
         bhl->addLayout(left);
         bhl->addStretch();
 
@@ -143,36 +176,55 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
         right->addWidget(ver);
 
         // Check-for-updates button — user-initiated, always shows a result dialog.
-        auto* check_btn = new QPushButton(QStringLiteral("Check for Updates"));
-        check_btn->setStyleSheet(LINK_BTN());
-        check_btn->setCursor(Qt::PointingHandCursor);
-        connect(check_btn, &QPushButton::clicked, this, [this, check_btn]() {
-            check_btn->setEnabled(false);
-            check_btn->setText(QStringLiteral("Checking…"));
+        check_btn_ = new QPushButton(tr("Check for Updates"));
+        check_btn_->setStyleSheet(LINK_BTN());
+        check_btn_->setCursor(Qt::PointingHandCursor);
+        connect(check_btn_, &QPushButton::clicked, this, [this]() {
+            check_in_progress_ = true;
+            check_btn_->setEnabled(false);
+            check_btn_->setText(tr("Checking…"));
             auto& svc = services::UpdateService::instance();
             svc.set_dialog_parent(window());
             // Re-enable the button when the check completes. Using a unique
             // connection is fine since the service is a long-lived singleton.
-            connect(&svc, &services::UpdateService::check_finished, check_btn,
-                    [check_btn](bool /*found*/) {
-                        check_btn->setEnabled(true);
-                        check_btn->setText(QStringLiteral("Check for Updates"));
-                    },
-                    Qt::SingleShotConnection);
+            connect(
+                &svc, &services::UpdateService::check_finished, check_btn_,
+                [this](bool /*found*/) {
+                    check_in_progress_ = false;
+                    check_btn_->setEnabled(true);
+                    check_btn_->setText(tr("Check for Updates"));
+                },
+                Qt::SingleShotConnection);
             svc.check_for_updates(/*silent=*/false);
         });
-        right->addWidget(check_btn);
+        right->addWidget(check_btn_);
+
+        // Result of the last check (silent startup check included) — shown only
+        // when a newer release exists; "up to date" is already reported by the
+        // dialog a user-initiated check shows.
+        update_status_ = new QLabel;
+        update_status_->setAlignment(Qt::AlignRight);
+        update_status_->setStyleSheet(QString("color: %1; font-size: 12px; font-weight: bold; "
+                                              "background: transparent; "
+                                              "font-family: 'Consolas','Courier New',monospace;")
+                                          .arg(ui::colors::AMBER()));
+        update_status_->hide();
+        right->addWidget(update_status_);
+        connect(&services::UpdateService::instance(), &services::UpdateService::check_finished, this,
+                [this](bool) { refresh_update_status(); });
+        refresh_update_status(); // the startup check may have finished before this screen existed
         bhl->addLayout(right);
 
         pvl->addWidget(body);
 
         // Footer bar
-        auto* foot = new QLabel("© 2024-2026 Fincept Corporation. All rights reserved.");
-        foot->setStyleSheet(QString("color: %1; font-size: 11px; background: %2; "
-                                    "padding: 6px 14px; border-top: 1px solid %3; "
-                                    "font-family: 'Consolas','Courier New',monospace;")
-                                .arg(ui::colors::TEXT_TERTIARY(), ui::colors::BG_RAISED(), ui::colors::BORDER_DIM()));
-        pvl->addWidget(foot);
+        copyright_ = new QLabel(tr("© 2024-2026 Fincept Corporation. All rights reserved."));
+        copyright_->setStyleSheet(
+            QString("color: %1; font-size: 11px; background: %2; "
+                    "padding: 6px 14px; border-top: 1px solid %3; "
+                    "font-family: 'Consolas','Courier New',monospace;")
+                .arg(ui::colors::TEXT_TERTIARY(), ui::colors::BG_RAISED(), ui::colors::BORDER_DIM()));
+        pvl->addWidget(copyright_);
 
         vl->addWidget(panel);
     }
@@ -191,55 +243,66 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
             auto* pvl = new QVBoxLayout(panel);
             pvl->setContentsMargins(0, 0, 0, 0);
             pvl->setSpacing(0);
-            pvl->addWidget(makePanelHeader("📄", "OPEN SOURCE LICENSE", ui::colors::POSITIVE));
+            oss_header_ = makePanelHeader("", tr("OPEN SOURCE LICENSE"), ui::colors::POSITIVE);
+            pvl->addWidget(oss_header_);
 
             auto* body = new QWidget(this);
             body->setStyleSheet("background: transparent;");
             auto* bvl = new QVBoxLayout(body);
             bvl->setContentsMargins(14, 10, 14, 10);
             bvl->setSpacing(6);
-            bvl->addWidget(makeBullet("AGPL-3.0-or-later"));
-            bvl->addWidget(makeBullet("Free for personal & educational use"));
-            bvl->addWidget(makeBullet("Share modifications under same license"));
-            bvl->addWidget(makeBullet("Network use counts as distribution"));
+            // First bullet is the license SPDX identifier (a code value) — not translated.
+            auto* oss_b0 = makeBullet(QStringLiteral("AGPL-3.0-or-later"));
+            oss_bullets_ = {oss_b0, makeBullet(tr("Free for personal & educational use")),
+                            makeBullet(tr("Share modifications under same license")),
+                            makeBullet(tr("Network use counts as distribution"))};
+            for (auto* b : oss_bullets_)
+                bvl->addWidget(b);
             pvl->addWidget(body);
 
             // Footer link
-            auto* foot = new QLabel("gnu.org/licenses/agpl-3.0");
-            foot->setStyleSheet(QString("color: %1; font-size: 11px; background: transparent; "
-                                        "padding: 6px 14px; border-top: 1px solid %2; "
-                                        "font-family: 'Consolas','Courier New',monospace;")
-                                    .arg(ui::colors::CYAN(), ui::colors::BORDER_DIM()));
+            auto* foot = makeLinkLabel(QStringLiteral("gnu.org/licenses/agpl-3.0"),
+                                       QStringLiteral("https://www.gnu.org/licenses/agpl-3.0.html"),
+                                       QString("color: %1; font-size: 11px; background: transparent; "
+                                               "padding: 6px 14px; border-top: 1px solid %2; "
+                                               "font-family: 'Consolas','Courier New',monospace;")
+                                           .arg(ui::colors::CYAN(), ui::colors::BORDER_DIM()));
             pvl->addWidget(foot);
 
             rl->addWidget(panel, 1);
         }
 
-        // Commercial
+        // Enterprise — the separate closed-source product, not a licence for this build.
+        // Fincept no longer sells a commercial licence for the open-source edition;
+        // commercial, institutional and academic use is served by Enterprise instead.
         {
             auto* panel = makePanel();
             auto* pvl = new QVBoxLayout(panel);
             pvl->setContentsMargins(0, 0, 0, 0);
             pvl->setSpacing(0);
-            pvl->addWidget(makePanelHeader("★", "COMMERCIAL LICENSE", ui::colors::AMBER));
+            enterprise_header_ = makePanelHeader("★", tr("FINCEPT TERMINAL ENTERPRISE"), ui::colors::AMBER);
+            pvl->addWidget(enterprise_header_);
 
             auto* body = new QWidget(this);
             body->setStyleSheet("background: transparent;");
             auto* bvl = new QVBoxLayout(body);
             bvl->setContentsMargins(14, 10, 14, 10);
             bvl->setSpacing(6);
-            bvl->addWidget(makeBullet("Required for commercial deployment"));
-            bvl->addWidget(makeBullet("No source sharing required"));
-            bvl->addWidget(makeBullet("Priority support included"));
-            bvl->addWidget(makeBullet("Custom integration options available"));
+            enterprise_bullets_ = {makeBullet(tr("41 modules · private & proprietary data")),
+                                   makeBullet(tr("Multi-agent research · live broker routing")),
+                                   makeBullet(tr("SSO, audit logs & SLA-backed support")),
+                                   makeBullet(tr("From $99/user/month · no copyleft"))};
+            for (auto* b : enterprise_bullets_)
+                bvl->addWidget(b);
             pvl->addWidget(body);
 
             // Footer link
-            auto* foot = new QLabel("support@fincept.in");
-            foot->setStyleSheet(QString("color: %1; font-size: 11px; background: transparent; "
-                                        "padding: 6px 14px; border-top: 1px solid %2; "
-                                        "font-family: 'Consolas','Courier New',monospace;")
-                                    .arg(ui::colors::CYAN(), ui::colors::BORDER_DIM()));
+            auto* foot = makeLinkLabel(QStringLiteral("fincept.in/enterprise"),
+                                       QStringLiteral("https://fincept.in/enterprise"),
+                                       QString("color: %1; font-size: 11px; background: transparent; "
+                                               "padding: 6px 14px; border-top: 1px solid %2; "
+                                               "font-family: 'Consolas','Courier New',monospace;")
+                                           .arg(ui::colors::CYAN(), ui::colors::BORDER_DIM()));
             pvl->addWidget(foot);
 
             rl->addWidget(panel, 1);
@@ -256,7 +319,8 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
         auto* pvl = new QVBoxLayout(panel);
         pvl->setContentsMargins(0, 0, 0, 0);
         pvl->setSpacing(0);
-        pvl->addWidget(makePanelHeader("⚙", "DIAGNOSTICS", ui::colors::AMBER));
+        diag_header_ = makePanelHeader("⚙", tr("DIAGNOSTICS"), ui::colors::AMBER);
+        pvl->addWidget(diag_header_);
 
         auto* body = new QWidget(this);
         body->setStyleSheet("background: transparent;");
@@ -266,9 +330,9 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
 
         auto* left = new QVBoxLayout;
         left->setSpacing(2);
-        auto* lbl = new QLabel("CRASH DUMPS");
-        lbl->setStyleSheet(SECTION_LABEL());
-        left->addWidget(lbl);
+        crash_dumps_label_ = new QLabel(tr("CRASH DUMPS"));
+        crash_dumps_label_->setStyleSheet(SECTION_LABEL());
+        left->addWidget(crash_dumps_label_);
         const QString crash_dir = QDir::toNativeSeparators(AppPaths::crashdumps());
         auto* path = new QLabel(crash_dir);
         path->setStyleSheet(MUTED());
@@ -277,17 +341,44 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
         left->addWidget(path);
         bhl->addLayout(left, 1);
 
-        auto* open_btn = new QPushButton(QStringLiteral("Open Folder"));
-        open_btn->setStyleSheet(LINK_BTN());
-        open_btn->setCursor(Qt::PointingHandCursor);
-        connect(open_btn, &QPushButton::clicked, this, [crash_dir]() {
+        auto* diag_btns = new QVBoxLayout;
+        diag_btns->setSpacing(6);
+
+        open_folder_btn_ = new QPushButton(tr("Open Folder"));
+        open_folder_btn_->setStyleSheet(LINK_BTN());
+        open_folder_btn_->setCursor(Qt::PointingHandCursor);
+        connect(open_folder_btn_, &QPushButton::clicked, this, [crash_dir]() {
             // mkpath is idempotent; ensures the folder exists before
             // QDesktopServices::openUrl on a freshly installed terminal
             // that hasn't crashed yet.
             QDir().mkpath(crash_dir);
             QDesktopServices::openUrl(QUrl::fromLocalFile(crash_dir));
         });
-        bhl->addWidget(open_btn, 0, Qt::AlignTop);
+        diag_btns->addWidget(open_folder_btn_);
+
+        // Support and Help both ask for "your OS, version and any error messages"
+        // when filing a bug. Put that block on the clipboard in one click. Only
+        // build/OS facts — no paths, account or hardware identifiers.
+        copy_info_btn_ = new QPushButton(tr("Copy System Info"));
+        copy_info_btn_->setStyleSheet(LINK_BTN());
+        copy_info_btn_->setCursor(Qt::PointingHandCursor);
+        copy_info_btn_->setToolTip(tr("Copy version and OS details to the clipboard for bug reports"));
+        connect(copy_info_btn_, &QPushButton::clicked, this, [this]() {
+            const QString info = QStringLiteral("Fincept Terminal v%1\nQt: %2 (built with %3)\nOS: %4 (%5 %6)\n"
+                                                "CPU architecture: %7\nBuild ABI: %8\nLocale: %9")
+                                     .arg(QApplication::applicationVersion(), QString::fromLatin1(qVersion()),
+                                          QStringLiteral(QT_VERSION_STR), QSysInfo::prettyProductName(),
+                                          QSysInfo::kernelType(), QSysInfo::kernelVersion(),
+                                          QSysInfo::currentCpuArchitecture(), QSysInfo::buildAbi(),
+                                          QLocale::system().name());
+            if (auto* cb = QGuiApplication::clipboard())
+                cb->setText(info);
+            copy_info_btn_->setText(tr("Copied"));
+            QTimer::singleShot(1500, copy_info_btn_, [this]() { copy_info_btn_->setText(tr("Copy System Info")); });
+        });
+        diag_btns->addWidget(copy_info_btn_);
+        diag_btns->addStretch();
+        bhl->addLayout(diag_btns);
 
         pvl->addWidget(body);
         vl->addWidget(panel);
@@ -299,7 +390,8 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
         auto* pvl = new QVBoxLayout(panel);
         pvl->setContentsMargins(0, 0, 0, 0);
         pvl->setSpacing(0);
-        pvl->addWidget(makePanelHeader("🛡", "TRADEMARKS", ui::colors::AMBER));
+        trademarks_header_ = makePanelHeader("", tr("TRADEMARKS"), ui::colors::AMBER);
+        pvl->addWidget(trademarks_header_);
 
         auto* body = new QWidget(this);
         body->setStyleSheet("background: transparent;");
@@ -307,18 +399,19 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
         bvl->setContentsMargins(14, 10, 14, 12);
         bvl->setSpacing(6);
 
-        auto* desc = new QLabel("\"Fincept\", \"Fincept Terminal\", and associated logos are trademarks of "
-                                "Fincept Corporation. Use of these marks requires explicit written permission.");
-        desc->setStyleSheet(BODY());
-        desc->setWordWrap(true);
-        bvl->addWidget(desc);
+        trademarks_desc_ =
+            new QLabel(tr("\"Fincept\", \"Fincept Terminal\", and associated logos are trademarks of "
+                          "Fincept Corporation. Use of these marks requires explicit written permission."));
+        trademarks_desc_->setStyleSheet(BODY());
+        trademarks_desc_->setWordWrap(true);
+        bvl->addWidget(trademarks_desc_);
 
-        auto* perm =
-            new QLabel("Permission is not granted to use Fincept trademarks in a way that suggests "
-                       "affiliation with or endorsement by Fincept Corporation without prior written consent.");
-        perm->setStyleSheet(MUTED());
-        perm->setWordWrap(true);
-        bvl->addWidget(perm);
+        trademarks_perm_ =
+            new QLabel(tr("Permission is not granted to use Fincept trademarks in a way that suggests "
+                          "affiliation with or endorsement by Fincept Corporation without prior written consent."));
+        trademarks_perm_->setStyleSheet(MUTED());
+        trademarks_perm_->setWordWrap(true);
+        bvl->addWidget(trademarks_perm_);
 
         pvl->addWidget(body);
         vl->addWidget(panel);
@@ -330,7 +423,8 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
         auto* pvl = new QVBoxLayout(panel);
         pvl->setContentsMargins(0, 0, 0, 0);
         pvl->setSpacing(0);
-        pvl->addWidget(makePanelHeader("🌐", "RESOURCES", ui::colors::AMBER));
+        resources_header_ = makePanelHeader("", tr("RESOURCES"), ui::colors::AMBER);
+        pvl->addWidget(resources_header_);
 
         auto* body = new QWidget(this);
         body->setStyleSheet("background: transparent;");
@@ -342,14 +436,17 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
             QString label;
             QString url;
         };
+        // Every URL here must resolve. docs/TRADEMARK.md and docs/CLA.md do NOT
+        // exist in the repository — those two buttons opened GitHub 404 pages.
+        // Replaced with documents that are actually checked in.
         const Link links[] = {
-            {"GitHub Repository", "https://github.com/Fincept-Corporation/FinceptTerminal"},
-            {"License (AGPL-3.0)", "https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/LICENSE"},
-            {"Commercial License",
-             "https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/docs/COMMERCIAL_LICENSE.md"},
-            {"Trademark Policy", "https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/docs/TRADEMARK.md"},
-            {"Contributor CLA", "https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/docs/CLA.md"},
-            {"Official Website", "https://fincept.in"},
+            {tr("GitHub Repository"), "https://github.com/Fincept-Corporation/FinceptTerminal"},
+            {tr("License (AGPL-3.0)"), "https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/LICENSE"},
+            {tr("Fincept Enterprise"), "https://fincept.in/enterprise"},
+            {tr("Documentation"), "https://github.com/Fincept-Corporation/FinceptTerminal/tree/main/docs"},
+            {tr("Contributing Guide"),
+             "https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/docs/CONTRIBUTING.md"},
+            {tr("Official Website"), "https://fincept.in"},
         };
 
         for (int i = 0; i < 6; ++i) {
@@ -357,8 +454,11 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
             btn->setStyleSheet(LINK_BTN());
             btn->setFixedHeight(36);
             const QString url = links[i].url;
+            btn->setAccessibleName(links[i].label);
+            btn->setToolTip(url);
             connect(btn, &QPushButton::clicked, this, [url]() { QDesktopServices::openUrl(QUrl(url)); });
             grid->addWidget(btn, i / 3, i % 3);
+            resource_btns_.append(btn);
         }
 
         pvl->addWidget(body);
@@ -371,7 +471,8 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
         auto* pvl = new QVBoxLayout(panel);
         pvl->setContentsMargins(0, 0, 0, 0);
         pvl->setSpacing(0);
-        pvl->addWidget(makePanelHeader("✉", "CONTACT", ui::colors::AMBER));
+        contact_header_ = makePanelHeader("✉", tr("CONTACT"), ui::colors::AMBER);
+        pvl->addWidget(contact_header_);
 
         auto* body = new QWidget(this);
         body->setStyleSheet("background: transparent;");
@@ -384,10 +485,10 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
             QString email;
         };
         const Contact contacts[] = {
-            {"GENERAL", "support@fincept.in"},
-            {"COMMERCIAL", "support@fincept.in"},
-            {"SECURITY", "support@fincept.in"},
-            {"LEGAL", "support@fincept.in"},
+            {tr("GENERAL"), "support@fincept.in"},
+            {tr("COMMERCIAL"), "support@fincept.in"},
+            {tr("SECURITY"), "support@fincept.in"},
+            {tr("LEGAL"), "support@fincept.in"},
         };
 
         for (int i = 0; i < 4; ++i) {
@@ -400,9 +501,9 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
             auto* lbl = new QLabel(contacts[i].label);
             lbl->setStyleSheet(SECTION_LABEL());
             cvl->addWidget(lbl);
+            contact_labels_.append(lbl);
 
-            auto* email = new QLabel(contacts[i].email);
-            email->setStyleSheet(LINK_STYLE());
+            auto* email = makeLinkLabel(contacts[i].email, QStringLiteral("mailto:") + contacts[i].email, LINK_STYLE());
             cvl->addWidget(email);
 
             grid->addWidget(col, 0, i);
@@ -415,6 +516,92 @@ AboutScreen::AboutScreen(QWidget* parent) : QWidget(parent) {
     vl->addStretch();
     scroll->setWidget(page);
     root->addWidget(scroll, 1);
+}
+
+void AboutScreen::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void AboutScreen::refresh_update_status() {
+    if (!update_status_)
+        return;
+    const auto& svc = services::UpdateService::instance();
+    const bool available = svc.update_available() && !svc.latest_version().isEmpty();
+    update_status_->setVisible(available);
+    if (available)
+        update_status_->setText(tr("UPDATE AVAILABLE — v%1").arg(svc.latest_version()));
+}
+
+void AboutScreen::retranslateUi() {
+    refresh_update_status();
+    // Version panel
+    setPanelHeaderText(version_header_, "ℹ", tr("VERSION INFORMATION"));
+    if (app_subtitle_)
+        app_subtitle_->setText(tr("NATIVE DESKTOP FINANCIAL INTELLIGENCE TERMINAL"));
+    if (check_btn_)
+        check_btn_->setText(check_in_progress_ ? tr("Checking…") : tr("Check for Updates"));
+    if (copyright_)
+        copyright_->setText(tr("© 2024-2026 Fincept Corporation. All rights reserved."));
+
+    // Open source license — bullet 0 is the SPDX identifier (untranslated).
+    setPanelHeaderText(oss_header_, "", tr("OPEN SOURCE LICENSE"));
+    if (oss_bullets_.size() == 4) {
+        setBulletText(oss_bullets_[1], tr("Free for personal & educational use"));
+        setBulletText(oss_bullets_[2], tr("Share modifications under same license"));
+        setBulletText(oss_bullets_[3], tr("Network use counts as distribution"));
+    }
+
+    // Enterprise (separate closed-source product)
+    setPanelHeaderText(enterprise_header_, "★", tr("FINCEPT TERMINAL ENTERPRISE"));
+    if (enterprise_bullets_.size() == 4) {
+        setBulletText(enterprise_bullets_[0], tr("41 modules · private & proprietary data"));
+        setBulletText(enterprise_bullets_[1], tr("Multi-agent research · live broker routing"));
+        setBulletText(enterprise_bullets_[2], tr("SSO, audit logs & SLA-backed support"));
+        setBulletText(enterprise_bullets_[3], tr("From $99/user/month · no copyleft"));
+    }
+
+    // Diagnostics
+    setPanelHeaderText(diag_header_, "⚙", tr("DIAGNOSTICS"));
+    if (crash_dumps_label_)
+        crash_dumps_label_->setText(tr("CRASH DUMPS"));
+    if (open_folder_btn_)
+        open_folder_btn_->setText(tr("Open Folder"));
+    if (copy_info_btn_) {
+        copy_info_btn_->setText(tr("Copy System Info"));
+        copy_info_btn_->setToolTip(tr("Copy version and OS details to the clipboard for bug reports"));
+    }
+
+    // Trademarks
+    setPanelHeaderText(trademarks_header_, "", tr("TRADEMARKS"));
+    if (trademarks_desc_)
+        trademarks_desc_->setText(tr("\"Fincept\", \"Fincept Terminal\", and associated logos are trademarks of "
+                                     "Fincept Corporation. Use of these marks requires explicit written permission."));
+    if (trademarks_perm_)
+        trademarks_perm_->setText(
+            tr("Permission is not granted to use Fincept trademarks in a way that suggests "
+               "affiliation with or endorsement by Fincept Corporation without prior written consent."));
+
+    // Resources
+    setPanelHeaderText(resources_header_, "", tr("RESOURCES"));
+    if (resource_btns_.size() == 6) {
+        resource_btns_[0]->setText(tr("GitHub Repository"));
+        resource_btns_[1]->setText(tr("License (AGPL-3.0)"));
+        resource_btns_[2]->setText(tr("Fincept Enterprise"));
+        resource_btns_[3]->setText(tr("Documentation"));
+        resource_btns_[4]->setText(tr("Contributing Guide"));
+        resource_btns_[5]->setText(tr("Official Website"));
+    }
+
+    // Contact
+    setPanelHeaderText(contact_header_, "✉", tr("CONTACT"));
+    if (contact_labels_.size() == 4) {
+        contact_labels_[0]->setText(tr("GENERAL"));
+        contact_labels_[1]->setText(tr("COMMERCIAL"));
+        contact_labels_[2]->setText(tr("SECURITY"));
+        contact_labels_[3]->setText(tr("LEGAL"));
+    }
 }
 
 } // namespace fincept::screens

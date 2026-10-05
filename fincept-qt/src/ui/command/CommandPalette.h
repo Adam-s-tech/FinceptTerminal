@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDialog>
+#include <QEvent>
 #include <QString>
 
 class QLineEdit;
@@ -8,7 +9,8 @@ class QListWidget;
 
 namespace fincept::ui {
 
-/// Phase 9: Ctrl+K palette overlay. Fuzzy search over `SuggestionIndex`.
+/// Phase 9: Ctrl+Shift+P palette overlay (Ctrl+K is the Component Browser).
+/// Fuzzy search over `SuggestionIndex`.
 ///
 /// Modal-ish: blocks input to the underlying frame while open (similar
 /// to VSCode's command palette). Esc dismisses. Enter invokes the
@@ -25,11 +27,15 @@ class CommandPalette : public QDialog {
     /// looking.
     static void show_for(QWidget* parent_frame);
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private:
     explicit CommandPalette(QWidget* parent);
 
     void on_text_changed(const QString& text);
     void on_accept();
+    void retranslateUi();
 
     QLineEdit* input_ = nullptr;
     QListWidget* suggestions_ = nullptr;

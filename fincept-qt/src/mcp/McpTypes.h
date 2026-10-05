@@ -10,12 +10,30 @@
 #include <QString>
 #include <QStringList>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
 
 namespace fincept::mcp {
+
+/// Default hard timeout for MCP tool handlers (ms). Single source of truth for
+/// the 30s default referenced by ToolContext, ToolDef, and McpProvider.
+constexpr int kMcpDefaultTimeoutMs = 30000;
+
+/// How long an LLM-originated call to a `supports_async` tool waits for an
+/// inline result before it converts to a background job and hands back a
+/// receipt. Tuned so genuinely fast paths (warm cache, cheap query) still
+/// answer in one round-trip while a real long-runner backgrounds promptly.
+/// Overridable via the `mcp/job_grace_ms` setting.
+constexpr int kMcpJobGraceMs = 2500;
+
+/// A tool whose declared `default_timeout_ms` exceeds this is treated as
+/// job-eligible without setting `ToolDef::supports_async` (see the note there).
+/// Equal to the default timeout on purpose: a tool that kept the default has
+/// said nothing about being slow, while one that raised it has.
+constexpr int kMcpAsyncJobThresholdMs = kMcpDefaultTimeoutMs;
 
 // ============================================================================
 // Tool Result — returned by tool handlers
@@ -105,7 +123,25 @@ struct ToolContext {
     /// resolves the promise with a timeout error if the handler hasn't
     /// finished by then. Default: 30s; per-tool override via
     /// ToolDef::default_timeout_ms; per-call override via _meta.timeout_ms.
-    int timeout_ms = 30000;
+    int timeout_ms = kMcpDefaultTimeoutMs;
+
+    /// The single-winner guard for resolving this call's promise. Set by
+    /// `McpProvider::call_tool_async`; may be null for a hand-built context.
+    ///
+    /// A promise must be finished exactly once, and THREE things can want to
+    /// finish this one: the handler, the timeout watchdog, and the cancellation
+    /// watch. They run on different threads, so "is it finished yet?" is not a
+    /// usable test — two of them can read "no" and both call addResult(), with
+    /// the loser writing after finish(), which Qt asserts on.
+    ///
+    /// The provider and `AsyncDispatch` each used to make their own guard over
+    /// the same promise, which is not a guard at all: two independent
+    /// compare-exchanges each let exactly one of THEIR OWN contenders through,
+    /// so the watchdog and a late service callback could still both win. That
+    /// race needs a slow tool and a timeout landing together to show up, which
+    /// is precisely the workload the job protocol exists for. Sharing one flag
+    /// through the context makes all three contenders race the same atomic.
+    std::shared_ptr<std::atomic<bool>> resolve_guard;
 
     /// Convenience — true if cancellation hook is set AND signalled.
     bool cancelled() const { return is_cancelled && is_cancelled(); }
@@ -118,8 +154,7 @@ struct ToolContext {
 /// The promise is heap-allocated and shared so the handler can capture it
 /// by value into lambdas / network callbacks.
 using AsyncToolHandler =
-    std::function<void(const QJsonObject& args, ToolContext ctx,
-                       std::shared_ptr<QPromise<ToolResult>> promise)>;
+    std::function<void(const QJsonObject& args, ToolContext ctx, std::shared_ptr<QPromise<ToolResult>> promise)>;
 
 // ============================================================================
 // Tool Input Schema — JSON Schema 2020-12 subset
@@ -147,32 +182,40 @@ struct ToolParam {
     QString type = "string"; // "string" | "integer" | "number" | "boolean" | "array" | "object"
     QString description;
     bool required = false;
-    QJsonValue default_value;          // null/undefined if no default
-    QStringList enum_values;            // string enums; empty if not enumerated
+    QJsonValue default_value; // null/undefined if no default
+    QStringList enum_values;  // string enums; empty if not enumerated
     std::optional<double> minimum;
     std::optional<double> maximum;
-    std::optional<int> min_length;      // for strings
-    std::optional<int> max_length;      // for strings
-    QString pattern;                    // regex string for strings
-    QJsonObject items;                  // schema for array elements (raw JSON)
+    std::optional<int> min_length; // for strings
+    std::optional<int> max_length; // for strings
+    QString pattern;               // regex string for strings
+    QJsonObject items;             // schema for array elements (raw JSON)
 
     QJsonObject to_json() const {
         QJsonObject j;
         j["type"] = type;
-        if (!description.isEmpty()) j["description"] = description;
+        if (!description.isEmpty())
+            j["description"] = description;
         if (!default_value.isNull() && !default_value.isUndefined())
             j["default"] = default_value;
         if (!enum_values.isEmpty()) {
             QJsonArray arr;
-            for (const auto& v : enum_values) arr.append(v);
+            for (const auto& v : enum_values)
+                arr.append(v);
             j["enum"] = arr;
         }
-        if (minimum.has_value())     j["minimum"] = *minimum;
-        if (maximum.has_value())     j["maximum"] = *maximum;
-        if (min_length.has_value())  j["minLength"] = *min_length;
-        if (max_length.has_value())  j["maxLength"] = *max_length;
-        if (!pattern.isEmpty())      j["pattern"] = pattern;
-        if (!items.isEmpty())        j["items"] = items;
+        if (minimum.has_value())
+            j["minimum"] = *minimum;
+        if (maximum.has_value())
+            j["maximum"] = *maximum;
+        if (min_length.has_value())
+            j["minLength"] = *min_length;
+        if (max_length.has_value())
+            j["maxLength"] = *max_length;
+        if (!pattern.isEmpty())
+            j["pattern"] = pattern;
+        if (!items.isEmpty())
+            j["items"] = items;
         return j;
     }
 };
@@ -242,11 +285,16 @@ enum class AuthLevel {
 
 inline const char* auth_level_str(AuthLevel a) {
     switch (a) {
-        case AuthLevel::None:            return "none";
-        case AuthLevel::Authenticated:   return "authenticated";
-        case AuthLevel::Verified:        return "verified";
-        case AuthLevel::Subscribed:      return "subscribed";
-        case AuthLevel::ExplicitConfirm: return "explicit_confirm";
+        case AuthLevel::None:
+            return "none";
+        case AuthLevel::Authenticated:
+            return "authenticated";
+        case AuthLevel::Verified:
+            return "verified";
+        case AuthLevel::Subscribed:
+            return "subscribed";
+        case AuthLevel::ExplicitConfirm:
+            return "explicit_confirm";
     }
     return "unknown";
 }
@@ -274,7 +322,37 @@ struct ToolDef {
     /// for snappy tools (e.g. registry lookups, paper-trading orders) and
     /// larger for slow ones (e.g. analytics scripts that run a full backtest).
     /// Per-call overrides are merged from `_meta.timeout_ms` (Phase 6).
-    int default_timeout_ms = 30000;
+    int default_timeout_ms = kMcpDefaultTimeoutMs;
+
+    /// Opt-in to the async job protocol. When true, an LLM-originated call that
+    /// hasn't finished within the grace window (see `kMcpJobGraceMs`) returns a
+    /// `{job_id, status:"running"}` receipt instead of blocking, and the work
+    /// continues in the background under `JobRegistry`. The model then polls
+    /// `job_status` / collects with `job_result`.
+    ///
+    /// Set this on tools whose p95 runtime is measured in tens of seconds —
+    /// agent runs, backtests, bulk EDGAR pulls. Leave it false for everything
+    /// else: a fast tool that returns a receipt costs the model an extra
+    /// round-trip for no benefit. Tools that finish inside the grace window
+    /// return their real result inline regardless, so setting it on a
+    /// sometimes-slow tool is safe.
+    ///
+    /// Requires `async_handler` — a sync handler cannot be interrupted or
+    /// backgrounded, so the flag is ignored for those.
+    ///
+    /// USUALLY YOU DO NOT NEED TO SET THIS. Eligibility is *derived* from
+    /// `default_timeout_ms` (see `kMcpAsyncJobThresholdMs`): a tool that
+    /// declares a budget longer than the default 30 s has already said its p95
+    /// is tens of seconds, so it opts in automatically. The flag was
+    /// hand-maintained for a while and reached 12 of the ~125 tools that
+    /// qualified — the other ~113, including 97 AI Quant Lab tools carrying a
+    /// 300 s budget, blocked the provider's HTTP turn for their full timeout
+    /// with no receipt and no progress. Deriving it removes the second place
+    /// the same fact had to be written down.
+    ///
+    /// Set it explicitly only for a tool that is slow in practice but declares
+    /// a short nominal timeout — it is an override, never a requirement.
+    bool supports_async = false;
 
     // ── Phase 6: Authorization ──────────────────────────────────────────
     /// Required auth level — checked by McpProvider::call_tool before the
@@ -308,7 +386,7 @@ struct ToolDef {
 //   • prompt cost shrinks for non-cached providers
 //   • the LLM has fewer distractors when picking a tool
 //   • dangerous categories can be excluded by default and lazy-discovered
-//     via the tool.list / tool.describe meta-tools (Phase 6.2).
+//     via the tool_list / tool_describe meta-tools (Phase 6.2).
 
 struct ToolFilter {
     /// Inclusive — only tools whose category matches one of these are kept.
@@ -374,8 +452,8 @@ struct UnifiedTool {
     QString description;
     QJsonObject input_schema;
     bool is_internal = false;
-    QString category; // Phase 6: enables ToolFilter category include/exclude
-    bool is_destructive = false; // Tool RAG / tool.list surfacing — flag mutating tools
+    QString category;            // Phase 6: enables ToolFilter category include/exclude
+    bool is_destructive = false; // Tool RAG / tool_list surfacing — flag mutating tools
 };
 
 // ============================================================================

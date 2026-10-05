@@ -18,7 +18,10 @@ EdgeItem::EdgeItem(const QString& id, PortItem* source, PortItem* target, QGraph
     setFlag(ItemIsFocusable);
     setAcceptHoverEvents(true);
     setZValue(0); // edges behind nodes
-    setPen(QPen(QColor(ui::ThemeManager::instance().tokens().border_med), 2.0, Qt::SolidLine, Qt::RoundCap));
+    // paint() draws with its own 2 px pen; this pen only defines shape()/boundingRect(),
+    // and is deliberately wide so a connection is a click-able target (select / Delete /
+    // context menu) instead of a 2 px sliver.
+    setPen(QPen(QColor(ui::ThemeManager::instance().tokens().border_med), 10.0, Qt::SolidLine, Qt::RoundCap));
 
     source_->add_edge(this);
     target_->add_edge(this);
@@ -114,7 +117,7 @@ void EdgeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event) {
                                "QMenu::item { padding: 4px 20px; }"
                                "QMenu::item:selected { background: %4; color: %5; }")
                            .arg(tm.bg_raised, tm.text_primary, tm.border_dim, tm.negative, tm.text_primary));
-    auto* del = menu.addAction("Delete Connection");
+    auto* del = menu.addAction(tr("Delete Connection"));
     if (menu.exec(event->screenPos()) == del)
         emit delete_requested(id_);
     event->accept();

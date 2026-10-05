@@ -17,9 +17,9 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
+#include <QMessageBox>
 #include <QScrollArea>
 #include <QTextStream>
-#include <QMessageBox>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -67,6 +67,15 @@ QString make_gov_panel_style(const QString& color, const QString& extra_qss) {
              .arg(t.text_secondary, t.border_dim);
     s += QString("#govCsvBtn:hover { color:%1; background:%2; }").arg(t.text_primary, t.bg_hover);
 
+    // Per-row "OPEN" link button in the resources table. Hoisted here so
+    // populate_resources() only has to setObjectName() — the old code called
+    // setStyleSheet() once per row, forcing a full CSS reparse + repolish for
+    // every resource in a dataset.
+    s += QString("#govOpenBtn { color:%1; font-size:10px; font-weight:700;"
+                 "  background:transparent; border:none; padding:2px 6px; }"
+                 "#govOpenBtn:hover { color:%1; text-decoration:underline; }")
+             .arg(color);
+
     // Search
     s += QString("#govSearch { background:%1; color:%2; border:none;"
                  "  border-bottom:1px solid %3; padding:4px 10px; font-size:11px; }")
@@ -107,8 +116,7 @@ QString make_gov_panel_style(const QString& color, const QString& extra_qss) {
 // ── Constructor ──────────────────────────────────────────────────────────────
 
 GovDataProviderPanel::GovDataProviderPanel(const QString& script, const QString& provider_color,
-                                           const QString& org_label, const GovProviderOptions& options,
-                                           QWidget* parent)
+                                           const QString& org_label, const GovProviderOptions& options, QWidget* parent)
     : QWidget(parent), script_(script), color_(provider_color), org_label_(org_label), options_(options) {
     setStyleSheet(make_gov_panel_style(color_));
     build_ui();
@@ -139,11 +147,11 @@ void GovDataProviderPanel::build_ui() {
     // Optional portal selector bar (e.g. CKAN universal panel)
     if (!options_.portal_combo_items.isEmpty()) {
         const auto& t = ThemeManager::instance().tokens();
-        const QString bg_surface  = QString::fromLatin1(t.bg_surface);
-        const QString bg_raised   = QString::fromLatin1(t.bg_raised);
-        const QString border_dim  = QString::fromLatin1(t.border_dim);
-        const QString text_sec    = QString::fromLatin1(t.text_secondary);
-        const QString text_pri    = QString::fromLatin1(t.text_primary);
+        const QString bg_surface = QString::fromLatin1(t.bg_surface);
+        const QString bg_raised = QString::fromLatin1(t.bg_raised);
+        const QString border_dim = QString::fromLatin1(t.border_dim);
+        const QString text_sec = QString::fromLatin1(t.text_secondary);
+        const QString text_pri = QString::fromLatin1(t.text_primary);
         const auto cc = QColor(color_);
 
         auto* portal_bar = new QWidget(this);
@@ -156,21 +164,30 @@ void GovDataProviderPanel::build_ui() {
         phl->setSpacing(8);
         portal_label_ = new QLabel;
         portal_label_->setStyleSheet(QString("color:%1; font-size:9px; font-weight:700;"
-                                             " letter-spacing:0.5px; background:transparent;").arg(text_sec));
+                                             " letter-spacing:0.5px; background:transparent;")
+                                         .arg(text_sec));
         phl->addWidget(portal_label_);
         auto* combo = new QComboBox;
         combo->setObjectName("govPortalCombo");
         combo->addItems(options_.portal_combo_items);
+        // Portal switching is not yet wired: the universal CKAN connector script
+        // (datagovuk_api.py) hardcodes the data.gov.uk endpoint and takes no
+        // portal argument, so the selector is informational and shown disabled.
+        combo->setEnabled(false);
         if (!options_.portal_combo_tooltip.isEmpty())
             combo->setToolTip(options_.portal_combo_tooltip);
-        combo->setStyleSheet(
-            QString("QComboBox { background:%1; color:%2; border:1px solid %3;"
-                    " font-size:10px; font-weight:700; padding:2px 8px; min-width:160px; }"
-                    "QComboBox::drop-down { border:none; width:18px; }"
-                    "QComboBox QAbstractItemView { background:%1; color:%4;"
-                    " selection-background-color:rgba(%5,%6,%7,0.12); border:1px solid %3; }")
-                .arg(bg_raised, color_, border_dim, text_pri)
-                .arg(cc.red()).arg(cc.green()).arg(cc.blue()));
+        else
+            combo->setToolTip(tr("Portal switching is not yet functional — this panel "
+                                 "queries data.gov.uk only."));
+        combo->setStyleSheet(QString("QComboBox { background:%1; color:%2; border:1px solid %3;"
+                                     " font-size:10px; font-weight:700; padding:2px 8px; min-width:160px; }"
+                                     "QComboBox::drop-down { border:none; width:18px; }"
+                                     "QComboBox QAbstractItemView { background:%1; color:%4;"
+                                     " selection-background-color:rgba(%5,%6,%7,0.12); border:1px solid %3; }")
+                                 .arg(bg_raised, color_, border_dim, text_pri)
+                                 .arg(cc.red())
+                                 .arg(cc.green())
+                                 .arg(cc.blue()));
         phl->addWidget(combo);
         phl->addStretch(1);
         root->addWidget(portal_bar);
@@ -254,9 +271,9 @@ void GovDataProviderPanel::build_ui() {
     // Optional watermark bar at the bottom (e.g. Swiss "opendata.swiss")
     if (!options_.watermark_text.isEmpty()) {
         const auto& t = ThemeManager::instance().tokens();
-        const QString bg_raised  = QString::fromLatin1(t.bg_raised);
+        const QString bg_raised = QString::fromLatin1(t.bg_raised);
         const QString border_dim = QString::fromLatin1(t.border_dim);
-        const QString text_dim   = QString::fromLatin1(t.text_dim);
+        const QString text_dim = QString::fromLatin1(t.text_dim);
         auto* wm_bar = new QWidget(this);
         wm_bar->setObjectName("govWatermarkBar");
         wm_bar->setFixedHeight(20);
@@ -267,8 +284,7 @@ void GovDataProviderPanel::build_ui() {
         whl->addStretch(1);
         auto* wm_lbl = new QLabel(options_.watermark_text);
         wm_lbl->setObjectName("govWatermark");
-        wm_lbl->setStyleSheet(
-            QString("color:%1; font-size:9px; background:transparent;").arg(text_dim));
+        wm_lbl->setStyleSheet(QString("color:%1; font-size:9px; background:transparent;").arg(text_dim));
         whl->addWidget(wm_lbl);
         root->addWidget(wm_bar);
     }
@@ -324,11 +340,14 @@ QWidget* GovDataProviderPanel::build_toolbar() {
     search_input_->setObjectName("govSearch");
     search_input_->setFixedWidth(210);
     search_input_->setFixedHeight(24);
+    search_input_->setAccessibleName(tr("Search datasets"));
+    search_input_->setClearButtonEnabled(true);
     connect(search_input_, &QLineEdit::returnPressed, this, &GovDataProviderPanel::on_search);
     hl->addWidget(search_input_);
 
     fetch_btn_ = new QPushButton;
     fetch_btn_->setObjectName("govFetchBtn");
+    fetch_btn_->setAccessibleName(tr("Fetch"));
     fetch_btn_->setCursor(Qt::PointingHandCursor);
     connect(fetch_btn_, &QPushButton::clicked, this, [this]() {
         if (!search_input_->text().trimmed().isEmpty())
@@ -342,9 +361,16 @@ QWidget* GovDataProviderPanel::build_toolbar() {
 
     export_btn_ = new QPushButton;
     export_btn_->setObjectName("govCsvBtn");
+    export_btn_->setAccessibleName(tr("Export current view as CSV"));
     export_btn_->setCursor(Qt::PointingHandCursor);
     connect(export_btn_, &QPushButton::clicked, this, &GovDataProviderPanel::on_export_csv);
     hl->addWidget(export_btn_);
+
+    // Explicit keyboard traversal: tabs → search → FETCH → CSV.
+    QWidget::setTabOrder(orgs_btn_, datasets_btn_);
+    QWidget::setTabOrder(datasets_btn_, search_input_);
+    QWidget::setTabOrder(search_input_, fetch_btn_);
+    QWidget::setTabOrder(fetch_btn_, export_btn_);
 
     return bar;
 }
@@ -352,22 +378,26 @@ QWidget* GovDataProviderPanel::build_toolbar() {
 // ── Re-translation ───────────────────────────────────────────────────────────
 
 QString GovDataProviderPanel::org_label_translated() const {
-    if (org_label_ == "Organizations") return tr("Organizations");
+    if (org_label_ == "Organizations")
+        return tr("Organizations");
     return tr("Publishers");
 }
 
 QString GovDataProviderPanel::org_label_translated_upper() const {
-    if (org_label_ == "Organizations") return tr("ORGANIZATIONS");
+    if (org_label_ == "Organizations")
+        return tr("ORGANIZATIONS");
     return tr("PUBLISHERS");
 }
 
 QString GovDataProviderPanel::org_label_translated_lower() const {
-    if (org_label_ == "Organizations") return tr("organizations");
+    if (org_label_ == "Organizations")
+        return tr("organizations");
     return tr("publishers");
 }
 
 QString GovDataProviderPanel::all_orgs_breadcrumb() const {
-    if (org_label_ == "Organizations") return tr("All Organizations");
+    if (org_label_ == "Organizations")
+        return tr("All Organizations");
     return tr("All Publishers");
 }
 
@@ -382,12 +412,18 @@ void GovDataProviderPanel::retranslateUi() {
     if (portal_label_)
         portal_label_->setText(tr("CKAN PORTAL:"));
 
-    if (back_btn_)     back_btn_->setText(tr("← BACK"));
-    if (orgs_btn_)     orgs_btn_->setText(org_label_translated_upper());
-    if (datasets_btn_) datasets_btn_->setText(tr("DATASETS"));
-    if (search_input_) search_input_->setPlaceholderText(tr("Search datasets…  ↵"));
-    if (fetch_btn_)    fetch_btn_->setText(tr("FETCH"));
-    if (export_btn_)   export_btn_->setText(tr("CSV"));
+    if (back_btn_)
+        back_btn_->setText(tr("← BACK"));
+    if (orgs_btn_)
+        orgs_btn_->setText(org_label_translated_upper());
+    if (datasets_btn_)
+        datasets_btn_->setText(tr("DATASETS"));
+    if (search_input_)
+        search_input_->setPlaceholderText(tr("Search datasets…  ↵"));
+    if (fetch_btn_)
+        fetch_btn_->setText(tr("FETCH"));
+    if (export_btn_)
+        export_btn_->setText(tr("CSV"));
 
     if (orgs_table_) {
         orgs_table_->setHorizontalHeaderLabels({org_label_translated_upper(), tr("DATASETS")});
@@ -592,16 +628,12 @@ void GovDataProviderPanel::populate_resources(const QJsonArray& json) {
             resources_table_->setItem(i, 4, no_url);
         } else {
             auto* open_btn = new QPushButton(tr("↗ OPEN"));
+            open_btn->setObjectName("govOpenBtn"); // styled once via make_gov_panel_style()
             open_btn->setCursor(Qt::PointingHandCursor);
             open_btn->setFlat(true);
-            open_btn->setStyleSheet(
-                QString("QPushButton { color:%1; font-size:10px; font-weight:700;"
-                        "  background:transparent; border:none; padding:2px 6px; }"
-                        "QPushButton:hover { color:%1; text-decoration:underline; }")
-                    .arg(color_));
-            connect(open_btn, &QPushButton::clicked, this, [url]() {
-                QDesktopServices::openUrl(QUrl(url));
-            });
+            open_btn->setAccessibleName(tr("Open resource %1 in browser").arg(name));
+            open_btn->setToolTip(url);
+            connect(open_btn, &QPushButton::clicked, this, [url]() { QDesktopServices::openUrl(QUrl(url)); });
             resources_table_->setCellWidget(i, 4, open_btn);
         }
     }
@@ -687,12 +719,13 @@ void GovDataProviderPanel::update_breadcrumb() {
         auto* btn = new QPushButton(label);
         btn->setFlat(true);
         btn->setCursor(active ? Qt::ArrowCursor : Qt::PointingHandCursor);
-        btn->setStyleSheet(active
-            ? QString("QPushButton { color:%1; font-size:9px; font-weight:700;"
-                      "  background:transparent; border:none; padding:0 2px; }").arg(color_)
-            : QString("QPushButton { color:%1; font-size:9px; background:transparent;"
-                      "  border:none; padding:0 2px; }"
-                      "QPushButton:hover { color:%2; text-decoration:underline; }").arg(dim, sec));
+        btn->setStyleSheet(active ? QString("QPushButton { color:%1; font-size:9px; font-weight:700;"
+                                            "  background:transparent; border:none; padding:0 2px; }")
+                                        .arg(color_)
+                                  : QString("QPushButton { color:%1; font-size:9px; background:transparent;"
+                                            "  border:none; padding:0 2px; }"
+                                            "QPushButton:hover { color:%2; text-decoration:underline; }")
+                                        .arg(dim, sec));
         if (!active)
             connect(btn, &QPushButton::clicked, this, nav_fn);
         return btn;
@@ -701,7 +734,8 @@ void GovDataProviderPanel::update_breadcrumb() {
     auto make_sep = [&]() -> QLabel* {
         auto* l = new QLabel("›");
         l->setStyleSheet(QString("color:%1; font-size:9px; background:transparent;"
-                                 " padding:0 3px;").arg(dim));
+                                 " padding:0 3px;")
+                             .arg(dim));
         return l;
     };
 
@@ -717,13 +751,11 @@ void GovDataProviderPanel::update_breadcrumb() {
     // Insert segments at the front based on current view
     int insert_at = 0;
 
-    auto insert = [&](QWidget* w) {
-        breadcrumb_layout_->insertWidget(insert_at++, w);
-    };
+    auto insert = [&](QWidget* w) { breadcrumb_layout_->insertWidget(insert_at++, w); };
 
     switch (current_view_) {
         case Orgs:
-            insert(make_seg(all_orgs_breadcrumb(), /*active=*/true, [](){}));
+            insert(make_seg(all_orgs_breadcrumb(), /*active=*/true, []() {}));
             break;
         case Datasets:
             insert(make_seg(all_orgs_breadcrumb(), false, [this]() {
@@ -735,7 +767,7 @@ void GovDataProviderPanel::update_breadcrumb() {
                 update_breadcrumb();
             }));
             insert(make_sep());
-            insert(make_seg(selected_org_name_, /*active=*/true, [](){}));
+            insert(make_seg(selected_org_name_, /*active=*/true, []() {}));
             break;
         case Resources:
             insert(make_seg(all_orgs_breadcrumb(), false, [this]() {
@@ -756,10 +788,10 @@ void GovDataProviderPanel::update_breadcrumb() {
                 update_breadcrumb();
             }));
             insert(make_sep());
-            insert(make_seg(tr("Resources"), /*active=*/true, [](){}));
+            insert(make_seg(tr("Resources"), /*active=*/true, []() {}));
             break;
         case Search:
-            insert(make_seg(tr("Search Results"), /*active=*/true, [](){}));
+            insert(make_seg(tr("Search Results"), /*active=*/true, []() {}));
             break;
     }
 }
@@ -781,8 +813,7 @@ void GovDataProviderPanel::show_empty(const QString& message) {
     if (loading_timer_)
         loading_timer_->stop();
     const auto& t = ThemeManager::instance().tokens();
-    status_label_->setStyleSheet(
-        QString("color:%1; font-size:12px; background:transparent;").arg(t.text_dim));
+    status_label_->setStyleSheet(QString("color:%1; font-size:12px; background:transparent;").arg(t.text_dim));
     status_label_->setText(message);
     content_stack_->setCurrentIndex(3);
 }
@@ -790,8 +821,7 @@ void GovDataProviderPanel::show_empty(const QString& message) {
 void GovDataProviderPanel::show_error(const QString& message) {
     if (loading_timer_)
         loading_timer_->stop();
-    status_label_->setStyleSheet(
-        QString("color:%1; font-size:12px; background:transparent;").arg(colors::NEGATIVE()));
+    status_label_->setStyleSheet(QString("color:%1; font-size:12px; background:transparent;").arg(colors::NEGATIVE()));
     status_label_->setText(tr("Error: %1").arg(message));
     content_stack_->setCurrentIndex(3);
 }
@@ -859,19 +889,15 @@ void export_table_to_csv(QTableWidget* table, const QString& default_name, QWidg
         return;
 
     const QString path = QFileDialog::getSaveFileName(
-        parent,
-        QCoreApplication::translate("GovDataProviderPanel", "Export CSV"),
-        default_name,
+        parent, QCoreApplication::translate("GovDataProviderPanel", "Export CSV"), default_name,
         QCoreApplication::translate("GovDataProviderPanel", "CSV Files (*.csv)"));
     if (path.isEmpty())
         return;
 
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(
-            parent,
-            QCoreApplication::translate("GovDataProviderPanel", "Export failed"),
-            QCoreApplication::translate("GovDataProviderPanel", "Unable to open file for writing."));
+        QMessageBox::warning(parent, QCoreApplication::translate("GovDataProviderPanel", "Export failed"),
+                             QCoreApplication::translate("GovDataProviderPanel", "Unable to open file for writing."));
         return;
     }
     QTextStream out(&file);

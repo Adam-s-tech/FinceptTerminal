@@ -22,7 +22,6 @@ namespace {
 // Anon-namespaced + uniquely-prefixed to avoid the unity-build symbol
 // collision trap that bit SpeechService / TtsService earlier.
 constexpr auto CLAP_TAG = "ClapDetector";
-constexpr int  kClapShutdownTimeoutMs = 1500;
 } // namespace
 
 ClapDetectorService& ClapDetectorService::instance() {
@@ -83,17 +82,15 @@ void ClapDetectorService::start() {
 #else
     const QChar kPathSep = ':';
 #endif
-    env.insert("PYTHONPATH", existing_pypath.isEmpty()
-                                 ? scripts_dir
-                                 : (scripts_dir + kPathSep + existing_pypath));
+    env.insert("PYTHONPATH", existing_pypath.isEmpty() ? scripts_dir : (scripts_dir + kPathSep + existing_pypath));
 
     auto& cfg = AppConfig::instance();
-    const QString mode    = cfg.get("voice/clap_to_start/mode", "double").toString();
-    const QString peak    = cfg.get("voice/clap_to_start/peak_min", "12000").toString();
-    const QString ratio   = cfg.get("voice/clap_to_start/pr_ratio", "4.0").toString();
-    const QString gap     = cfg.get("voice/clap_to_start/max_gap_ms", "1500").toString();
+    const QString mode = cfg.get("voice/clap_to_start/mode", "double").toString();
+    const QString peak = cfg.get("voice/clap_to_start/peak_min", "12000").toString();
+    const QString ratio = cfg.get("voice/clap_to_start/pr_ratio", "4.0").toString();
+    const QString gap = cfg.get("voice/clap_to_start/max_gap_ms", "1500").toString();
     const QString debounce = cfg.get("voice/clap_to_start/debounce_ms", "1500").toString();
-    const QString device  = cfg.get("voice/deepgram/device", "").toString();
+    const QString device = cfg.get("voice/deepgram/device", "").toString();
 
     LOG_INFO(CLAP_TAG, QString("env: mode=%1 peak=%2 ratio=%3 gap=%4 debounce=%5 device='%6'")
                            .arg(mode, peak, ratio, gap, debounce, device));
@@ -116,10 +113,9 @@ void ClapDetectorService::start() {
 #endif
 
     connect(process_, &QProcess::readyReadStandardOutput, this, &ClapDetectorService::on_stdout_ready);
-    connect(process_, &QProcess::readyReadStandardError,  this, &ClapDetectorService::on_stderr_ready);
+    connect(process_, &QProcess::readyReadStandardError, this, &ClapDetectorService::on_stderr_ready);
     connect(process_, &QProcess::started, this, [this]() {
-        LOG_INFO(CLAP_TAG, QString("QProcess::started — pid=%1")
-                               .arg(process_ ? process_->processId() : 0));
+        LOG_INFO(CLAP_TAG, QString("QProcess::started — pid=%1").arg(process_ ? process_->processId() : 0));
     });
     connect(process_, &QProcess::finished, this, &ClapDetectorService::on_process_finished);
     connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
@@ -131,6 +127,7 @@ void ClapDetectorService::start() {
     });
 
     stdout_buffer_.clear();
+    script_error_emitted_ = false;
     LOG_INFO(CLAP_TAG, QString("Launching '%1' '%2'").arg(python_exe, script));
     process_->start(python_exe, {script});
 
@@ -143,14 +140,22 @@ void ClapDetectorService::stop() {
         return;
 
     LOG_INFO(CLAP_TAG, "stop — terminating clap detector");
-    disconnect(process_, nullptr, this, nullptr);
-    if (process_->state() != QProcess::NotRunning) {
-        process_->kill();
-        process_->waitForFinished(kClapShutdownTimeoutMs);
-    }
-    process_->deleteLater();
+    // Fire-and-forget teardown (§P1) — stop() is UI-reachable (clap-to-start
+    // toggle in Settings, AI-chat voice mode). Detach first so the eventual exit
+    // cannot re-enter on_process_finished and emit a second
+    // listening_changed(false); the child reaps itself on `finished`, which also
+    // avoids ~QProcess's own blocking waitForFinished() on a running handle.
+    QProcess* dying = process_;
     process_ = nullptr;
     stdout_buffer_.clear();
+    disconnect(dying, nullptr, this, nullptr);
+    if (dying->state() == QProcess::NotRunning) {
+        dying->deleteLater();
+    } else {
+        connect(dying, &QProcess::finished, dying, &QObject::deleteLater);
+        connect(dying, &QProcess::errorOccurred, dying, &QObject::deleteLater);
+        dying->kill();
+    }
 
     const bool was_active = active_.exchange(false, std::memory_order_acq_rel);
     if (was_active)
@@ -206,10 +211,12 @@ void ClapDetectorService::parse_line(const QByteArray& line) {
     } else if (obj.contains("error")) {
         const QString msg = obj["error"].toString();
         LOG_WARN(CLAP_TAG, QString("script error: %1").arg(msg));
+        script_error_emitted_ = true;
         emit error_occurred(msg);
     } else if (obj.contains("fatal")) {
         const QString msg = obj["fatal"].toString();
         LOG_ERROR(CLAP_TAG, QString("script fatal: %1").arg(msg));
+        script_error_emitted_ = true;
         emit error_occurred(msg);
     }
 }
@@ -232,8 +239,13 @@ void ClapDetectorService::on_process_finished(int exit_code, QProcess::ExitStatu
     stdout_buffer_.clear();
 
     const bool was_active = active_.exchange(false, std::memory_order_acq_rel);
-    if (was_active)
+    if (was_active) {
         emit listening_changed(false);
+        // A detector that dies without saying why (interpreter crash, broken venv)
+        // used to just stop listening — "clap to start" went dead with no signal.
+        if ((status == QProcess::CrashExit || exit_code != 0) && !script_error_emitted_)
+            emit error_occurred(QStringLiteral("Clap detector stopped unexpectedly (exit code %1)").arg(exit_code));
+    }
 }
 
 } // namespace fincept::services

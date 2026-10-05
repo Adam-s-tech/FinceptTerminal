@@ -35,6 +35,7 @@ class CryptoTickerWidget : public BaseWidget {
     void on_theme_changed() override;
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void retranslateUi() override;
     QDialog* make_config_dialog(QWidget* parent) override;
 
   private:
@@ -53,7 +54,7 @@ class CryptoTickerWidget : public BaseWidget {
     QString exchange_;
     QStringList pairs_;
     QHash<QString, Row> rows_;
-    QSet<QString> received_;  // pairs that have published at least once
+    QSet<QString> received_; // pairs that have published at least once
     bool hub_active_ = false;
 };
 

@@ -12,6 +12,7 @@
 #include <QPointer>
 #include <QString>
 #include <QWidget>
+
 #include <functional>
 
 namespace fincept::screens::datasources {
@@ -34,6 +35,33 @@ void test_connection(QWidget* parent, const QString& conn_id, const TestResultCa
 /// Provider-specific probe URL synthesis. Exposed for the background poll
 /// timer in DataSourcesScreen, which derives host/port without showing a
 /// dialog. Returns {} when no HTTP probe is applicable.
+///
+/// SECURITY: the returned URL frequently embeds the connection's API key or
+/// token (that is how most REST health checks authenticate). Never show it in
+/// the UI or write it to the log without passing it through redact_url().
 QString provider_probe_url(const QString& provider_id, const QJsonObject& cfg);
+
+/// Where a reachability probe for a saved connection should connect.
+struct ProbeEndpoint {
+    QString url;  ///< provider probe URL, else the config's own URL field. May embed credentials.
+    QString host; ///< fallback TCP host derived from host / brokers / servers / uri / ... fields
+    int port = 0;
+};
+
+/// Resolve the probe endpoint for a connection config. Shared by the TEST button
+/// and the background poll so the two always agree on what a connection's
+/// endpoint is (the poll used to understand only a `host` field and a probe URL,
+/// so brokers/servers/connection-string connectors never got a status).
+ProbeEndpoint resolve_probe_endpoint(const QString& provider_id, const QJsonObject& cfg);
+
+/// The TCP host:port a probe should open (URL host wins over host fields, as for
+/// the TEST button). Returns false when the endpoint is not probeable.
+bool probe_target(const ProbeEndpoint& endpoint, QString* host, int* port);
+
+/// Mask credential material in a URL so it is safe to display or log.
+/// Strips any userinfo component and replaces the value of every query
+/// parameter whose key looks like a secret (key / token / secret / password /
+/// auth / sig / credential) with "***". Non-URL input is returned unchanged.
+QString redact_url(const QString& url);
 
 } // namespace fincept::screens::datasources

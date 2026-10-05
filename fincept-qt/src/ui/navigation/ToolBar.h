@@ -33,11 +33,15 @@ class ToolBar : public QWidget {
     void action_triggered(const QString& action);
     void logout_clicked();
     void plan_clicked();
+    void upgrade_clicked();
     void chat_mode_toggled();
 
   protected:
     void resizeEvent(QResizeEvent* e) override;
     void changeEvent(QEvent* e) override;
+    // §P3: the 1 s clock ticks only while the toolbar is visible.
+    void showEvent(QShowEvent* e) override;
+    void hideEvent(QHideEvent* e) override;
 
   private slots:
     void update_clock();
@@ -52,6 +56,8 @@ class ToolBar : public QWidget {
     QLabel* live_dot_ = nullptr;
     QLabel* live_label_ = nullptr;
     QPushButton* plan_btn_ = nullptr;
+    /// Always-visible CTA for Fincept Terminal Enterprise (the private edition).
+    QPushButton* upgrade_btn_ = nullptr;
     QPushButton* chat_mode_btn_ = nullptr;
     QPushButton* logout_btn_ = nullptr;
     QTimer* clock_timer_ = nullptr;

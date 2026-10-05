@@ -5,15 +5,14 @@
 //
 // Part of the partial-class split of AiChatScreen.cpp.
 
-#include "screens/ai_chat/AiChatScreen.h"
-
-#include "screens/ai_chat/ChatBubbleFactory.h"
-#include "services/llm/LlmService.h"
 #include "core/events/EventBus.h"
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
 #include "core/symbol/SymbolContext.h"
 #include "mcp/McpService.h"
+#include "screens/ai_chat/AiChatScreen.h"
+#include "screens/ai_chat/ChatBubbleFactory.h"
+#include "services/llm/LlmService.h"
 #include "storage/repositories/ChatRepository.h"
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
@@ -98,7 +97,8 @@ void AiChatScreen::build_sidebar() {
     new_btn_ = new QPushButton("＋");
     new_btn_->setFixedSize(34, 34);
     new_btn_->setCursor(Qt::PointingHandCursor);
-    new_btn_->setToolTip("New Chat  (Ctrl+N)");
+    new_btn_->setToolTip(tr("New Chat  (Ctrl+N / Ctrl+K)"));
+    new_btn_->setAccessibleName(tr("New chat session"));
     new_btn_->setStyleSheet(
         QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
                 "border-radius:0px;font-size:20px;font-weight:700;}"
@@ -116,7 +116,7 @@ void AiChatScreen::build_sidebar() {
     swl->setContentsMargins(10, 8, 10, 8);
 
     search_edit_ = new QLineEdit;
-    search_edit_->setPlaceholderText("Search sessions...");
+    search_edit_->setPlaceholderText(tr("Search sessions..."));
     search_edit_->setFixedHeight(30);
     search_edit_->setStyleSheet(QString("QLineEdit{background:%1;color:%2;border:1px solid %3;"
                                         "border-radius:0px;padding:2px 10px;font-size:%4px;}"
@@ -155,7 +155,7 @@ void AiChatScreen::build_sidebar() {
     al->setContentsMargins(10, 0, 10, 0);
     al->setSpacing(6);
 
-    rename_btn_ = new QPushButton("Rename");
+    rename_btn_ = new QPushButton(tr("Rename"));
     rename_btn_->setEnabled(false);
     rename_btn_->setFixedHeight(26);
     rename_btn_->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
@@ -170,7 +170,7 @@ void AiChatScreen::build_sidebar() {
 
     al->addStretch();
 
-    delete_btn_ = new QPushButton("Delete");
+    delete_btn_ = new QPushButton(tr("Delete"));
     delete_btn_->setEnabled(false);
     delete_btn_->setFixedHeight(26);
     delete_btn_->setStyleSheet(
@@ -193,13 +193,13 @@ void AiChatScreen::build_sidebar() {
     fl->setContentsMargins(14, 7, 14, 7);
     fl->setSpacing(2);
 
-    provider_lbl_ = new QLabel("No provider");
+    provider_lbl_ = new QLabel(tr("No provider"));
     provider_lbl_->setStyleSheet(QString("color:%1;font-size:%2px;font-weight:600;").arg(col::AMBER()).arg(fnt::SMALL));
-    provider_lbl_->setToolTip("Active LLM Provider");
+    provider_lbl_->setToolTip(tr("Active LLM Provider"));
 
-    model_lbl_ = new QLabel("No model");
+    model_lbl_ = new QLabel(tr("No model"));
     model_lbl_->setStyleSheet(QString("color:%1;font-size:%2px;").arg(col::TEXT_SECONDARY()).arg(fnt::TINY));
-    model_lbl_->setToolTip("Active Model — change in Settings > LLM Configuration");
+    model_lbl_->setToolTip(tr("Active Model — change in Settings > LLM Configuration"));
 
     fl->addWidget(provider_lbl_);
     fl->addWidget(model_lbl_);
@@ -233,13 +233,53 @@ void AiChatScreen::build_chat_area() {
     messages_layout_->setContentsMargins(32, 24, 32, 16);
     messages_layout_->setSpacing(18);
     messages_layout_->addStretch();
+
+    // build_welcome() existed and was fully written but was never called, so
+    // welcome_panel_ stayed null and show_welcome() was a permanent no-op — the
+    // "How can I help you?" heading and the six suggestion cards never rendered
+    // on an empty session. Insert it above the stretch; clear_messages() keeps it.
+    welcome_panel_ = build_welcome();
+    messages_layout_->insertWidget(0, welcome_panel_);
+
     scroll_area_->setWidget(messages_container_);
     vl->addWidget(scroll_area_, 1);
 
-    // Debounced persistence when the user scrolls through chat history.
-    if (auto* vbar = scroll_area_->verticalScrollBar())
+    if (auto* vbar = scroll_area_->verticalScrollBar()) {
+        // Debounced persistence when the user scrolls through chat history.
         connect(vbar, &QScrollBar::valueChanged, this,
                 [this](int) { ScreenStateManager::instance().notify_changed(this); });
+
+        // ── Follow the stream ────────────────────────────────────────────
+        // scroll_to_bottom()'s singleShot(0) fires BEFORE Qt recomputes the
+        // layout for a widget that just grew (setText on a wrapped QLabel
+        // defers its resize), so setValue(maximum()) lands on the *old*
+        // maximum and the view sits one growth-step short — for a card that
+        // keeps growing, permanently behind. rangeChanged fires after the
+        // layout settles, which is the only moment the true bottom is known.
+        connect(vbar, &QScrollBar::rangeChanged, this, [this](int, int max) {
+            if (!stick_to_bottom_ || !scroll_area_)
+                return;
+            auto* sb = scroll_area_->verticalScrollBar();
+            if (!sb)
+                return;
+            programmatic_scroll_ = true;
+            sb->setValue(max);
+            programmatic_scroll_ = false;
+        });
+
+        // Scrolling up mid-stream means "let me read" — stop dragging the view
+        // down until the user returns to the bottom. Programmatic moves are
+        // excluded, or auto-scroll would immediately re-arm itself.
+        connect(vbar, &QScrollBar::valueChanged, this, [this](int v) {
+            if (programmatic_scroll_ || !scroll_area_)
+                return;
+            auto* sb = scroll_area_->verticalScrollBar();
+            if (!sb)
+                return;
+            constexpr int kAtBottomSlackPx = 48;
+            stick_to_bottom_ = (v >= sb->maximum() - kAtBottomSlackPx);
+        });
+    }
 
     // Typing indicator sits above input, inside chat area
     vl->addWidget(build_typing_indicator());
@@ -260,12 +300,13 @@ QWidget* AiChatScreen::build_header_bar() {
     sidebar_toggle_btn_ = new QPushButton("‹");
     sidebar_toggle_btn_->setFixedSize(28, 28);
     sidebar_toggle_btn_->setCursor(Qt::PointingHandCursor);
-    sidebar_toggle_btn_->setToolTip("Collapse sidebar  (Ctrl+B)");
+    sidebar_toggle_btn_->setToolTip(tr("Collapse sidebar  (Ctrl+B)"));
     sidebar_toggle_btn_->setShortcut(QKeySequence("Ctrl+B"));
-    sidebar_toggle_btn_->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
-                                               "border-radius:0px;font-size:18px;font-weight:700;padding:0;}"
-                                               "QPushButton:hover{background:%3;color:%4;border-color:%4;}")
-                                           .arg(col::TEXT_SECONDARY(), col::BORDER_DIM(), col::BG_HOVER(), col::AMBER()));
+    sidebar_toggle_btn_->setStyleSheet(
+        QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
+                "border-radius:0px;font-size:18px;font-weight:700;padding:0;}"
+                "QPushButton:hover{background:%3;color:%4;border-color:%4;}")
+            .arg(col::TEXT_SECONDARY(), col::BORDER_DIM(), col::BG_HOVER(), col::AMBER()));
     connect(sidebar_toggle_btn_, &QPushButton::clicked, this, &AiChatScreen::on_toggle_sidebar);
     hl->addWidget(sidebar_toggle_btn_);
 
@@ -276,7 +317,7 @@ QWidget* AiChatScreen::build_header_bar() {
     hl->addWidget(hdr_status_dot_);
 
     // Session name
-    hdr_session_lbl_ = new QLabel("New Conversation");
+    hdr_session_lbl_ = new QLabel(tr("New Conversation"));
     hdr_session_lbl_->setStyleSheet(
         QString("color:%1;font-size:%2px;font-weight:600;").arg(col::TEXT_PRIMARY()).arg(fnt::BODY));
     hl->addWidget(hdr_session_lbl_);
@@ -296,17 +337,17 @@ QWidget* AiChatScreen::build_header_bar() {
     hl->addWidget(div);
 
     // Active model pill
-    hdr_model_lbl_ = new QLabel("No model");
+    hdr_model_lbl_ = new QLabel(tr("No model"));
     hdr_model_lbl_->setStyleSheet(QString("color:%1;font-size:%2px;background:%3;border:1px solid %4;"
                                           "border-radius:0px;padding:2px 8px;")
                                       .arg(col::TEXT_SECONDARY())
                                       .arg(fnt::TINY)
                                       .arg(col::BG_BASE(), col::BORDER_MED()));
-    hdr_model_lbl_->setToolTip("Active model — change in Settings > LLM Configuration");
+    hdr_model_lbl_->setToolTip(tr("Active model — change in Settings > LLM Configuration"));
     hl->addWidget(hdr_model_lbl_);
 
     // Status text
-    hdr_status_lbl_ = new QLabel("Ready");
+    hdr_status_lbl_ = new QLabel(tr("Ready"));
     hdr_status_lbl_->setFixedWidth(64);
     hdr_status_lbl_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     hdr_status_lbl_->setStyleSheet(
@@ -325,7 +366,7 @@ QWidget* AiChatScreen::build_typing_indicator() {
     auto* hl = new QHBoxLayout(typing_indicator_);
     hl->setContentsMargins(36, 0, 0, 0);
 
-    typing_dots_lbl_ = new QLabel("AI is thinking");
+    typing_dots_lbl_ = new QLabel(tr("AI is thinking"));
     typing_dots_lbl_->setStyleSheet(
         QString("color:%1;font-size:%2px;font-style:italic;").arg(col::TEXT_SECONDARY()).arg(fnt::SMALL));
     hl->addWidget(typing_dots_lbl_);
@@ -344,14 +385,14 @@ QWidget* AiChatScreen::build_welcome() {
     vl->setContentsMargins(48, 36, 48, 28);
     vl->setSpacing(20);
 
-    auto* heading = new QLabel("How can I help you?");
+    auto* heading = new QLabel(tr("How can I help you?"));
     heading->setAlignment(Qt::AlignCenter);
     heading->setStyleSheet(
         QString("color:%1;font-size:%2px;font-weight:700;").arg(col::TEXT_PRIMARY()).arg(fnt::TITLE));
     vl->addWidget(heading);
 
-    auto* sub = new QLabel("Ask about markets, portfolios, macro data, or any financial topic.\n"
-                           "Conversations are saved automatically.");
+    auto* sub = new QLabel(tr("Ask about markets, portfolios, macro data, or any financial topic.\n"
+                              "Conversations are saved automatically."));
     sub->setAlignment(Qt::AlignCenter);
     sub->setWordWrap(true);
     sub->setStyleSheet(QString("color:%1;font-size:%2px;").arg(col::TEXT_SECONDARY()).arg(fnt::SMALL));
@@ -362,17 +403,17 @@ QWidget* AiChatScreen::build_welcome() {
     grid->setVerticalSpacing(10);
 
     struct Sug {
-        const char* cat;
+        QString cat;
         const char* cat_color;
-        const char* text;
+        QString text;
     };
     const Sug suggestions[] = {
-        {"Markets", col::CYAN(), "Show me today's top market movers"},
-        {"News", col::AMBER(), "Summarize the latest financial news"},
-        {"Portfolio", col::POSITIVE(), "Analyze my portfolio performance"},
-        {"Analytics", col::AMBER(), "Calculate valuation for AAPL"},
-        {"Economics", col::CYAN(), "Current GDP and inflation data"},
-        {"Research", col::POSITIVE(), "Tech sector market trends"},
+        {tr("Markets"), col::CYAN(), tr("Show me today's top market movers")},
+        {tr("News"), col::AMBER(), tr("Summarize the latest financial news")},
+        {tr("Portfolio"), col::POSITIVE(), tr("Analyze my portfolio performance")},
+        {tr("Analytics"), col::AMBER(), tr("Calculate valuation for AAPL")},
+        {tr("Economics"), col::CYAN(), tr("Current GDP and inflation data")},
+        {tr("Research"), col::POSITIVE(), tr("Tech sector market trends")},
     };
 
     for (int i = 0; i < 6; ++i) {
@@ -422,7 +463,7 @@ QWidget* AiChatScreen::build_input_area() {
     hl->setSpacing(10);
 
     input_box_ = new QPlainTextEdit;
-    input_box_->setPlaceholderText("Message Fincept AI...");
+    input_box_->setPlaceholderText(tr("Message Fincept AI..."));
     input_box_->setFixedHeight(44);
     input_box_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     input_box_->setStyleSheet(QString("QPlainTextEdit{background:%1;color:%2;border:1px solid %3;"
@@ -432,6 +473,9 @@ QWidget* AiChatScreen::build_input_area() {
                                   .arg(fnt::BODY)
                                   .arg(col::AMBER()));
     input_box_->installEventFilter(this);
+    input_box_->setAccessibleName(tr("Message Fincept AI"));
+    input_box_->setAccessibleDescription(
+        tr("Enter sends, Shift+Enter inserts a new line, Ctrl+N or Ctrl+K starts a new session."));
     connect(input_box_, &QPlainTextEdit::textChanged, this, [this]() {
         const int lines = input_box_->document()->blockCount();
         input_box_->setFixedHeight(qMin(qMax(lines, 1), 6) * 24 + 20);
@@ -443,7 +487,8 @@ QWidget* AiChatScreen::build_input_area() {
     attach_btn_ = new QPushButton("⊕");
     attach_btn_->setFixedSize(44, 44);
     attach_btn_->setCursor(Qt::PointingHandCursor);
-    attach_btn_->setToolTip("Attach a file to this message");
+    attach_btn_->setToolTip(tr("Attach a file to this message"));
+    attach_btn_->setAccessibleName(tr("Attach file"));
     attach_btn_->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
                                        "border-radius:0px;font-size:20px;font-weight:700;}"
                                        "QPushButton:hover{background:rgba(217,119,6,0.15);border-color:%1;}"
@@ -462,9 +507,10 @@ QWidget* AiChatScreen::build_input_area() {
                                      .arg(col::AMBER(), "font-family:'Consolas',monospace;"));
     hl->addWidget(attach_badge_);
 
-    send_btn_ = new QPushButton("Send  ↑");
+    send_btn_ = new QPushButton(tr("Send  ↑"));
     send_btn_->setFixedSize(82, 44);
     send_btn_->setCursor(Qt::PointingHandCursor);
+    send_btn_->setAccessibleName(tr("Send message"));
     send_btn_->setStyleSheet(QString("QPushButton{background:%1;color:%2;border:none;border-radius:0px;"
                                      "font-size:%3px;font-weight:700;}"
                                      "QPushButton:hover:enabled{background:%4;}"
@@ -474,6 +520,10 @@ QWidget* AiChatScreen::build_input_area() {
                                  .arg(col::ORANGE(), col::BG_RAISED(), col::TEXT_DIM()));
     connect(send_btn_, &QPushButton::clicked, this, &AiChatScreen::on_send);
     hl->addWidget(send_btn_);
+
+    // Explicit tab order — composer first, then its two actions.
+    setTabOrder(input_box_, attach_btn_);
+    setTabOrder(attach_btn_, send_btn_);
 
     return bar;
 }

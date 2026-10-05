@@ -32,9 +32,29 @@ struct WbHealthIndicator {
 };
 
 static const QList<WbHealthIndicator> kWbHealthIndicators = {
-    {"Life Expectancy", "life_expectancy", "years"}, {"Infant Mortality Rate", "infant_mortality", "per 1,000"},
-    {"Literacy Rate (Adult)", "literacy", "%"},      {"Gini Index (Inequality)", "gini", "index"},
-    {"Human Development Index", "hdi", "index"},     {"Poverty Rate ($2.15/day)", "poverty", "%"},
+    {"Life Expectancy", "life_expectancy", "years"},
+    {"Infant Mortality Rate", "infant_mortality", "per 1,000"},
+    {"Literacy Rate (Adult)", "literacy", "%"},
+    {"Gini Index (Inequality)", "gini", "index"},
+    // WAS: {"Human Development Index", "hdi", "index"} — that was wrong in a way
+    // that produced a confident, plausible, and completely different number.
+    //
+    // HDI is published by UNDP, not the World Bank, and the World Bank has no
+    // HDI series. worldbank_health_data.py is honest about this internally: the
+    // "hdi" command calls get_hdi_proxy(), which fetches NY.GNP.PCAP.PP.KD —
+    // GNI per capita, PPP, in constant international dollars. The panel then
+    // presented that five-figure dollar amount as "Human Development Index"
+    // with unit "index". Real HDI is a 0–1 composite of life expectancy,
+    // education and income, so a user comparing this against a published HDI
+    // table would find no relationship whatsoever.
+    //
+    // Relabelled to what the data actually is. Real HDI is available from
+    // scripts/undp_data.py (commands: hdi, gii, mpi) but is NOT wired here: it
+    // requires UNDP_API_KEY and returns the UNDP HDR API's own shape, which
+    // flatten_wb() — which expects World Bank's `records` array — cannot parse.
+    // Wiring it needs a second flattener and a key, and is tracked separately.
+    {"GNI per Capita (PPP, HDI proxy)", "hdi", "int'l $"},
+    {"Poverty Rate ($2.15/day)", "poverty", "%"},
 };
 
 static const QList<QPair<QString, QString>> kWbHealthCountries = {
@@ -56,7 +76,6 @@ QJsonArray WorldBankHealthPanel::flatten_wb(const QJsonObject& response) {
         if (r["value"].isNull() || r["value"].isUndefined())
             continue;
         const double val = r["value"].toDouble();
-        // Skip placeholder zeros for HDI/similar where 0 is not meaningful
         QJsonObject row;
         row["date"] = r["date"].toString();
         row["value"] = val;
@@ -83,8 +102,9 @@ WorldBankHealthPanel::WorldBankHealthPanel(QWidget* parent)
 }
 
 void WorldBankHealthPanel::activate() {
-    show_empty("Select an indicator and country, then click FETCH\n"
-               "Source: World Bank — Health & Development indicators");
+    show_empty(tr("Select an indicator and country, then click FETCH\n"
+                  "Source: World Bank Open Data (World Development Indicators) — CC BY-4.0\n"
+                  "Annual observations; years with no survey are omitted, not zero-filled"));
 }
 
 void WorldBankHealthPanel::build_controls(QHBoxLayout* thl) {
@@ -106,9 +126,9 @@ void WorldBankHealthPanel::build_controls(QHBoxLayout* thl) {
     country_combo_->setFixedHeight(26);
     country_combo_->setMinimumWidth(130);
 
-    thl->addWidget(lbl("INDICATOR"));
+    thl->addWidget(indicator_lbl_ = lbl(tr("INDICATOR")));
     thl->addWidget(indicator_combo_);
-    thl->addWidget(lbl("COUNTRY"));
+    thl->addWidget(country_lbl_ = lbl(tr("COUNTRY")));
     thl->addWidget(country_combo_);
 }
 
@@ -116,8 +136,8 @@ void WorldBankHealthPanel::on_fetch() {
     const QString command = indicator_combo_->currentData().toString();
     const QString country = country_combo_->currentData().toString();
 
-    show_loading("Fetching WB Health: " + indicator_combo_->currentText() + " — " + country_combo_->currentText() +
-                 "…");
+    show_loading(
+        tr("Fetching WB Health: %1 — %2…").arg(indicator_combo_->currentText(), country_combo_->currentText()));
 
     services::EconomicsService::instance().execute(kWorldBankHealthSourceId, kWorldBankHealthScript, command, {country},
                                                    "wbhealth_" + command + "_" + country);
@@ -139,7 +159,7 @@ void WorldBankHealthPanel::on_result(const QString& request_id, const services::
         rows = result.data["data"].toArray();
 
     if (rows.isEmpty()) {
-        show_error("No data available for this selection");
+        show_error(tr("No data available for this selection"));
         return;
     }
 
@@ -151,6 +171,22 @@ void WorldBankHealthPanel::on_result(const QString& request_id, const services::
 
     display(rows, title);
     LOG_INFO("WorldBankHealthPanel", QString("Displayed %1 records: %2").arg(rows.size()).arg(title));
+}
+
+// ── i18n ──────────────────────────────────────────────────────────────────────
+
+void WorldBankHealthPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    EconPanelBase::changeEvent(event);
+}
+
+void WorldBankHealthPanel::retranslateUi() {
+    if (indicator_lbl_)
+        indicator_lbl_->setText(tr("INDICATOR"));
+    if (country_lbl_)
+        country_lbl_->setText(tr("COUNTRY"));
+    EconPanelBase::retranslateUi();
 }
 
 } // namespace fincept::screens

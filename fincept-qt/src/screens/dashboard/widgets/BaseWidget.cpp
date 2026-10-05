@@ -1,5 +1,6 @@
 #include "screens/dashboard/widgets/BaseWidget.h"
 
+#include "core/events/EventBus.h"
 #include "screens/dashboard/widgets/LoadingOverlay.h"
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
@@ -9,6 +10,35 @@
 #include <QStyle>
 
 namespace fincept::screens::widgets {
+
+namespace {
+
+// Dynamic-property name used by link_symbol() to tag a clickable row/cell.
+constexpr const char* kBaseWidgetSymbolProp = "fincept_link_symbol";
+// ...and by link_screen() to tag a row that opens a whole screen.
+constexpr const char* kBaseWidgetScreenProp = "fincept_link_screen";
+
+// One place for the three title-bar button stylesheets. The constructor used to
+// style config/refresh/close inline and refresh_base_theme() only restyled the
+// refresh button, so after a theme switch the gear and close buttons kept the
+// previous theme's colours.
+void apply_title_button_styles(QPushButton* config_btn, QPushButton* refresh_btn, QPushButton* close_btn,
+                               const QString& accent) {
+    const auto css = [](const QString& fg, const QString& hover) {
+        return QString("QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 2px; "
+                       "padding: 0px; }"
+                       "QPushButton:hover { color: %4; border-color: %4; background: %5; }")
+            .arg(fg, ui::colors::BG_SURFACE(), ui::colors::BORDER_DIM(), hover, ui::colors::BG_HOVER());
+    };
+    if (config_btn)
+        config_btn->setStyleSheet(css(accent, ui::colors::TEXT_PRIMARY()));
+    if (refresh_btn)
+        refresh_btn->setStyleSheet(css(accent, ui::colors::TEXT_PRIMARY()));
+    if (close_btn)
+        close_btn->setStyleSheet(css(ui::colors::TEXT_TERTIARY(), ui::colors::NEGATIVE()));
+}
+
+} // namespace
 
 BaseWidget::BaseWidget(const QString& title, QWidget* parent, const QString& accent_color)
     : QFrame(parent), accent_color_(accent_color.isEmpty() ? ui::colors::AMBER : accent_color) {
@@ -20,9 +50,8 @@ BaseWidget::BaseWidget(const QString& title, QWidget* parent, const QString& acc
     pal.setColor(QPalette::Window, QColor(ui::colors::BG_SURFACE()));
     setPalette(pal);
 
-    setStyleSheet(
-        QString("#dashboardBaseWidget { background: %1; border: 1px solid %2; border-radius: 2px; }")
-            .arg(ui::colors::BG_SURFACE(), ui::colors::BORDER_BRIGHT()));
+    setStyleSheet(QString("#dashboardBaseWidget { background: %1; border: 1px solid %2; border-radius: 2px; }")
+                      .arg(ui::colors::BG_SURFACE(), ui::colors::BORDER_BRIGHT()));
 
     auto* vl = new QVBoxLayout(this);
     vl->setContentsMargins(0, 0, 0, 0);
@@ -66,14 +95,9 @@ BaseWidget::BaseWidget(const QString& title, QWidget* parent, const QString& acc
     config_btn_->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
     config_btn_->setIconSize(QSize(12, 12));
     config_btn_->setToolTip(tr("Configure widget"));
+    config_btn_->setAccessibleName(tr("Configure widget"));
     config_btn_->setCursor(Qt::PointingHandCursor);
     config_btn_->setVisible(false);
-    config_btn_->setStyleSheet(
-        QString("QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 2px; "
-                "padding: 0px; }"
-                "QPushButton:hover { color: %4; border-color: %4; background: %5; }")
-            .arg(accent_color_, ui::colors::BG_SURFACE(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY(),
-                 ui::colors::BG_HOVER()));
     connect(config_btn_, &QPushButton::clicked, this, &BaseWidget::on_config_clicked);
     hl->addWidget(config_btn_);
 
@@ -84,32 +108,25 @@ BaseWidget::BaseWidget(const QString& title, QWidget* parent, const QString& acc
     refresh_btn_->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     refresh_btn_->setIconSize(QSize(12, 12));
     refresh_btn_->setToolTip(tr("Refresh widget data"));
+    refresh_btn_->setAccessibleName(tr("Refresh widget data"));
     refresh_btn_->setCursor(Qt::PointingHandCursor);
-    refresh_btn_->setStyleSheet(
-        QString("QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 2px; "
-                "padding: 0px; }"
-                "QPushButton:hover { color: %4; border-color: %4; background: %5; }")
-            .arg(accent_color_, ui::colors::BG_SURFACE(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY(),
-                 ui::colors::BG_HOVER()));
     connect(refresh_btn_, &QPushButton::clicked, this, &BaseWidget::refresh_requested);
     hl->addWidget(refresh_btn_);
 
     // Close button
     auto* close_btn = new QPushButton;
+    close_btn_ = close_btn;
     close_btn->setFixedSize(20, 20);
     close_btn->setText("");
     close_btn->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
     close_btn->setIconSize(QSize(11, 11));
     close_btn->setToolTip(tr("Close widget"));
+    close_btn->setAccessibleName(tr("Close widget"));
     close_btn->setCursor(Qt::PointingHandCursor);
-    close_btn->setStyleSheet(
-        QString("QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 2px; "
-                "padding: 0px; }"
-                "QPushButton:hover { color: %4; border-color: %4; background: %5; }")
-            .arg(ui::colors::TEXT_TERTIARY(), ui::colors::BG_SURFACE(), ui::colors::BORDER_DIM(), ui::colors::NEGATIVE(),
-                 ui::colors::BG_HOVER()));
     connect(close_btn, &QPushButton::clicked, this, &BaseWidget::close_requested);
     hl->addWidget(close_btn);
+
+    apply_title_button_styles(config_btn_, refresh_btn_, close_btn_, accent_color_);
 
     vl->addWidget(title_bar_);
 
@@ -169,12 +186,7 @@ void BaseWidget::refresh_base_theme() {
     if (loading_label_)
         loading_label_->setStyleSheet(
             QString("color:%1;font-size:9px;background:transparent;").arg(ui::colors::AMBER()));
-    if (refresh_btn_)
-        refresh_btn_->setStyleSheet(
-            QString("QPushButton{color:%1;background:%2;border:1px solid %3;border-radius:2px;padding:0;}"
-                    "QPushButton:hover{color:%4;border-color:%4;background:%5;}")
-                .arg(accent_color_, ui::colors::BG_SURFACE(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY(),
-                     ui::colors::BG_HOVER()));
+    apply_title_button_styles(config_btn_, refresh_btn_, close_btn_, accent_color_);
 }
 
 void BaseWidget::set_loading(bool loading) {
@@ -237,11 +249,32 @@ void BaseWidget::set_error(const QString& error) {
 
 void BaseWidget::set_title(const QString& title) {
     title_label_->setText(title);
+    // Screen readers announce the tile by its title; without this the whole
+    // dashboard reads as a wall of unnamed frames.
+    setAccessibleName(title);
+    title_label_->setAccessibleName(title);
 }
 
 void BaseWidget::set_configurable(bool configurable) {
     if (config_btn_)
         config_btn_->setVisible(configurable);
+}
+
+void BaseWidget::schedule_render(std::function<void()> fn) {
+    pending_render_ = std::move(fn);
+    if (render_scheduled_)
+        return;
+    render_scheduled_ = true;
+    // `this` as context object: Qt drops the pending call if the widget dies.
+    QTimer::singleShot(0, this, [this]() {
+        render_scheduled_ = false;
+        // Move out first so a render that itself schedules another one
+        // doesn't get clobbered.
+        auto fn = std::move(pending_render_);
+        pending_render_ = nullptr;
+        if (fn)
+            fn();
+    });
 }
 
 void BaseWidget::on_config_clicked() {
@@ -292,8 +325,7 @@ void BaseWidget::on_watchdog_fired() {
     if (last_progress_loaded_ > 0) {
         loading_overlay_->finish();
     } else {
-        loading_overlay_->set_error(
-            tr("No data yet — click refresh to retry"));
+        loading_overlay_->set_error(tr("No data yet — click refresh to retry"));
     }
 }
 
@@ -304,13 +336,67 @@ void BaseWidget::changeEvent(QEvent* event) {
 }
 
 void BaseWidget::retranslateUi() {
-    if (config_btn_)  config_btn_->setToolTip(tr("Configure widget"));
-    if (refresh_btn_) refresh_btn_->setToolTip(tr("Refresh widget data"));
-    // Close button is a local in the ctor — its tooltip won't be retranslated
-    // dynamically. Acceptable tradeoff: it's an icon, the tooltip is short,
-    // and a runtime language switch is rare.
+    if (config_btn_) {
+        config_btn_->setToolTip(tr("Configure widget"));
+        config_btn_->setAccessibleName(tr("Configure widget"));
+    }
+    if (refresh_btn_) {
+        refresh_btn_->setToolTip(tr("Refresh widget data"));
+        refresh_btn_->setAccessibleName(tr("Refresh widget data"));
+    }
+    if (close_btn_) {
+        close_btn_->setToolTip(tr("Close widget"));
+        close_btn_->setAccessibleName(tr("Close widget"));
+    }
     if (loading_label_ && loading_label_->isVisible())
         loading_label_->setText(tr("LOADING..."));
+}
+
+void BaseWidget::open_symbol(const QString& symbol, const QString& screen_id, const QString& asset_class,
+                             const QString& exchange) {
+    const QString sym = symbol.trimmed();
+    if (sym.isEmpty() || screen_id.isEmpty())
+        return;
+    QVariantMap payload{{"screen_id", screen_id}, {"symbol", sym}, {"asset_class", asset_class}};
+    if (!exchange.isEmpty())
+        payload.insert("exchange", exchange);
+    EventBus::instance().publish("nav.open_symbol", payload);
+}
+
+void BaseWidget::link_symbol(QWidget* w, const QString& symbol) {
+    if (!w)
+        return;
+    w->setProperty(kBaseWidgetSymbolProp, symbol);
+    w->setCursor(Qt::PointingHandCursor);
+    w->setToolTip(tr("Double-click to open %1 in Equity Research").arg(symbol));
+    // installEventFilter() on an already-installed filter just moves it to the
+    // front of the list, so re-linking a recycled row never stacks filters.
+    w->installEventFilter(this);
+}
+
+void BaseWidget::link_screen(QWidget* w, const QString& screen_id, const QString& tooltip) {
+    if (!w)
+        return;
+    w->setProperty(kBaseWidgetScreenProp, screen_id);
+    w->setCursor(Qt::PointingHandCursor);
+    w->setToolTip(tooltip);
+    w->installEventFilter(this); // idempotent, see link_symbol()
+}
+
+bool BaseWidget::eventFilter(QObject* obj, QEvent* event) {
+    if (event->type() == QEvent::MouseButtonDblClick) {
+        const QVariant sym = obj->property(kBaseWidgetSymbolProp);
+        if (sym.isValid() && !sym.toString().isEmpty()) {
+            open_symbol(sym.toString());
+            return true;
+        }
+        const QVariant screen = obj->property(kBaseWidgetScreenProp);
+        if (screen.isValid() && !screen.toString().isEmpty()) {
+            EventBus::instance().publish("nav.switch_screen", QVariantMap{{"screen_id", screen.toString()}});
+            return true;
+        }
+    }
+    return QFrame::eventFilter(obj, event);
 }
 
 } // namespace fincept::screens::widgets

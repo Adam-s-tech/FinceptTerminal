@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QDateEdit>
 #include <QDoubleSpinBox>
+#include <QEvent>
 #include <QJsonObject>
 #include <QLabel>
 #include <QPushButton>
@@ -27,6 +28,9 @@ class DerivativesScreen : public QWidget, public IStatefulScreen {
     void restore_state(const QVariantMap& state) override;
     QString state_key() const override { return "derivatives"; }
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private slots:
     void on_instrument_changed(int index);
     void on_calculate();
@@ -35,6 +39,7 @@ class DerivativesScreen : public QWidget, public IStatefulScreen {
   private:
     // UI setup
     void setup_ui();
+    void retranslateUi();
     QWidget* create_header_bar();
     QWidget* create_instrument_bar();
     QWidget* create_bonds_panel();
@@ -70,6 +75,13 @@ class DerivativesScreen : public QWidget, public IStatefulScreen {
     QLabel* status_instrument_ = nullptr;
     QLabel* status_engine_ = nullptr;
 
+    // Header + status fixed-label widgets (cached for retranslateUi)
+    QLabel* header_title_ = nullptr;
+    QLabel* header_sub_ = nullptr;
+    QLabel* header_badge_ = nullptr;
+    QLabel* status_left_ = nullptr;
+    QLabel* results_title_ = nullptr;
+
     // Instrument tab buttons
     QList<QPushButton*> instrument_btns_;
 
@@ -82,6 +94,16 @@ class DerivativesScreen : public QWidget, public IStatefulScreen {
     QComboBox* bond_freq_ = nullptr;
     QDoubleSpinBox* bond_clean_price_ = nullptr;
 
+    // The YTM-from-price card's OWN inputs. They are separate fields on screen from the
+    // price calculator's, and must be the ones sent to the solver - they used to be
+    // unnamed locals, so edits to this card's dates / coupon / frequency were
+    // silently discarded and the left card's values were solved instead.
+    QDateEdit* ytm_issue_date_ = nullptr;
+    QDateEdit* ytm_settle_date_ = nullptr;
+    QDateEdit* ytm_maturity_date_ = nullptr;
+    QDoubleSpinBox* ytm_coupon_ = nullptr;
+    QComboBox* ytm_freq_ = nullptr;
+
     // Equity option inputs
     QDoubleSpinBox* opt_strike_ = nullptr;
     QDoubleSpinBox* opt_spot_ = nullptr;
@@ -90,7 +112,20 @@ class DerivativesScreen : public QWidget, public IStatefulScreen {
     QDoubleSpinBox* opt_div_ = nullptr;
     QComboBox* opt_type_ = nullptr;
     QDoubleSpinBox* opt_time_ = nullptr;
+
+    // Implied-volatility panel inputs. These are a SEPARATE set from the
+    // Black-Scholes panel above: the IV card has its own spot / strike / time /
+    // rate / dividend / type fields on screen, and they must be the ones sent to
+    // the solver. They used to be unnamed locals, so everything the user typed
+    // into this card was discarded and the left panel's values were solved
+    // instead — a silently wrong implied vol.
     QDoubleSpinBox* opt_market_price_ = nullptr;
+    QDoubleSpinBox* iv_spot_ = nullptr;
+    QDoubleSpinBox* iv_strike_ = nullptr;
+    QDoubleSpinBox* iv_time_ = nullptr;
+    QDoubleSpinBox* iv_rate_ = nullptr;
+    QDoubleSpinBox* iv_div_ = nullptr;
+    QComboBox* iv_type_ = nullptr;
 
     // FX option inputs
     QDoubleSpinBox* fx_strike_ = nullptr;
@@ -116,6 +151,8 @@ class DerivativesScreen : public QWidget, public IStatefulScreen {
     QDoubleSpinBox* cds_recovery_ = nullptr;
     QDoubleSpinBox* cds_spread_ = nullptr;
     QDoubleSpinBox* cds_notional_ = nullptr;
+    QDoubleSpinBox* cds_coupon_ = nullptr; // contractual premium (bps); spread above is the MARKET level
+    QDoubleSpinBox* cds_rate_ = nullptr;   // flat risk-free rate (%) used to discount both legs
 };
 
 } // namespace fincept::screens

@@ -37,15 +37,19 @@ class DashboardScreen : public QWidget {
     void hideEvent(QHideEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
 
+  private slots:
+    // A slot (not a plain method) so WindowFrame's F5 / View ▸ Refresh probe,
+    // which looks the handler up by name, can reach it.
+    void on_refresh_clicked();
+
   private:
     void refresh_theme();
     void build_default_layout();
     void save_layout();
     void restore_layout();
     void refresh_ticker();
-    void on_refresh_clicked();
 
-    void hub_resubscribe_ticker();
+    void hub_resubscribe_ticker(bool force_fetch);
     void hub_unsubscribe_ticker();
     void rebuild_ticker_from_cache();
 
@@ -61,6 +65,10 @@ class DashboardScreen : public QWidget {
     bool pulse_visible_ = true;
     bool layout_restored_ = false;
     bool split_sized_ = false;
+    /// COMPACT toggle state. Was a function-local `static bool` in the lambda,
+    /// i.e. shared by every DashboardScreen instance and out of sync with the
+    /// canvas after a screen rebuild.
+    bool compact_rows_ = false;
 
     QHash<QString, services::QuoteData> ticker_cache_;
     QStringList ticker_subscribed_;

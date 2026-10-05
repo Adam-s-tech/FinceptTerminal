@@ -29,7 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
-
+#include <utility>
 
 namespace fincept::services {
 
@@ -63,9 +63,20 @@ PortfolioService::PortfolioService() : QObject(nullptr) {
                     }
                     if (touched) {
                         invalidate_cache(p.id);
-                        // Refresh the active portfolio view so sectors appear
-                        // without the user having to hit refresh manually.
-                        load_summary(p.id);
+                        // Refresh the portfolio view so sectors appear without
+                        // the user having to hit refresh manually. Debounced: a
+                        // fresh import resolves one sector per holding, and a
+                        // full rebuild (quote fetch + metrics + snapshot) per
+                        // symbol is a request storm.
+                        const bool first = sector_refresh_pending_.isEmpty();
+                        sector_refresh_pending_.insert(p.id);
+                        if (first) {
+                            QTimer::singleShot(400, this, [this]() {
+                                const QSet<QString> pending = std::exchange(sector_refresh_pending_, QSet<QString>{});
+                                for (const QString& pid : pending)
+                                    load_summary(pid);
+                            });
+                        }
                     }
                 }
             });
@@ -108,16 +119,13 @@ void PortfolioService::delete_portfolio(const QString& id) {
 
 // ── Summary ──────────────────────────────────────────────────────────────────
 
-
 void PortfolioService::add_asset(const QString& portfolio_id, const QString& symbol, double qty, double price,
-                                 const QString& date,
-                                 const QString& broker_symbol, const QString& exchange) {
+                                 const QString& date, const QString& broker_symbol, const QString& exchange) {
     auto& repo = PortfolioRepository::instance();
 
     // Sector left empty here — SectorResolver fills it asynchronously after
     // the asset lands in the DB. Broker fields pass through verbatim.
-    auto r = repo.add_asset(portfolio_id, symbol, qty, price, date, /*sector=*/QString(),
-                            broker_symbol, exchange);
+    auto r = repo.add_asset(portfolio_id, symbol, qty, price, date, /*sector=*/QString(), broker_symbol, exchange);
     if (r.is_err()) {
         LOG_ERROR("PortfolioSvc", "Failed to add asset: " + QString::fromStdString(r.error()));
         return;
@@ -213,7 +221,6 @@ void PortfolioService::record_dividend(const QString& portfolio_id, const QStrin
 }
 
 // ── Historical correlation ────────────────────────────────────────────────────
-
 
 void PortfolioService::invalidate_cache(const QString& portfolio_id) {
     QMutexLocker lock(&cache_mutex_);

@@ -67,9 +67,13 @@ The Fincept Terminal software is offered under AGPL-3.0 for non-commercial
 use as described above.
 
 Fincept Data Sources and APIs are separate services subject to:
-- Commercial License: USD 10,200 / year
-- University & Academic License: USD 799 / month (20 accounts)
+- A paid Commercial License for any commercial or internal-corporate use
 - Free for individual personal and educational use only
+
+Commercial, enterprise, and academic pricing is not currently published. It
+will be published with the forthcoming Fincept Terminal Private Edition. For
+a quote, contact support@fincept.in. The absence of published pricing does
+not waive or narrow the Commercial License requirement.
 
 ================================================================================
                             TRADEMARK NOTICE
@@ -279,7 +283,7 @@ Status:           Current and binding. These terms remain in full force and
                   subsequent version published by Fincept Corporation. The
                   date above marks the most recent revision and is NOT an
                   expiry date.
-Software Version: 4.0.2 (current release; license applies to all releases,
+Software Version: 4.3.0 (current release; license applies to all releases,
                   branches, tags, and commits of the Software)
 
 This License governs all current and future use of the Software, including

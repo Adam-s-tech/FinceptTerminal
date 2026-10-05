@@ -2,6 +2,7 @@
 
 #include "auth/AuthManager.h"
 #include "auth/UserApi.h"
+#include "core/currency/Currency.h"
 #include "core/logging/Logger.h"
 #include "ui/theme/Theme.h"
 
@@ -15,6 +16,7 @@
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QMessageBox>
+#include <QPointer>
 #include <QScrollArea>
 #include <QTimer>
 
@@ -26,6 +28,29 @@ static QString PANEL_SS() {
 }
 static QString HDR_SS() {
     return QString("background:%1;border-bottom:1px solid %2;").arg(ui::colors::BG_RAISED(), ui::colors::BORDER_DIM());
+}
+
+// Replace a table's contents with one full-width message row. Used for "loading",
+// "failed" and "nothing to show": the Usage / Security / Billing tables used to sit
+// completely blank in all three cases, so a failed fetch looked like an empty account.
+static void profile_table_message(QTableWidget* table, const QString& text) {
+    if (!table)
+        return;
+    table->clearSpans();
+    table->setRowCount(0); // drop old rows' items first so none hide under the span
+    table->setRowCount(1);
+    auto* item = new QTableWidgetItem(text);
+    item->setFlags(Qt::ItemIsEnabled);
+    item->setTextAlignment(Qt::AlignCenter);
+    table->setItem(0, 0, item);
+    table->setSpan(0, 0, 1, table->columnCount());
+}
+
+// Same, but only while the table has nothing yet — a refetch must keep showing the
+// previous rows until the new ones arrive (P11).
+static void profile_table_loading(QTableWidget* table, const QString& text) {
+    if (table && table->rowCount() == 0)
+        profile_table_message(table, text);
 }
 
 QWidget* ProfileScreen::make_panel(const QString& title) {
@@ -59,19 +84,20 @@ QWidget* ProfileScreen::make_data_row(const QString& label, QLabel*& value_out) 
     hl->addWidget(lbl);
     hl->addStretch();
     value_out = new QLabel("\xe2\x80\x94");
-    value_out->setStyleSheet(
-        QString("color:%1;font-size:13px;font-weight:700;background:transparent;%2").arg(ui::colors::TEXT_PRIMARY(), MF));
+    value_out->setStyleSheet(QString("color:%1;font-size:13px;font-weight:700;background:transparent;%2")
+                                 .arg(ui::colors::TEXT_PRIMARY(), MF));
     hl->addWidget(value_out);
     return row;
 }
 
 QWidget* ProfileScreen::make_stat_box(const QString& label, QLabel*& value_out, const QString& color) {
     auto* w = new QWidget(this);
-    w->setStyleSheet(QString("background:%1;border:1px solid %2;").arg(ui::colors::BG_RAISED(), ui::colors::BORDER_DIM()));
+    w->setStyleSheet(
+        QString("background:%1;border:1px solid %2;").arg(ui::colors::BG_RAISED(), ui::colors::BORDER_DIM()));
     auto* vl = new QVBoxLayout(w);
     vl->setContentsMargins(12, 14, 12, 14);
     vl->setAlignment(Qt::AlignCenter);
-    value_out = new QLabel("0");
+    value_out = new QLabel("\xe2\x80\x94");
     value_out->setAlignment(Qt::AlignCenter);
     value_out->setStyleSheet(
         QString("color:%1;font-size:28px;font-weight:700;background:transparent;%2").arg(color, MF));
@@ -113,8 +139,10 @@ void ProfileScreen::changeEvent(QEvent* event) {
 }
 
 void ProfileScreen::retranslateUi() {
-    if (header_title_)       header_title_->setText(tr("PROFILE & ACCOUNT"));
-    if (header_refresh_btn_) header_refresh_btn_->setText(tr("REFRESH"));
+    if (header_title_)
+        header_title_->setText(tr("PROFILE & ACCOUNT"));
+    if (header_refresh_btn_)
+        header_refresh_btn_->setText(tr("REFRESH"));
     for (int i = 0; i < nav_buttons_.size() && i < nav_source_keys_.size(); ++i) {
         if (nav_buttons_[i])
             nav_buttons_[i]->setText(tr(nav_source_keys_[i].toUtf8().constData()));
@@ -122,17 +150,14 @@ void ProfileScreen::retranslateUi() {
 }
 
 void ProfileScreen::rebuild_sections() {
-    if (!sections_) return;
+    if (!sections_)
+        return;
     const int current = sections_->currentIndex();
 
     // Build factories in the same order they were originally added so the
     // index remains stable for restore_state() and on_section_changed().
     QList<QWidget*> fresh;
-    fresh << build_overview()
-          << build_usage()
-          << build_security()
-          << build_billing()
-          << build_support();
+    fresh << build_overview() << build_usage() << build_security() << build_billing() << build_support();
 
     for (int i = 0; i < fresh.size(); ++i) {
         sections_->insertWidget(i, fresh[i]);
@@ -179,8 +204,16 @@ void ProfileScreen::build_header(QVBoxLayout* root) {
     header_refresh_btn_->setStyleSheet(
         QString("QPushButton{background:%1;color:%2;border:1px solid %3;padding:0 10px;"
                 "font-size:11px;font-weight:700;font-family:'Consolas',monospace;}QPushButton:hover{color:%4;}")
-            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY()));
-    connect(header_refresh_btn_, &QPushButton::clicked, this, []() { auth::AuthManager::instance().refresh_user_data(); });
+            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(),
+                 ui::colors::TEXT_PRIMARY()));
+    connect(header_refresh_btn_, &QPushButton::clicked, this, [this]() {
+        auth::AuthManager::instance().refresh_user_data();
+        // Usage / Security / Billing data is fetched only when its tab is opened, so
+        // REFRESH has to re-run the fetch for whichever tab is showing — it used to
+        // refresh just the account header and leave those tables stale.
+        if (sections_)
+            on_section_changed(sections_->currentIndex());
+    });
     hl->addWidget(header_refresh_btn_);
     root->addWidget(bar);
 }
@@ -196,9 +229,8 @@ void ProfileScreen::build_tab_nav(QVBoxLayout* root) {
     // Keep English source keys aligned with nav_buttons_ so retranslateUi
     // can reapply tr() without rebuilding the nav bar (preserves the
     // currently-active highlight).
-    nav_source_keys_ = {QStringLiteral("OVERVIEW"), QStringLiteral("USAGE"),
-                        QStringLiteral("SECURITY"), QStringLiteral("BILLING"),
-                        QStringLiteral("SUPPORT")};
+    nav_source_keys_ = {QStringLiteral("OVERVIEW"), QStringLiteral("USAGE"), QStringLiteral("SECURITY"),
+                        QStringLiteral("BILLING"), QStringLiteral("SUPPORT")};
     for (int i = 0; i < nav_source_keys_.size(); i++) {
         auto* btn = new QPushButton(tr(nav_source_keys_[i].toUtf8().constData()));
         btn->setFixedHeight(32);
@@ -253,13 +285,16 @@ QWidget* ProfileScreen::build_overview() {
     avl->addWidget(make_data_row(tr("COUNTRY"), ov_country_));
     avl->addWidget(make_data_row(tr("EMAIL VERIFIED"), ov_verified_));
     avl->addWidget(make_data_row(tr("2FA ENABLED"), ov_mfa_));
+    avl->addWidget(make_data_row(tr("MEMBER SINCE"), ov_member_since_));
+    avl->addWidget(make_data_row(tr("LAST LOGIN"), ov_last_login_));
     auto* eb = new QPushButton(tr("EDIT PROFILE"));
     eb->setFixedHeight(26);
     eb->setCursor(Qt::PointingHandCursor);
     eb->setStyleSheet(
         QString("QPushButton{background:%1;color:%2;border:1px solid %3;padding:0 12px;margin:8px 12px;"
                 "font-size:11px;font-weight:700;font-family:'Consolas',monospace;}QPushButton:hover{color:%4;}")
-            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY()));
+            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(),
+                 ui::colors::TEXT_PRIMARY()));
     connect(eb, &QPushButton::clicked, this, &ProfileScreen::show_edit_profile_dialog);
     avl->addWidget(eb);
     grid->addWidget(acct, 0, 0);
@@ -283,6 +318,7 @@ QWidget* ProfileScreen::build_overview() {
     sp->setStyleSheet(QString("background:%1;").arg(ui::colors::BORDER_DIM()));
     cvl2->addWidget(sp);
     cvl2->addWidget(make_data_row(tr("PLAN"), ov_plan_));
+    cvl2->addWidget(make_data_row(tr("CREDITS EXPIRE"), ov_credits_expire_));
     grid->addWidget(cred, 0, 1);
 
     auto* actions = make_panel(tr("QUICK ACTIONS"));
@@ -297,7 +333,8 @@ QWidget* ProfileScreen::build_overview() {
     eb2->setStyleSheet(
         QString("QPushButton{background:%1;color:%2;border:1px solid %3;padding:0 12px;"
                 "font-size:11px;font-weight:700;font-family:'Consolas',monospace;}QPushButton:hover{color:%4;}")
-            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY()));
+            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(),
+                 ui::colors::TEXT_PRIMARY()));
     connect(eb2, &QPushButton::clicked, this, &ProfileScreen::show_edit_profile_dialog);
     arl->addWidget(eb2);
     auto* lb = new QPushButton(tr("LOGOUT"));
@@ -410,28 +447,58 @@ QWidget* ProfileScreen::build_security() {
     sb->setStyleSheet(
         QString("QPushButton{background:%1;color:%2;border:1px solid %3;padding:0 10px;"
                 "font-size:10px;font-weight:700;font-family:'Consolas',monospace;}QPushButton:hover{color:%4;}")
-            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY()));
+            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(),
+                 ui::colors::TEXT_PRIMARY()));
     connect(sb, &QPushButton::clicked, this, [this, sb]() {
         api_key_visible_ = !api_key_visible_;
         sb->setText(api_key_visible_ ? tr("HIDE") : tr("SHOW"));
         sec_api_key_->setText(api_key_visible_ ? auth::AuthManager::instance().session().api_key
                                                : QString(20, QChar(0x2022)));
+        // Auto re-mask. A revealed key otherwise stays on screen for the rest
+        // of the session — through screen shares, shoulder-surfing, and the
+        // terminal's own auto-lock, which does not repaint this panel.
+        if (api_key_visible_) {
+            QPointer<ProfileScreen> self = this;
+            QTimer::singleShot(30000, sb, [self, sb]() {
+                if (!self || !self->api_key_visible_)
+                    return;
+                self->api_key_visible_ = false;
+                sb->setText(tr("SHOW"));
+                if (self->sec_api_key_)
+                    self->sec_api_key_->setText(QString(20, QChar(0x2022)));
+            });
+        }
     });
+    sb->setAccessibleName(tr("Show or hide the API key"));
     krl->addWidget(sb);
     auto* cb = new QPushButton(tr("COPY"));
     cb->setFixedHeight(22);
     cb->setStyleSheet(
         QString("QPushButton{background:%1;color:%2;border:1px solid %3;padding:0 10px;"
                 "font-size:10px;font-weight:700;font-family:'Consolas',monospace;}QPushButton:hover{color:%4;}")
-            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY()));
-    connect(cb, &QPushButton::clicked, this, [this, cb]() {
+            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(),
+                 ui::colors::TEXT_PRIMARY()));
+    connect(cb, &QPushButton::clicked, this, [cb]() {
         auto key = auth::AuthManager::instance().session().api_key;
-        if (!key.isEmpty()) {
-            QApplication::clipboard()->setText(key);
-            cb->setText(tr("COPIED"));
-            QTimer::singleShot(1500, cb, [this, cb]() { cb->setText(tr("COPY")); });
-        }
+        if (key.isEmpty())
+            return;
+        QApplication::clipboard()->setText(key);
+        cb->setText(tr("COPIED"));
+        QTimer::singleShot(1500, cb, [cb]() { cb->setText(tr("CLEARS 60s")); });
+        // The API key is a bearer credential. Leaving it on the system
+        // clipboard indefinitely puts it in Windows clipboard history and in
+        // reach of every other process on the machine, so drop it once the
+        // user has had time to paste it. Only clear if the clipboard still
+        // holds exactly this key — never stomp on something the user copied
+        // afterwards.
+        QTimer::singleShot(60000, cb, [cb, key]() {
+            auto* clip = QApplication::clipboard();
+            if (clip && clip->text() == key)
+                clip->clear();
+            cb->setText(tr("COPY"));
+        });
     });
+    cb->setAccessibleName(tr("Copy the API key to the clipboard"));
     krl->addWidget(cb);
     auto* rg = new QPushButton(tr("REGENERATE"));
     rg->setFixedHeight(22);
@@ -586,6 +653,18 @@ void ProfileScreen::refresh_all() {
     ov_mfa_->setStyleSheet(QString("color:%1;font-size:13px;font-weight:700;background:transparent;%2")
                                .arg(s.user_info.mfa_enabled ? ui::colors::POSITIVE() : ui::colors::NEGATIVE())
                                .arg(MF));
+    // Timestamps arrive as ISO-8601 ("2026-05-01T12:34:56Z"); these fields were
+    // parsed into the session but never shown anywhere.
+    auto fmt_stamp = [](const QString& iso, int chars) {
+        if (iso.isEmpty())
+            return QString::fromUtf8("\xe2\x80\x94");
+        QString v = iso.left(chars);
+        v.replace('T', ' ');
+        return v;
+    };
+    ov_member_since_->setText(fmt_stamp(s.user_info.created_at, 10));
+    ov_last_login_->setText(fmt_stamp(s.user_info.last_login_at, 16));
+    ov_credits_expire_->setText(fmt_stamp(s.user_info.credits_expire_at, 10));
     ov_credits_big_->setText(QString::number(static_cast<int>(s.user_info.credit_balance)));
     ov_plan_->setText(s.account_type().toUpper());
     ov_plan_->setStyleSheet(
@@ -613,12 +692,18 @@ void ProfileScreen::fetch_usage_data() {
     const int rl_limit = s.user_info.rate_limit.limit;
     usg_rate_->setText(rl_limit > 0 ? QString::number(rl_limit) : QStringLiteral("—"));
 
+    profile_table_loading(usg_daily_table_, tr("Loading..."));
+    profile_table_loading(usg_endpoint_table_, tr("Loading..."));
+
     QPointer<ProfileScreen> self = this;
     auth::UserApi::instance().get_user_usage(30, [self](auth::ApiResponse r) {
         if (!self)
             return;
         if (!r.success) {
             LOG_WARN("Profile", "Usage fetch failed: " + r.error);
+            const QString msg = tr("Could not load usage data — press REFRESH to retry.");
+            profile_table_message(self->usg_daily_table_, msg);
+            profile_table_message(self->usg_endpoint_table_, msg);
             return;
         }
         auto payload = r.data.contains("data") ? r.data["data"].toObject() : r.data;
@@ -635,8 +720,11 @@ void ProfileScreen::fetch_usage_data() {
             self->usg_avg_cred_->setText(QString::number(s["avg_credits_per_request"].toDouble(), 'f', 2));
             self->usg_avg_resp_->setText(QString::number(s["avg_response_time_ms"].toDouble(), 'f', 0));
         }
-        if (payload.contains("daily_usage")) {
+        {
+            // A payload without the key means "no rows", not "keep whatever was
+            // there" — otherwise the Loading... placeholder never goes away.
             auto d = payload["daily_usage"].toArray();
+            self->usg_daily_table_->clearSpans();
             self->usg_daily_table_->setRowCount(0);
             for (int i = d.size() - 1; i >= 0 && i >= d.size() - 10; i--) {
                 auto e = d[i].toObject();
@@ -648,9 +736,12 @@ void ProfileScreen::fetch_usage_data() {
                 self->usg_daily_table_->setItem(
                     row, 2, new QTableWidgetItem(QString::number(e["credits_used"].toDouble(), 'f', 0)));
             }
+            if (self->usg_daily_table_->rowCount() == 0)
+                profile_table_message(self->usg_daily_table_, tr("No usage recorded in the last 30 days."));
         }
-        if (payload.contains("endpoint_breakdown")) {
+        {
             auto eps = payload["endpoint_breakdown"].toArray();
+            self->usg_endpoint_table_->clearSpans();
             self->usg_endpoint_table_->setRowCount(0);
             for (const auto& v : eps) {
                 auto e = v.toObject();
@@ -664,12 +755,15 @@ void ProfileScreen::fetch_usage_data() {
                 self->usg_endpoint_table_->setItem(
                     row, 3, new QTableWidgetItem(QString::number(e["avg_response_time_ms"].toDouble(), 'f', 0)));
             }
+            if (self->usg_endpoint_table_->rowCount() == 0)
+                profile_table_message(self->usg_endpoint_table_, tr("No endpoint activity recorded."));
         }
     });
 }
 
 void ProfileScreen::fetch_billing_data() {
     LOG_INFO("Profile", "Fetching billing data...");
+    profile_table_loading(bill_history_, tr("Loading..."));
     QPointer<ProfileScreen> self = this;
     auth::UserApi::instance().get_user_subscription([self](auth::ApiResponse r) {
         if (!self)
@@ -688,6 +782,7 @@ void ProfileScreen::fetch_billing_data() {
             return;
         if (!r.success) {
             LOG_WARN("Profile", "Payment history failed: " + r.error);
+            profile_table_message(self->bill_history_, tr("Could not load payment history — press REFRESH to retry."));
             return;
         }
         auto d = r.data.contains("data") ? r.data["data"].toObject() : r.data;
@@ -696,6 +791,7 @@ void ProfileScreen::fetch_billing_data() {
             p = d["transactions"].toArray();
         if (p.isEmpty() && d.contains("data"))
             p = d["data"].toArray();
+        self->bill_history_->clearSpans();
         self->bill_history_->setRowCount(0);
         for (const auto& v : p) {
             auto e = v.toObject();
@@ -703,28 +799,36 @@ void ProfileScreen::fetch_billing_data() {
             self->bill_history_->insertRow(row);
             self->bill_history_->setItem(row, 0, new QTableWidgetItem(e["created_at"].toString().left(10)));
             self->bill_history_->setItem(row, 1, new QTableWidgetItem(e["plan_name"].toString()));
+            // The field is amount_USD: it was charged in dollars, so pin the symbol
+            // instead of showing it in whatever display currency is selected (a
+            // $49 payment read "EUR 49.00" for a euro user — no conversion happens).
             self->bill_history_->setItem(
-                row, 2, new QTableWidgetItem(QString("$%1").arg(e["amount_usd"].toDouble(), 0, 'f', 2)));
+                row, 2, new QTableWidgetItem(cur::money(e["amount_usd"].toDouble(), false, QStringLiteral("USD"))));
             self->bill_history_->setItem(row, 3, new QTableWidgetItem(QString::number(e["credits_purchased"].toInt())));
             self->bill_history_->setItem(row, 4, new QTableWidgetItem(e["status"].toString().toUpper()));
         }
+        if (self->bill_history_->rowCount() == 0)
+            profile_table_message(self->bill_history_, tr("No payments yet."));
     });
 }
 
 void ProfileScreen::fetch_login_history() {
     LOG_INFO("Profile", "Fetching login history...");
+    profile_table_loading(sec_login_hist_, tr("Loading..."));
     QPointer<ProfileScreen> self = this;
     auth::UserApi::instance().get_login_history(20, 0, [self](auth::ApiResponse r) {
         if (!self)
             return;
         if (!r.success) {
             LOG_WARN("Profile", "Login history failed: " + r.error);
+            profile_table_message(self->sec_login_hist_, tr("Could not load login history — press REFRESH to retry."));
             return;
         }
         auto d = r.data.contains("data") ? r.data["data"].toObject() : r.data;
         auto h = d["login_history"].toArray();
         if (h.isEmpty())
             h = d["history"].toArray();
+        self->sec_login_hist_->clearSpans();
         self->sec_login_hist_->setRowCount(0);
         for (const auto& v : h) {
             auto e = v.toObject();
@@ -734,6 +838,8 @@ void ProfileScreen::fetch_login_history() {
             self->sec_login_hist_->setItem(row, 1, new QTableWidgetItem(e["ip_address"].toString()));
             self->sec_login_hist_->setItem(row, 2, new QTableWidgetItem(e["status"].toString().toUpper()));
         }
+        if (self->sec_login_hist_->rowCount() == 0)
+            profile_table_message(self->sec_login_hist_, tr("No login history recorded."));
     });
 }
 
@@ -747,13 +853,14 @@ void ProfileScreen::show_edit_profile_dialog() {
     vl->setContentsMargins(20, 16, 20, 16);
     vl->setSpacing(10);
     auto* t = new QLabel(tr("EDIT PROFILE"));
-    t->setStyleSheet(QString("color:%1;font-size:14px;font-weight:700;background:transparent;").arg(ui::colors::AMBER()));
+    t->setStyleSheet(
+        QString("color:%1;font-size:14px;font-weight:700;background:transparent;").arg(ui::colors::AMBER()));
     vl->addWidget(t);
     const auto& s = auth::AuthManager::instance().session();
     auto add_f = [&](const QString& l, const QString& v) -> QLineEdit* {
         auto* lb = new QLabel(l);
-        lb->setStyleSheet(
-            QString("color:%1;font-size:11px;font-weight:700;background:transparent;").arg(ui::colors::TEXT_SECONDARY()));
+        lb->setStyleSheet(QString("color:%1;font-size:11px;font-weight:700;background:transparent;")
+                              .arg(ui::colors::TEXT_SECONDARY()));
         vl->addWidget(lb);
         auto* i = new QLineEdit(v);
         i->setFixedHeight(28);
@@ -790,6 +897,11 @@ void ProfileScreen::show_edit_profile_dialog() {
             data["phone"] = ph->text().trimmed();
         if (!co->text().trimmed().isEmpty())
             data["country"] = co->text().trimmed();
+        if (data.isEmpty()) {
+            QMessageBox::information(dlg_ptr ? static_cast<QWidget*>(dlg_ptr) : nullptr, tr("Edit Profile"),
+                                     tr("Nothing to save — change at least one field."));
+            return;
+        }
         auth::UserApi::instance().update_user_profile(data, [self, dlg_ptr](auth::ApiResponse r) {
             if (!self)
                 return;
@@ -797,7 +909,15 @@ void ProfileScreen::show_edit_profile_dialog() {
                 auth::AuthManager::instance().refresh_user_data();
                 if (dlg_ptr)
                     dlg_ptr->accept();
+                return;
             }
+            // The failure branch was empty: a rejected update (duplicate
+            // username, invalid phone) left the dialog sitting there as if
+            // the click had never happened.
+            LOG_WARN("Profile", "Profile update failed: " + r.error);
+            QMessageBox::warning(dlg_ptr ? static_cast<QWidget*>(dlg_ptr) : static_cast<QWidget*>(self),
+                                 tr("Update Failed"),
+                                 r.error.isEmpty() ? tr("Could not update your profile. Please try again.") : r.error);
         });
     });
     brl->addWidget(sv);
@@ -813,16 +933,35 @@ void ProfileScreen::show_logout_confirm() {
 }
 
 void ProfileScreen::show_regen_confirm() {
-    if (QMessageBox::warning(this, tr("Regenerate API Key"), tr("Your current API key will be invalidated. Continue?"),
-                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) {
-        auth::UserApi::instance().regenerate_api_key([this](auth::ApiResponse r) {
-            if (r.success) {
-                auth::AuthManager::instance().refresh_user_data();
-                api_key_visible_ = false;
-                sec_api_key_->setText(QString(20, QChar(0x2022)));
-            }
-        });
-    }
+    if (QMessageBox::warning(this, tr("Regenerate API Key"),
+                             tr("Your current API key will be invalidated immediately. Anything using it — scripts, "
+                                "integrations, other machines — stops working until you paste the new key.\n\n"
+                                "Continue?"),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+
+    QPointer<ProfileScreen> self = this;
+    auth::UserApi::instance().regenerate_api_key([self](auth::ApiResponse r) {
+        // Guarded: regeneration is a network round trip and the screen can be
+        // rebuilt (language change) or destroyed while it is in flight.
+        if (!self)
+            return;
+        if (r.success) {
+            auth::AuthManager::instance().refresh_user_data();
+            self->api_key_visible_ = false;
+            if (self->sec_api_key_)
+                self->sec_api_key_->setText(QString(20, QChar(0x2022)));
+            LOG_INFO("Profile", "API key regenerated");
+            return;
+        }
+        // Previously a silent no-op — the user could not tell whether their
+        // key had been rotated or not.
+        LOG_ERROR("Profile", "API key regeneration failed: " + r.error);
+        QMessageBox::warning(self, tr("Regeneration Failed"),
+                             r.error.isEmpty() ? tr("Could not regenerate your API key. Your existing key is "
+                                                    "still valid.")
+                                               : r.error);
+    });
 }
 
 void ProfileScreen::show_delete_account_dialog() {
@@ -830,30 +969,53 @@ void ProfileScreen::show_delete_account_dialog() {
     const QString email = s.user_info.email;
 
     // First confirmation
-    auto first = QMessageBox::warning(
-        this, tr("Delete Account"),
-        tr("This will permanently delete your Fincept account (%1) and all associated data.\n\n"
-           "This action CANNOT be undone. Are you sure?").arg(email),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    auto first =
+        QMessageBox::warning(this, tr("Delete Account"),
+                             tr("This will permanently delete your Fincept account (%1) and all associated data.\n\n"
+                                "This action CANNOT be undone. Are you sure?")
+                                 .arg(email),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (first != QMessageBox::Yes)
         return;
 
-    // Second confirmation — type email + enter password to confirm
+    // Second confirmation — type email + enter password to confirm.
+    //
+    // The password gate used to be unsatisfiable for anyone who signed up via
+    // Google: those accounts have no password, the DELETE button stayed
+    // permanently disabled, and the dialog offered no way to set one. The
+    // reset flow already existed (ForgotPasswordScreen) but was reachable only
+    // from Login and Help — both pre-login surfaces — so a signed-in user
+    // could not get to it at all. Hence "no input screen or text field is
+    // displayed to enter the code" (issue #378).
+    //
+    // The fix does not try to detect an OAuth account: it can't. Neither
+    // UserProfile nor the session carries an auth-provider or has-password
+    // field, so the client has no way to know. Instead the set/reset path is
+    // put inline here and offered to everyone — which serves the passwordless
+    // Google user and the ordinary "I forgot it" user with one control, and
+    // needs no new backend field. /user/forgot-password and
+    // /user/reset-password are public, email-keyed endpoints, so they work
+    // just as well while signed in.
     auto* dlg = new QDialog(this);
     dlg->setWindowTitle(tr("Confirm Account Deletion"));
-    dlg->setFixedSize(400, 260);
+    dlg->setMinimumWidth(420);
     dlg->setStyleSheet(QString("background:%1;color:%2;font-family:'Consolas',monospace;")
                            .arg(ui::colors::BG_SURFACE(), ui::colors::TEXT_PRIMARY()));
     auto* vl = new QVBoxLayout(dlg);
     vl->setContentsMargins(20, 16, 20, 16);
     vl->setSpacing(10);
 
+    const QString danger_lbl_ss =
+        QString("color:%1;font-size:11px;font-weight:700;background:transparent;").arg(ui::colors::NEGATIVE());
+    const QString muted_lbl_ss =
+        QString("color:%1;font-size:11px;background:transparent;").arg(ui::colors::TEXT_SECONDARY());
+
     auto* warn = new QLabel(tr("TYPE YOUR EMAIL ADDRESS TO CONFIRM:"));
-    warn->setStyleSheet(QString("color:%1;font-size:11px;font-weight:700;background:transparent;").arg(ui::colors::NEGATIVE()));
+    warn->setStyleSheet(danger_lbl_ss);
     vl->addWidget(warn);
 
     auto* hint = new QLabel(email);
-    hint->setStyleSheet(QString("color:%1;font-size:11px;background:transparent;").arg(ui::colors::TEXT_SECONDARY()));
+    hint->setStyleSheet(muted_lbl_ss);
     vl->addWidget(hint);
 
     auto* input = new QLineEdit;
@@ -862,7 +1024,7 @@ void ProfileScreen::show_delete_account_dialog() {
     vl->addWidget(input);
 
     auto* pw_lbl = new QLabel(tr("ENTER YOUR PASSWORD:"));
-    pw_lbl->setStyleSheet(QString("color:%1;font-size:11px;font-weight:700;background:transparent;").arg(ui::colors::NEGATIVE()));
+    pw_lbl->setStyleSheet(danger_lbl_ss);
     vl->addWidget(pw_lbl);
 
     auto* pw_input = new QLineEdit;
@@ -870,6 +1032,79 @@ void ProfileScreen::show_delete_account_dialog() {
     pw_input->setEchoMode(QLineEdit::Password);
     pw_input->setPlaceholderText(tr("Current password"));
     vl->addWidget(pw_input);
+
+    // ── Entry point into the inline set/reset flow ───────────────────────────
+    auto* reset_link = new QPushButton(tr("Signed in with Google, or forgot your password? Email me a code"));
+    reset_link->setFlat(true);
+    reset_link->setCursor(Qt::PointingHandCursor);
+    reset_link->setStyleSheet(QString("QPushButton{background:transparent;border:none;color:%1;font-size:11px;"
+                                      "text-align:left;padding:0;font-family:'Consolas',monospace;}"
+                                      "QPushButton:hover{color:%2;text-decoration:underline;}")
+                                  .arg(ui::colors::INFO(), ui::colors::AMBER()));
+    vl->addWidget(reset_link);
+
+    // ── Reset panel: hidden until the link above is used ─────────────────────
+    auto* reset_box = new QWidget;
+    reset_box->setStyleSheet("background:transparent;");
+    reset_box->setVisible(false);
+    auto* rl = new QVBoxLayout(reset_box);
+    rl->setContentsMargins(0, 4, 0, 0);
+    rl->setSpacing(8);
+
+    auto* sep = new QFrame;
+    sep->setFrameShape(QFrame::HLine);
+    sep->setStyleSheet(QString("background:%1;border:none;max-height:1px;").arg(ui::colors::BORDER_DIM()));
+    rl->addWidget(sep);
+
+    auto* code_lbl = new QLabel(tr("6-DIGIT CODE FROM YOUR EMAIL:"));
+    code_lbl->setStyleSheet(danger_lbl_ss);
+    rl->addWidget(code_lbl);
+
+    auto* code_input = new QLineEdit;
+    code_input->setFixedHeight(28);
+    code_input->setPlaceholderText(tr("Verification code"));
+    rl->addWidget(code_input);
+
+    auto* new_pw_lbl = new QLabel(tr("NEW PASSWORD (MIN 8 CHARACTERS):"));
+    new_pw_lbl->setStyleSheet(danger_lbl_ss);
+    rl->addWidget(new_pw_lbl);
+
+    auto* new_pw = new QLineEdit;
+    new_pw->setFixedHeight(28);
+    new_pw->setEchoMode(QLineEdit::Password);
+    new_pw->setPlaceholderText(tr("New password"));
+    rl->addWidget(new_pw);
+
+    auto* confirm_pw = new QLineEdit;
+    confirm_pw->setFixedHeight(28);
+    confirm_pw->setEchoMode(QLineEdit::Password);
+    confirm_pw->setPlaceholderText(tr("Confirm new password"));
+    rl->addWidget(confirm_pw);
+
+    auto* set_pw_btn = new QPushButton(tr("SET PASSWORD"));
+    set_pw_btn->setFixedHeight(26);
+    set_pw_btn->setStyleSheet(QString("QPushButton{background:%1;color:%2;border:none;padding:0 14px;"
+                                      "font-size:11px;font-weight:700;font-family:'Consolas',monospace;}"
+                                      "QPushButton:hover{background:#b45309;}")
+                                  .arg(ui::colors::AMBER(), ui::colors::BG_BASE()));
+    rl->addWidget(set_pw_btn);
+    vl->addWidget(reset_box);
+
+    // Shared status line for both the code request and the reset itself.
+    auto* status = new QLabel;
+    status->setWordWrap(true);
+    status->setStyleSheet(muted_lbl_ss);
+    status->hide();
+    vl->addWidget(status);
+
+    auto say = [status, dlg](const QString& msg, const QString& color) {
+        status->setStyleSheet(QString("color:%1;font-size:11px;background:transparent;").arg(color));
+        status->setText(msg);
+        status->show();
+        // The dialog grows as the reset panel and status line appear; without
+        // this it keeps its original height and clips them.
+        dlg->adjustSize();
+    };
 
     auto* brl = new QHBoxLayout;
     brl->addStretch();
@@ -881,11 +1116,10 @@ void ProfileScreen::show_delete_account_dialog() {
     auto* confirm = new QPushButton(tr("DELETE MY ACCOUNT"));
     confirm->setFixedHeight(26);
     confirm->setEnabled(false);
-    confirm->setStyleSheet(
-        QString("QPushButton{background:%1;color:%2;border:none;padding:0 14px;"
-                "font-size:11px;font-weight:700;font-family:'Consolas',monospace;}"
-                "QPushButton:disabled{background:#3f1515;color:#7f3333;}")
-            .arg(ui::colors::NEGATIVE(), ui::colors::TEXT_PRIMARY()));
+    confirm->setStyleSheet(QString("QPushButton{background:%1;color:%2;border:none;padding:0 14px;"
+                                   "font-size:11px;font-weight:700;font-family:'Consolas',monospace;}"
+                                   "QPushButton:disabled{background:#3f1515;color:#7f3333;}")
+                               .arg(ui::colors::NEGATIVE(), ui::colors::TEXT_PRIMARY()));
     auto reeval = [confirm, input, pw_input, email]() {
         const bool email_ok = input->text().trimmed() == email;
         const bool pw_ok = !pw_input->text().isEmpty();
@@ -894,22 +1128,105 @@ void ProfileScreen::show_delete_account_dialog() {
     connect(input, &QLineEdit::textChanged, this, [reeval](const QString&) { reeval(); });
     connect(pw_input, &QLineEdit::textChanged, this, [reeval](const QString&) { reeval(); });
 
+    // Deliberately NOT captured as a local reference: the lambdas below
+    // outlive this stack frame (they are owned by dlg, and a queued HTTP reply
+    // can land after exec() returns but before deleteLater() runs), so they
+    // call the singleton accessor themselves rather than hold a reference to
+    // a local that has gone away.
+    auto* auth_mgr = &auth::AuthManager::instance();
+
+    // Reveal the panel and ask for a code in one click — the reporter's flow
+    // was "click reset, then look for somewhere to type the code", so the
+    // field has to be on screen by the time the email lands.
+    connect(reset_link, &QPushButton::clicked, dlg, [reset_box, reset_link, code_input, say, email]() {
+        reset_box->setVisible(true);
+        reset_link->setText(tr("Re-send code"));
+        code_input->setFocus();
+        say(tr("Sending a verification code to %1 ...").arg(email), ui::colors::TEXT_SECONDARY());
+        auth::AuthManager::instance().forgot_password(email);
+    });
+
+    // AuthManager's signals are global to the singleton; scoping every
+    // connection to `dlg` means they die with the dialog rather than firing
+    // into a destroyed lambda later.
+    connect(auth_mgr, &auth::AuthManager::forgot_password_sent, dlg, [say, email]() {
+        say(tr("Code sent to %1. Enter it above with a new password.").arg(email), ui::colors::POSITIVE());
+    });
+    connect(auth_mgr, &auth::AuthManager::forgot_password_failed, dlg,
+            [say](const QString& err) { say(tr("Could not send code: %1").arg(err), ui::colors::NEGATIVE()); });
+
+    connect(set_pw_btn, &QPushButton::clicked, dlg,
+            [set_pw_btn, code_input, new_pw, confirm_pw, say, email]() {
+                // Same rules as ForgotPasswordScreen::on_reset_password, so the
+                // two paths can't disagree about what a valid password is.
+                const QString otp = code_input->text().trimmed();
+                if (otp.isEmpty()) {
+                    say(tr("Enter the verification code from your email"), ui::colors::NEGATIVE());
+                    code_input->setFocus();
+                    return;
+                }
+                if (new_pw->text().length() < 8) {
+                    say(tr("Password must be at least 8 characters"), ui::colors::NEGATIVE());
+                    new_pw->setFocus();
+                    return;
+                }
+                if (new_pw->text() != confirm_pw->text()) {
+                    confirm_pw->clear();
+                    say(tr("Passwords do not match"), ui::colors::NEGATIVE());
+                    confirm_pw->setFocus();
+                    return;
+                }
+                set_pw_btn->setEnabled(false);
+                say(tr("Setting password ..."), ui::colors::TEXT_SECONDARY());
+                auth::AuthManager::instance().reset_password(email, otp, new_pw->text());
+            });
+
+    connect(auth_mgr, &auth::AuthManager::password_reset_succeeded, dlg,
+            [reset_box, reset_link, set_pw_btn, pw_input, new_pw, say, reeval]() {
+                // Carry the new password straight into the delete field: the
+                // user just typed it twice, and asking a third time to satisfy
+                // a gate they only opened in order to delete is pure friction.
+                pw_input->setText(new_pw->text());
+                reset_box->setVisible(false);
+                reset_link->hide();
+                set_pw_btn->setEnabled(true);
+                say(tr("Password set. You can now delete your account."), ui::colors::POSITIVE());
+                reeval();
+            });
+    connect(auth_mgr, &auth::AuthManager::password_reset_failed, dlg, [set_pw_btn, say](const QString& err) {
+        set_pw_btn->setEnabled(true);
+        say(tr("Could not set password: %1").arg(err), ui::colors::NEGATIVE());
+    });
+
     QPointer<ProfileScreen> self = this;
     QPointer<QDialog> dlg_ptr = dlg;
     connect(confirm, &QPushButton::clicked, this, [self, dlg_ptr, email, pw_input]() {
-        if (!self) return;
+        if (!self)
+            return;
         const QString password = pw_input->text();
-        if (dlg_ptr) dlg_ptr->accept();
+        if (dlg_ptr)
+            dlg_ptr->accept();
         auth::UserApi::instance().delete_user_account(email, password, [self](auth::ApiResponse r) {
-            if (!self) return;
+            if (!self)
+                return;
             if (r.success) {
                 LOG_INFO("Profile", "Account deleted successfully");
                 auth::AuthManager::instance().logout();
-            } else {
-                LOG_ERROR("Profile", "Account deletion failed: " + r.error);
-                QMessageBox::critical(self, tr("Delete Failed"),
-                                      tr("Account deletion failed: %1\n\nPlease contact support@fincept.in").arg(r.error));
+                return;
             }
+            // Never log r.error's context alongside the password; the error
+            // string itself is server wording and safe.
+            LOG_ERROR("Profile", "Account deletion failed: " + r.error);
+            QString detail = r.error;
+            if (r.status_code == 401) {
+                // Resetting the password can invalidate the session that was
+                // issued before it, so a 401 here is more likely "your session
+                // is stale" than "wrong password" — say so rather than sending
+                // the user round the password loop again.
+                detail = tr("%1\n\nIf you just set a new password, sign out and back in, then retry.").arg(r.error);
+            }
+            QMessageBox::critical(self, tr("Delete Failed"),
+                                  tr("Account deletion failed: %1\n\nPlease contact support@fincept.in").arg(detail));
         });
     });
     brl->addWidget(confirm);

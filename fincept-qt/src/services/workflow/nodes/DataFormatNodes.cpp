@@ -1,25 +1,103 @@
 #include "services/workflow/nodes/DataFormatNodes.h"
 
+#include "services/workflow/ExpressionEngine.h"
 #include "services/workflow/NodeRegistry.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <QXmlStreamReader>
+#include <QXmlStreamWriter>
 
 namespace fincept::workflow {
 
 namespace {
 
-// Resolve a dot-notation path (e.g. "data.price") through a QJsonObject.
-QJsonValue resolve_dot_path(const QJsonObject& root, const QString& path) {
-    QStringList parts = path.split('.', Qt::SkipEmptyParts);
-    QJsonValue current = root;
-    for (const QString& part : parts) {
-        if (!current.isObject())
-            return QJsonValue{};
-        current = current.toObject().value(part);
+// CSV cells that look numeric but are identifiers ("02134", "007") must stay text:
+// parsing them as numbers silently drops the leading zeros.
+bool fmt_csv_is_number(const QString& cell, double* out) {
+    bool ok = false;
+    const double d = cell.toDouble(&ok);
+    if (!ok)
+        return false;
+    if (cell.size() > 1 && cell[0] == QLatin1Char('0') && cell[1].isDigit())
+        return false;
+    *out = d;
+    return true;
+}
+
+// ── XML ⇄ JSON helpers (format.xml) ─────────────────────────────────────────
+// Recursive XML element → JSON. `xml` must be positioned on the StartElement.
+// Attributes become "@name" keys, mixed text becomes "#text", repeated child
+// elements collapse into arrays, and a text-only element yields a bare string.
+QJsonValue xml_element_to_json(QXmlStreamReader& xml) {
+    QJsonObject obj;
+    for (const auto& a : xml.attributes())
+        obj.insert("@" + a.name().toString(), a.value().toString());
+
+    QString text;
+    bool done = false;
+    while (!done && !xml.atEnd()) {
+        switch (xml.readNext()) {
+            case QXmlStreamReader::StartElement: {
+                const QString name = xml.name().toString();
+                const QJsonValue child = xml_element_to_json(xml);
+                if (obj.contains(name)) {
+                    const QJsonValue existing = obj.value(name);
+                    QJsonArray arr = existing.isArray() ? existing.toArray() : QJsonArray{existing};
+                    arr.append(child);
+                    obj[name] = arr;
+                } else {
+                    obj.insert(name, child);
+                }
+                break;
+            }
+            case QXmlStreamReader::Characters:
+                if (!xml.isWhitespace())
+                    text += xml.text().toString();
+                break;
+            case QXmlStreamReader::EndElement:
+                done = true;
+                break;
+            default:
+                break;
+        }
     }
-    return current;
+
+    const QString trimmed = text.trimmed();
+    if (obj.isEmpty())
+        return trimmed; // leaf text node
+    if (!trimmed.isEmpty())
+        obj.insert("#text", trimmed);
+    return obj;
+}
+
+// Recursive JSON → XML. `name` is the element name to emit `value` under.
+// "@key" → attribute, "#text" → element text, arrays → repeated elements.
+void json_value_to_xml(QXmlStreamWriter& w, const QString& name, const QJsonValue& value) {
+    if (value.isArray()) {
+        for (const QJsonValue& item : value.toArray())
+            json_value_to_xml(w, name, item);
+        return;
+    }
+    if (value.isObject()) {
+        w.writeStartElement(name);
+        const QJsonObject o = value.toObject();
+        for (auto it = o.begin(); it != o.end(); ++it)
+            if (it.key().startsWith('@'))
+                w.writeAttribute(it.key().mid(1), it.value().toVariant().toString());
+        for (auto it = o.begin(); it != o.end(); ++it) {
+            if (it.key().startsWith('@'))
+                continue;
+            if (it.key() == "#text")
+                w.writeCharacters(it.value().toVariant().toString());
+            else
+                json_value_to_xml(w, it.key(), it.value());
+        }
+        w.writeEndElement();
+        return;
+    }
+    w.writeTextElement(name, value.isNull() ? QString() : value.toVariant().toString());
 }
 
 } // anonymous namespace
@@ -94,22 +172,25 @@ void register_data_format_nodes(NodeRegistry& registry) {
                 }
 
                 if (op == "query") {
-                    // Dot-notation path extraction.
-                    QString path = params.value("query").toString();
-                    // Strip leading "$." or "$" sentinel.
-                    if (path.startsWith("$."))
-                        path = path.mid(2);
-                    else if (path == "$") {
+                    // Path extraction: data.price, items[0].price, $.items[-1].price. (The old
+                    // dot-only walker could not step into arrays at all.)
+                    QString path = params.value("query").toString().trimmed();
+                    if (path.isEmpty() || path == "$") {
                         cb(true, input, {});
                         return;
                     }
+                    if (path.startsWith("$."))
+                        path = path.mid(2);
+                    else if (path.startsWith("$["))
+                        path = path.mid(1);
 
-                    if (!input.isObject()) {
-                        cb(false, {}, "format.json query: input must be an object");
+                    if (!input.isObject() && !input.isArray()) {
+                        cb(false, {}, "format.json query: input must be an object or array");
                         return;
                     }
+                    const QJsonValue found = ExpressionEngine::resolve_path(input, path);
                     QJsonObject out;
-                    out["result"] = resolve_dot_path(input.toObject(), path);
+                    out["result"] = found.isUndefined() ? QJsonValue(QJsonValue::Null) : found;
                     cb(true, out, {});
                     return;
                 }
@@ -134,10 +215,66 @@ void register_data_format_nodes(NodeRegistry& registry) {
                 {"operation", "Operation", "select", "parse", {"parse", "generate"}, ""},
             },
         .execute =
-            [](const QJsonObject&, const QVector<QJsonValue>& inputs,
+            [](const QJsonObject& params, const QVector<QJsonValue>& inputs,
                std::function<void(bool, QJsonValue, QString)> cb) {
-                auto data = inputs.isEmpty() ? QJsonValue{} : inputs[0];
-                cb(true, data, {});
+                const QJsonValue input = inputs.isEmpty() ? QJsonValue{} : inputs[0];
+                const QString op = params.value("operation").toString("parse");
+
+                if (op == "generate") {
+                    // JSON → XML string.
+                    if (!input.isObject() && !input.isArray()) {
+                        cb(false, {}, "format.xml generate: input must be an object or array");
+                        return;
+                    }
+                    QString xml_out;
+                    QXmlStreamWriter w(&xml_out);
+                    w.setAutoFormatting(true);
+                    w.writeStartDocument();
+                    if (input.isObject()) {
+                        const QJsonObject o = input.toObject();
+                        if (o.size() == 1) {
+                            // Single top-level key → use it as the document root element.
+                            const auto it = o.begin();
+                            json_value_to_xml(w, it.key(), it.value());
+                        } else {
+                            json_value_to_xml(w, "root", input);
+                        }
+                    } else {
+                        json_value_to_xml(w, "root", input);
+                    }
+                    w.writeEndDocument();
+                    QJsonObject out;
+                    out["xml"] = xml_out;
+                    cb(true, out, {});
+                    return;
+                }
+
+                // Default: parse XML string → JSON (wrapped under its root element name).
+                QString raw;
+                if (input.isString()) {
+                    raw = input.toString();
+                } else if (input.isObject()) {
+                    const QJsonObject obj = input.toObject();
+                    raw = obj.value("xml").toString(obj.value("text").toString());
+                }
+                if (raw.trimmed().isEmpty()) {
+                    cb(false, {}, "format.xml parse: no XML string input to parse");
+                    return;
+                }
+                QXmlStreamReader xml(raw);
+                while (!xml.atEnd() && xml.readNext() != QXmlStreamReader::StartElement) {
+                }
+                if (xml.hasError() || xml.atEnd()) {
+                    cb(false, {},
+                       xml.hasError() ? QString("format.xml parse: %1").arg(xml.errorString())
+                                      : QStringLiteral("format.xml parse: no root element"));
+                    return;
+                }
+                const QString root_name = xml.name().toString();
+                const QJsonValue parsed = xml_element_to_json(xml);
+                QJsonObject out;
+                out.insert(root_name, parsed);
+                cb(true, out, {});
             },
     });
 
@@ -231,12 +368,15 @@ void register_data_format_nodes(NodeRegistry& registry) {
                     }
                 }
 
-                // The node has three output ports; pack all results into one object
-                // so the WorkflowExecutor can fan them out to the correct ports.
+                // The node has three output ports; pack all results into one object and tag
+                // each port's share under "_ports" — WorkflowExecutor::collect_inputs hands
+                // every edge only the value of the port it leaves from. (Without the tag all
+                // three ports delivered the same whole object.)
                 QJsonObject out;
                 out["added"] = added;
                 out["removed"] = removed;
                 out["changed"] = changed;
+                out["_ports"] = QJsonObject{{"output_added", added}, {"output_removed", removed}, {"output_changed", changed}};
                 cb(true, out, {});
             },
     });
@@ -281,7 +421,9 @@ void register_data_format_nodes(NodeRegistry& registry) {
                 }
 
                 QString delim_param = params.value("delimiter").toString(",");
-                QChar delimiter = (delim_param == "\\t") ? '\t' : delim_param.at(0);
+                // An explicitly-cleared delimiter param is an empty string (not
+                // the default), so .at(0) would read out of bounds → crash.
+                QChar delimiter = (delim_param == "\\t") ? '\t' : (delim_param.isEmpty() ? ',' : delim_param.at(0));
                 bool has_header = params.value("has_header").toBool(true);
 
                 // Split into lines, handling \r\n and \n.
@@ -327,9 +469,8 @@ void register_data_format_nodes(NodeRegistry& registry) {
                         for (int col = 0; col < headers.size(); ++col) {
                             QString val = (col < cols.size()) ? cols[col] : QString{};
                             // Try to parse as number; fall back to string.
-                            bool ok = false;
-                            double num = val.toDouble(&ok);
-                            if (ok)
+                            double num = 0;
+                            if (fmt_csv_is_number(val, &num))
                                 obj.insert(headers[col], num);
                             else
                                 obj.insert(headers[col], val);
@@ -342,9 +483,8 @@ void register_data_format_nodes(NodeRegistry& registry) {
                         QStringList cols = split_csv_line(line);
                         QJsonArray row_arr;
                         for (const QString& col : cols) {
-                            bool ok = false;
-                            double num = col.toDouble(&ok);
-                            if (ok)
+                            double num = 0;
+                            if (fmt_csv_is_number(col, &num))
                                 row_arr.append(num);
                             else
                                 row_arr.append(col);

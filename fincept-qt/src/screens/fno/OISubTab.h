@@ -17,12 +17,14 @@
 #include "screens/common/IStatefulScreen.h"
 #include "services/options/OptionChainTypes.h"
 
+#include <QEvent>
 #include <QPointer>
 #include <QString>
 #include <QVariantMap>
 #include <QWidget>
 
 class QComboBox;
+class QLabel;
 
 namespace fincept::screens::fno {
 
@@ -43,12 +45,14 @@ class OISubTab : public QWidget {
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void on_strike_combo_changed(int index);
 
   private:
     void setup_ui();
+    void retranslateUi();
     void on_chain_published(const QString& topic, const QVariant& v);
     void rebuild_strike_combo(const fincept::services::options::OptionChain& chain);
     void apply_strike_subscription();
@@ -58,9 +62,18 @@ class OISubTab : public QWidget {
     OIBuildupTable* buildup_ = nullptr;
     IntradayOIChart* intraday_ = nullptr;
     QComboBox* strike_combo_ = nullptr;
+    QLabel* picker_lbl_ = nullptr;
 
     fincept::services::options::OptionChain last_chain_;
     QString current_underlying_;
+    /// Expiry the strike combo was last built for. A new expiry has a different
+    /// strike ladder, so the combo must be rebuilt even when the underlying is
+    /// unchanged.
+    QString current_expiry_;
+    /// Strike the user picked (0 = none). Carried across combo rebuilds and
+    /// session restore. Selection is keyed on the strike VALUE, never on a row
+    /// index — the ladder shifts as the ATM moves.
+    double selected_strike_ = 0.0;
     bool subscribed_ = false;
 };
 

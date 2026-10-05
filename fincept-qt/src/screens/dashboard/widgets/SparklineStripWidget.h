@@ -30,6 +30,7 @@ class SparklineStripWidget : public BaseWidget {
     void on_theme_changed() override;
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void retranslateUi() override;
     QDialog* make_config_dialog(QWidget* parent) override;
 
   private:
@@ -47,7 +48,7 @@ class SparklineStripWidget : public BaseWidget {
 
     QStringList symbols_;
     QHash<QString, Row> rows_;
-    QSet<QString> received_;  // symbols whose sparkline has rendered at least once
+    QSet<QString> received_; // symbols whose sparkline has rendered at least once
     bool hub_active_ = false;
 };
 

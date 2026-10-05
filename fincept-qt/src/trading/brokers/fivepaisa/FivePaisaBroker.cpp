@@ -1,6 +1,9 @@
 #include "trading/brokers/fivepaisa/FivePaisaBroker.h"
 
+#include "trading/brokers/BrokerClientOrderId.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
+#include "trading/instruments/InstrumentService.h"
 
 #include <QDateTime>
 #include <QJsonArray>
@@ -14,6 +17,34 @@ static const char* BASE_URL = "https://Openapi.5paisa.com";
 
 static int64_t now_ts() {
     return QDateTime::currentSecsSinceEpoch();
+}
+
+// 5paisa addresses modify/cancel by ExchOrderID — the exchange's order number — which is a
+// different value from BrokerOrderId, the id place_order and get_orders hand the rest of the
+// terminal. Look the order up in the order book and return its ExchOrderID; empty when the
+// book is unreadable, the order is unknown, or the exchange has not assigned a number yet
+// (callers then fall back to the id they were given, as before).
+static QString fp_lookup_exch_order_id(const QString& base_url, const QString& app_key, const QString& client_code,
+                                       const QMap<QString, QString>& headers, const QString& broker_order_id) {
+    QJsonObject head;
+    head["key"] = app_key;
+    QJsonObject book_body;
+    book_body["ClientCode"] = client_code;
+    QJsonObject req;
+    req["head"] = head;
+    req["body"] = book_body;
+
+    auto resp = BrokerHttp::instance().post_json(base_url + "/VendorsAPI/Service1.svc/V3/OrderBook", req, headers);
+    if (!resp.success)
+        return {};
+    for (const auto& item : resp.json["body"].toObject()["OrderBookDetail"].toArray()) {
+        const QJsonObject o = item.toObject();
+        if (o["BrokerOrderId"].toVariant().toString() != broker_order_id)
+            continue;
+        const QString exch = o["ExchOrderID"].toVariant().toString().trimmed();
+        return (exch.isEmpty() || exch == QLatin1String("0")) ? QString() : exch;
+    }
+    return {};
 }
 
 // ============================================================================
@@ -138,11 +169,11 @@ TokenExchangeResponse FivePaisaBroker::exchange_token(const QString& api_key, co
                                                       const QString& auth_code) {
     auto kp = unpack_key(api_key);
     if (kp.app_key.isEmpty())
-        return {false, "", "", "", "ApiKey must be 'app_key:::user_id:::client_id'", ""};
+        return {.success = false, .error = "ApiKey must be 'app_key:::user_id:::client_id'"};
 
     QStringList auth_parts = auth_code.split(":::");
     if (auth_parts.size() < 3)
-        return {false, "", "", "", "AuthCode must be 'email:::pin:::totp'", ""};
+        return {.success = false, .error = "AuthCode must be 'email:::pin:::totp'"};
     QString email = auth_parts[0].trimmed();
     QString pin = auth_parts[1].trimmed();
     QString totp = auth_parts[2].trimmed();
@@ -169,7 +200,7 @@ TokenExchangeResponse FivePaisaBroker::exchange_token(const QString& api_key, co
             BrokerHttp::instance().post_json(QString(BASE_URL) + "/VendorsAPI/Service1.svc/TOTPLogin", req, headers);
 
         if (!resp.success)
-            return {false, "", "", "", checked_error(resp, "TOTP login network error"), ""};
+            return {.success = false, .error = checked_error(resp, "TOTP login network error")};
 
         // Per SDK, success is indicated by head.statusDescription=="Success" AND
         // body.Status==0; bypassing the status check buries auth errors in an
@@ -179,7 +210,7 @@ TokenExchangeResponse FivePaisaBroker::exchange_token(const QString& api_key, co
         const QString req_token = body_obj["RequestToken"].toString();
         if (req_token.isEmpty() || (status_code != 0 && status_code != -1)) {
             const QString msg = body_obj["Message"].toString();
-            return {false, "", "", "", msg.isEmpty() ? "TOTP login failed (no RequestToken)" : msg, ""};
+            return {.success = false, .error = msg.isEmpty() ? "TOTP login failed (no RequestToken)" : msg};
         }
 
         // Step 2: Get access token
@@ -197,15 +228,21 @@ TokenExchangeResponse FivePaisaBroker::exchange_token(const QString& api_key, co
                                                       req2, headers);
 
         if (!resp2.success)
-            return {false, "", "", "", checked_error(resp2, "GetAccessToken network error"), ""};
+            return {.success = false, .error = checked_error(resp2, "GetAccessToken network error")};
 
         QString access_token = resp2.json["body"].toObject()["AccessToken"].toString();
         if (access_token.isEmpty()) {
             QString msg = resp2.json["body"].toObject()["Message"].toString();
-            return {false, "", "", "", msg.isEmpty() ? "No AccessToken in response" : msg, ""};
+            return {.success = false, .error = msg.isEmpty() ? "No AccessToken in response" : msg};
         }
 
-        return {true, access_token, kp.client_id, "", "", ""};
+        // 5paisa access tokens expire at the daily reset. The live TOTP is a
+        // one-time code we can't replay, so there is no silent refresh.
+        const QString extra = with_token_expiry({}, next_ist_flush_epoch(6, 0));
+        // clientId is the account identifier, not a refresh token — it used to
+        // be passed positionally into the refresh_token slot, which left
+        // user_id empty. Same defect as AliceBlue and IIFL.
+        return {.success = true, .access_token = access_token, .user_id = kp.client_id, .additional_data = extra};
     }
 }
 
@@ -219,13 +256,28 @@ OrderPlaceResponse FivePaisaBroker::place_order(const BrokerCredentials& creds, 
 
     bool is_intraday = (order.product_type == ProductType::Intraday);
 
+    // ScripCode is the only contract identifier in the payload. The equity ticket does not carry
+    // one (only the F&O chain fills UnifiedOrder::instrument_token), so resolve it from the
+    // instrument master; transmitting the old 0 could never match a contract.
+    qint64 scrip_code = order.instrument_token.toLongLong();
+    if (scrip_code <= 0) {
+        const auto tok = InstrumentService::instance().instrument_token(order.symbol, order.exchange,
+                                                                        QStringLiteral("fivepaisa"));
+        if (tok.has_value() && tok.value() > 0)
+            scrip_code = tok.value();
+    }
+    if (scrip_code <= 0)
+        return {false, "",
+                "5Paisa place_order: ScripCode not found for " + order.exchange + ":" + order.symbol +
+                    " (instrument master not loaded yet?)"};
+
     QJsonObject body;
     // PlaceOrderRequest uses the long-form transaction string ("BUY"/"SELL");
     // the legacy "B"/"S" short form is reserved for the BO/CO BuySell field.
     body["OrderType"] = (order.side == OrderSide::Buy) ? "BUY" : "SELL";
     body["Exchange"] = fp_exchange(order.exchange);
     body["ExchangeType"] = fp_exchange_type(order.exchange);
-    body["ScripCode"] = order.instrument_token.isEmpty() ? 0 : order.instrument_token.toInt();
+    body["ScripCode"] = scrip_code;
     body["Price"] = (order.order_type == OrderType::Market) ? 0.0 : order.price;
     body["Qty"] = order.quantity;
     body["StopLossPrice"] = (order.order_type == OrderType::StopLoss || order.order_type == OrderType::StopLossLimit)
@@ -234,9 +286,14 @@ OrderPlaceResponse FivePaisaBroker::place_order(const BrokerCredentials& creds, 
     body["DisQty"] = 0;
     body["IsIntraday"] = is_intraday;
     body["AHPlaced"] = order.amo ? "Y" : "N";
-    // Per-order UUID-ish — 5Paisa rejects duplicates with the same RemoteOrderID.
-    body["RemoteOrderID"] =
-        "FCPT-" + QString::number(QDateTime::currentMSecsSinceEpoch()) + "-" + QString::number(QRandomGenerator::global()->bounded(10000));
+    // 5Paisa rejects duplicates with the same RemoteOrderID, so use the stable per-intent reference
+    // (UnifiedOrder::client_order_id) when UnifiedTrading stamped one: a re-submit after the 8s
+    // client-side timeout is then refused instead of opening a second order. Callers that bypass
+    // UnifiedTrading keep the per-attempt timestamp form.
+    body["RemoteOrderID"] = order.client_order_id.isEmpty()
+                                ? "FCPT-" + QString::number(QDateTime::currentMSecsSinceEpoch()) + "-" +
+                                      QString::number(QRandomGenerator::global()->bounded(10000))
+                                : "FCPT-" + client_order_ref_for(order, 40);
     body["AppSource"] = 0; // required: 0 = open API
     body["IOCOrder"] = false;
     body["IsStopLossOrder"] = (order.order_type == OrderType::StopLoss || order.order_type == OrderType::StopLossLimit);
@@ -281,9 +338,10 @@ ApiResponse<QJsonObject> FivePaisaBroker::modify_order(const BrokerCredentials& 
     auto kp = unpack_key(creds.api_key);
     auto hdrs = auth_headers(creds);
 
-    // 5paisa modify uses ExchOrderID — treat passed order_id as ExchOrderID
+    // 5paisa modify addresses the order by ExchOrderID, not the BrokerOrderId the terminal holds.
+    const QString exch_id = fp_lookup_exch_order_id(BASE_URL, kp.app_key, kp.client_id, hdrs, order_id);
     QJsonObject body;
-    body["ExchOrderID"] = order_id;
+    body["ExchOrderID"] = exch_id.isEmpty() ? order_id : exch_id;
     body["Price"] = mods.value("price").toDouble(0.0);
     body["Qty"] = mods.value("quantity").toInt(0);
     body["StopLossPrice"] = mods.value("trigger_price").toDouble(0.0);
@@ -313,8 +371,10 @@ ApiResponse<QJsonObject> FivePaisaBroker::cancel_order(const BrokerCredentials& 
     auto kp = unpack_key(creds.api_key);
     auto hdrs = auth_headers(creds);
 
+    // Cancel addresses the order by ExchOrderID, not the BrokerOrderId the terminal holds.
+    const QString exch_id = fp_lookup_exch_order_id(BASE_URL, kp.app_key, kp.client_id, hdrs, order_id);
     QJsonObject body;
-    body["ExchOrderID"] = order_id;
+    body["ExchOrderID"] = exch_id.isEmpty() ? order_id : exch_id;
 
     QJsonObject head;
     head["key"] = kp.app_key;
@@ -384,7 +444,8 @@ ApiResponse<QVector<BrokerOrderInfo>> FivePaisaBroker::get_orders(const BrokerCr
         info.quantity = o["Qty"].toInt();
         info.filled_qty = o["TradedQty"].toInt();
         info.price = o["Rate"].toDouble();
-        info.trigger_price = o["TriggerRate"].toDouble();
+        info.trigger_price = o["SLTriggerRate"].toDouble(o["TriggerRate"].toDouble());
+        info.exchange_order_id = o["ExchOrderID"].toVariant().toString();
         info.status = parse_status(o["OrderStatus"].toString());
         info.side = (o["BuySell"].toString() == "B") ? "buy" : "sell";
         info.order_type = (o["AtMarket"].toString() == "Y") ? "MARKET" : "LIMIT";
@@ -476,7 +537,12 @@ ApiResponse<QVector<BrokerPosition>> FivePaisaBroker::get_positions(const Broker
         pos.avg_price = p["AvgRate"].toDouble();
         pos.ltp = p["LTP"].toDouble();
         pos.pnl = p["MTOM"].toDouble();
+        pos.pnl_pct = (pos.avg_price > 0.0) ? ((pos.ltp - pos.avg_price) / pos.avg_price) * 100.0 : 0.0;
         pos.product_type = product;
+        // NetQty carries the sign, but PortfolioReplicationService takes fabs()
+        // of quantity and reads direction from `side` alone — leaving it empty
+        // replicated every short as a long and inverted its P&L.
+        pos.side = net_qty > 0 ? "LONG" : "SHORT";
         positions.append(pos);
     }
 
@@ -515,7 +581,10 @@ ApiResponse<QVector<BrokerHolding>> FivePaisaBroker::get_holdings(const BrokerCr
         holding.quantity = qty;
         holding.avg_price = avg;
         holding.ltp = ltp;
+        holding.invested_value = qty * avg;
+        holding.current_value = qty * ltp;
         holding.pnl = (ltp - avg) * qty;
+        holding.pnl_pct = (holding.invested_value > 0.0) ? (holding.pnl / holding.invested_value) * 100.0 : 0.0;
         holdings.append(holding);
     }
 
@@ -685,6 +754,17 @@ ApiResponse<QVector<BrokerCandle>> FivePaisaBroker::get_history(const BrokerCred
     }
 
     return {true, result, "", ts};
+}
+
+// ============================================================================
+// Pre-trade margin calculator — fallback estimator.
+// 5Paisa has no position-specific margin calculator API (OpenAlgo's
+// broker/fivepaisa/api/margin_api.py raises NotImplementedError), so we use the
+// shared heuristic estimator (BrokerInterface.h::estimate_order_margin).
+// ============================================================================
+ApiResponse<OrderMargin> FivePaisaBroker::get_order_margins(const BrokerCredentials& /*creds*/,
+                                                            const UnifiedOrder& order) {
+    return {true, estimate_order_margin(order), "", now_ts()};
 }
 
 } // namespace fincept::trading

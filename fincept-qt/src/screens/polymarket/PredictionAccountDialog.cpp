@@ -16,6 +16,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QTabWidget>
 #include <QTextEdit>
 #include <QVBoxLayout>
@@ -36,9 +37,29 @@ PredictionAccountDialog::PredictionAccountDialog(QWidget* parent) : QDialog(pare
 }
 
 void PredictionAccountDialog::set_active_exchange(const QString& exchange_id) {
-    if (!tabs_) return;
-    if (exchange_id == QStringLiteral("kalshi")) tabs_->setCurrentIndex(1);
-    else tabs_->setCurrentIndex(0);
+    if (!tabs_)
+        return;
+    if (exchange_id == QStringLiteral("kalshi"))
+        tabs_->setCurrentIndex(1);
+    else
+        tabs_->setCurrentIndex(0);
+}
+
+void PredictionAccountDialog::set_test_result(const QString& exchange_id, bool ok, const QString& message) {
+    QLabel* target = (exchange_id == QStringLiteral("kalshi")) ? ks_status_ : pm_status_;
+    if (!target)
+        return;
+    const QString color = ok ? QStringLiteral("#16a34a") : QStringLiteral("#dc2626");
+    const QString head = ok ? tr("Connection OK") : tr("Connection failed");
+    target->setText(QStringLiteral("<span style='color:%1'>%2%3</span>")
+                        .arg(color, head, message.isEmpty() ? QString() : QStringLiteral(" — ") + message.toHtmlEscaped()));
+    // Re-enable the button so the user can retry.
+    if (exchange_id == QStringLiteral("kalshi")) {
+        if (ks_test_btn_)
+            ks_test_btn_->setEnabled(true);
+    } else if (pm_test_btn_) {
+        pm_test_btn_->setEnabled(true);
+    }
 }
 
 // ── UI ──────────────────────────────────────────────────────────────────────
@@ -52,27 +73,105 @@ void PredictionAccountDialog::build_ui() {
 
     auto* bottom = new QHBoxLayout;
     bottom->addStretch(1);
-    auto* close_btn = new QPushButton(tr("Close"), this);
-    connect(close_btn, &QPushButton::clicked, this, &QDialog::accept);
-    bottom->addWidget(close_btn);
+    close_btn_ = new QPushButton(tr("Close"), this);
+    connect(close_btn_, &QPushButton::clicked, this, &QDialog::accept);
+    bottom->addWidget(close_btn_);
     root->addLayout(bottom);
+}
+
+void PredictionAccountDialog::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QDialog::changeEvent(event);
+}
+
+void PredictionAccountDialog::retranslateUi() {
+    setWindowTitle(tr("Prediction Markets — Connect Account"));
+    if (close_btn_)
+        close_btn_->setText(tr("Close"));
+    if (tabs_) {
+        if (tabs_->count() > 0)
+            tabs_->setTabText(0, tr("Polymarket"));
+        if (tabs_->count() > 1)
+            tabs_->setTabText(1, tr("Kalshi"));
+    }
+
+    auto set_label = [](QFormLayout* form, QWidget* field, const QString& text) {
+        if (!form || !field)
+            return;
+        if (auto* lbl = qobject_cast<QLabel*>(form->labelForField(field)))
+            lbl->setText(text);
+    };
+
+    // ── Polymarket tab ──
+    if (pm_intro_)
+        pm_intro_->setText(tr("<b>Polymarket (Polygon)</b><br>"
+                              "Trading requires a Polygon-compatible private key. The key is signed locally "
+                              "via <code>py_clob_client</code> and never leaves your machine in plaintext — "
+                              "it is stored encrypted in your OS credential manager.<br><br>"
+                              "<b>⚠ Security:</b> use a dedicated funding wallet, not your primary wallet."));
+    if (pm_private_key_)
+        pm_private_key_->setPlaceholderText(tr("0x… (64 hex chars)"));
+    if (pm_funder_)
+        pm_funder_->setPlaceholderText(tr("0x… (optional — derived via CREATE2 for proxy)"));
+    if (pm_signature_type_ && pm_signature_type_->count() >= 3) {
+        pm_signature_type_->setItemText(0, tr("Polymarket Proxy Wallet (default)"));
+        pm_signature_type_->setItemText(1, tr("Externally Owned Account (EOA)"));
+        pm_signature_type_->setItemText(2, tr("Polymarket Gnosis Safe"));
+    }
+    set_label(pm_form_, pm_private_key_, tr("Private Key:"));
+    set_label(pm_form_, pm_funder_, tr("Funder Address:"));
+    set_label(pm_form_, pm_signature_type_, tr("Signature Type:"));
+    if (pm_save_btn_)
+        pm_save_btn_->setText(tr("Save"));
+    if (pm_test_btn_)
+        pm_test_btn_->setText(tr("Test Connection"));
+    if (pm_clear_btn_)
+        pm_clear_btn_->setText(tr("Clear"));
+
+    // ── Kalshi tab ──
+    if (ks_intro_)
+        ks_intro_->setText(tr("<b>Kalshi (CFTC-regulated)</b><br>"
+                              "Generate an API key + RSA private key in your Kalshi dashboard "
+                              "(<code>api.elections.kalshi.com</code>). Requests are signed with RSA-PSS "
+                              "(key stays local, encrypted in your OS credential manager).<br><br>"
+                              "Use <b>Demo mode</b> to target <code>demo-api.kalshi.co</code> for testing."));
+    if (ks_api_key_id_)
+        ks_api_key_id_->setPlaceholderText(tr("00000000-0000-0000-0000-000000000000"));
+    if (ks_private_key_pem_)
+        ks_private_key_pem_->setPlaceholderText(
+            tr("-----BEGIN RSA PRIVATE KEY-----\n…paste PEM contents here…\n-----END RSA PRIVATE KEY-----"));
+    set_label(ks_form_, ks_api_key_id_, tr("API Key ID:"));
+    set_label(ks_form_, ks_private_key_pem_, tr("Private Key (PEM):"));
+    if (ks_load_pem_btn_)
+        ks_load_pem_btn_->setText(tr("Load from file…"));
+    if (ks_use_demo_)
+        ks_use_demo_->setText(tr("Use demo (paper trading) environment"));
+    if (ks_save_btn_)
+        ks_save_btn_->setText(tr("Save"));
+    if (ks_test_btn_)
+        ks_test_btn_->setText(tr("Test Connection"));
+    if (ks_clear_btn_)
+        ks_clear_btn_->setText(tr("Clear"));
+    // Status labels + derived-credential label reflect runtime state and are
+    // refreshed by load_existing()/save handlers — not forced here.
 }
 
 void PredictionAccountDialog::build_polymarket_tab() {
     auto* page = new QWidget(this);
     auto* vl = new QVBoxLayout(page);
 
-    auto* intro = new QLabel(
-        tr("<b>Polymarket (Polygon)</b><br>"
-           "Trading requires a Polygon-compatible private key. The key is signed locally "
-           "via <code>py_clob_client</code> and never leaves your machine in plaintext — "
-           "it is stored encrypted in your OS credential manager.<br><br>"
-           "<b>⚠ Security:</b> use a dedicated funding wallet, not your primary wallet."),
-        page);
-    intro->setWordWrap(true);
-    vl->addWidget(intro);
+    pm_intro_ = new QLabel(tr("<b>Polymarket (Polygon)</b><br>"
+                              "Trading requires a Polygon-compatible private key. The key is signed locally "
+                              "via <code>py_clob_client</code> and never leaves your machine in plaintext — "
+                              "it is stored encrypted in your OS credential manager.<br><br>"
+                              "<b>⚠ Security:</b> use a dedicated funding wallet, not your primary wallet."),
+                           page);
+    pm_intro_->setWordWrap(true);
+    vl->addWidget(pm_intro_);
 
-    auto* form = new QFormLayout;
+    pm_form_ = new QFormLayout;
+    QFormLayout* form = pm_form_;
 
     pm_private_key_ = new QLineEdit(page);
     pm_private_key_->setEchoMode(QLineEdit::Password);
@@ -111,9 +210,7 @@ void PredictionAccountDialog::build_polymarket_tab() {
 
     connect(pm_save_btn_, &QPushButton::clicked, this, &PredictionAccountDialog::on_save_polymarket);
     connect(pm_clear_btn_, &QPushButton::clicked, this, &PredictionAccountDialog::on_clear_polymarket);
-    connect(pm_test_btn_, &QPushButton::clicked, this, [this]() {
-        emit test_requested(QStringLiteral("polymarket"));
-    });
+    connect(pm_test_btn_, &QPushButton::clicked, this, [this]() { emit test_requested(QStringLiteral("polymarket")); });
 
     vl->addStretch(1);
     tabs_->addTab(page, tr("Polymarket"));
@@ -123,17 +220,17 @@ void PredictionAccountDialog::build_kalshi_tab() {
     auto* page = new QWidget(this);
     auto* vl = new QVBoxLayout(page);
 
-    auto* intro = new QLabel(
-        tr("<b>Kalshi (CFTC-regulated)</b><br>"
-           "Generate an API key + RSA private key in your Kalshi dashboard "
-           "(<code>api.elections.kalshi.com</code>). Requests are signed with RSA-PSS "
-           "(key stays local, encrypted in your OS credential manager).<br><br>"
-           "Use <b>Demo mode</b> to target <code>demo-api.kalshi.co</code> for testing."),
-        page);
-    intro->setWordWrap(true);
-    vl->addWidget(intro);
+    ks_intro_ = new QLabel(tr("<b>Kalshi (CFTC-regulated)</b><br>"
+                              "Generate an API key + RSA private key in your Kalshi dashboard "
+                              "(<code>api.elections.kalshi.com</code>). Requests are signed with RSA-PSS "
+                              "(key stays local, encrypted in your OS credential manager).<br><br>"
+                              "Use <b>Demo mode</b> to target <code>demo-api.kalshi.co</code> for testing."),
+                           page);
+    ks_intro_->setWordWrap(true);
+    vl->addWidget(ks_intro_);
 
-    auto* form = new QFormLayout;
+    ks_form_ = new QFormLayout;
+    QFormLayout* form = ks_form_;
 
     ks_api_key_id_ = new QLineEdit(page);
     ks_api_key_id_->setPlaceholderText(tr("00000000-0000-0000-0000-000000000000"));
@@ -171,9 +268,7 @@ void PredictionAccountDialog::build_kalshi_tab() {
     connect(ks_save_btn_, &QPushButton::clicked, this, &PredictionAccountDialog::on_save_kalshi);
     connect(ks_clear_btn_, &QPushButton::clicked, this, &PredictionAccountDialog::on_clear_kalshi);
     connect(ks_load_pem_btn_, &QPushButton::clicked, this, &PredictionAccountDialog::on_load_kalshi_pem);
-    connect(ks_test_btn_, &QPushButton::clicked, this, [this]() {
-        emit test_requested(QStringLiteral("kalshi"));
-    });
+    connect(ks_test_btn_, &QPushButton::clicked, this, [this]() { emit test_requested(QStringLiteral("kalshi")); });
 
     vl->addStretch(1);
     tabs_->addTab(page, tr("Kalshi"));
@@ -184,10 +279,10 @@ void PredictionAccountDialog::load_existing() {
         pm_private_key_->setText(pm->private_key);
         pm_funder_->setText(pm->funder_address);
         const int idx = pm_signature_type_->findData(pm->signature_type);
-        if (idx >= 0) pm_signature_type_->setCurrentIndex(idx);
+        if (idx >= 0)
+            pm_signature_type_->setCurrentIndex(idx);
         if (!pm->api_key.isEmpty()) {
-            pm_derived_status_->setText(
-                tr("L2 API credentials: derived (%1…)").arg(pm->api_key.left(8)));
+            pm_derived_status_->setText(tr("L2 API credentials: derived (%1…)").arg(pm->api_key.left(8)));
             pm_derived_status_->setStyleSheet("color: #16a34a;");
         }
         pm_status_->setText(tr("Polymarket credentials loaded from secure store."));
@@ -215,9 +310,17 @@ void PredictionAccountDialog::on_save_polymarket() {
     if (!c.private_key.startsWith(QStringLiteral("0x"))) {
         c.private_key.prepend(QStringLiteral("0x"));
     }
-    if (c.private_key.size() != 66) {
-        pm_status_->setText(tr(
-            "<span style='color:#dc2626'>Private key should be 0x + 64 hex chars.</span>"));
+    // Length alone accepted any 64 characters (a typo'd non-hex digit only surfaced later as an
+    // opaque signing error from the Python bridge) — check the characters too.
+    static const QRegularExpression kPrivKeyRe(QStringLiteral("^0x[0-9a-fA-F]{64}$"));
+    if (!kPrivKeyRe.match(c.private_key).hasMatch()) {
+        pm_status_->setText(tr("<span style='color:#dc2626'>Private key should be 0x + 64 hex chars.</span>"));
+        return;
+    }
+
+    static const QRegularExpression kAddrRe(QStringLiteral("^0x[0-9a-fA-F]{40}$"));
+    if (!c.funder_address.isEmpty() && !kAddrRe.match(c.funder_address).hasMatch()) {
+        pm_status_->setText(tr("<span style='color:#dc2626'>Funder address should be 0x + 40 hex chars.</span>"));
         return;
     }
 
@@ -263,13 +366,11 @@ void PredictionAccountDialog::on_save_kalshi() {
     c.use_demo = ks_use_demo_->isChecked();
 
     if (c.api_key_id.isEmpty() || c.private_key_pem.isEmpty()) {
-        ks_status_->setText(tr(
-            "<span style='color:#dc2626'>Both API Key ID and PEM private key are required.</span>"));
+        ks_status_->setText(tr("<span style='color:#dc2626'>Both API Key ID and PEM private key are required.</span>"));
         return;
     }
     if (!c.private_key_pem.contains(QStringLiteral("BEGIN"))) {
-        ks_status_->setText(tr(
-            "<span style='color:#dc2626'>Private key must be a PEM-encoded RSA key.</span>"));
+        ks_status_->setText(tr("<span style='color:#dc2626'>Private key must be a PEM-encoded RSA key.</span>"));
         return;
     }
 
@@ -296,10 +397,10 @@ void PredictionAccountDialog::on_clear_kalshi() {
 }
 
 void PredictionAccountDialog::on_load_kalshi_pem() {
-    const QString path = QFileDialog::getOpenFileName(
-        this, tr("Select Kalshi private key (PEM)"), QString(),
-        tr("PEM files (*.pem *.key);;All files (*)"));
-    if (path.isEmpty()) return;
+    const QString path = QFileDialog::getOpenFileName(this, tr("Select Kalshi private key (PEM)"), QString(),
+                                                      tr("PEM files (*.pem *.key);;All files (*)"));
+    if (path.isEmpty())
+        return;
 
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -308,8 +409,7 @@ void PredictionAccountDialog::on_load_kalshi_pem() {
     }
     const QString content = QString::fromUtf8(f.readAll());
     if (!content.contains(QStringLiteral("BEGIN"))) {
-        ks_status_->setText(tr(
-            "<span style='color:#dc2626'>%1 does not look like a PEM file.</span>").arg(path));
+        ks_status_->setText(tr("<span style='color:#dc2626'>%1 does not look like a PEM file.</span>").arg(path));
         return;
     }
     ks_private_key_pem_->setPlainText(content.trimmed());

@@ -1,15 +1,22 @@
 #include "screens/fno/FnoScreen.h"
 
 #include "core/logging/Logger.h"
+#include "screens/common/PaperBlotterPanel.h"
 #include "screens/fno/BuilderSubTab.h"
 #include "screens/fno/ChainSubTab.h"
 #include "screens/fno/FiiDiiSubTab.h"
+#include "screens/fno/LegEditorTable.h"
 #include "screens/fno/MultiStraddleSubTab.h"
 #include "screens/fno/OISubTab.h"
+#include "screens/fno/OptionChainModel.h"
+#include "screens/fno/OptionChainTable.h"
 #include "screens/fno/ScreenerSubTab.h"
+#include "services/options/OptionChainService.h"
+#include "trading/instruments/InstrumentService.h"
 #include "ui/theme/Theme.h"
 
 #include <QHBoxLayout>
+#include <QHash>
 #include <QHideEvent>
 #include <QLabel>
 #include <QSet>
@@ -17,29 +24,16 @@
 #include <QString>
 #include <QVBoxLayout>
 
+#include <cmath>
+
 namespace fincept::screens::fno {
 
 using namespace fincept::ui;
 
 namespace {
 
-struct TabDef {
-    const char* label;
-    const char* description;
-};
-
-constexpr TabDef kTabDefs[FnoScreen::TabCount] = {
-    {"Chain", "Live option chain (Phase 2)"},
-    {"Builder", "Strategy builder + payoff (Phase 5)"},
-    {"OI", "Open Interest analytics (Phase 7)"},
-    {"Multi-Stra", "Multi straddle / strangle charts (Phase 9)"},
-    {"FII / DII", "Institutional flows (Phase 8)"},
-    {"Screener", "Chain screener (Phase 9)"},
-};
-
 template <typename Sub>
-void replace_placeholder(QStackedWidget* stack, QHash<int, QWidget*>& tabs, int slot, Sub*& target,
-                         QWidget* parent) {
+void replace_placeholder(QStackedWidget* stack, QHash<int, QWidget*>& tabs, int slot, Sub*& target, QWidget* parent) {
     if (target)
         return;
     target = new Sub(parent);
@@ -51,19 +45,93 @@ void replace_placeholder(QStackedWidget* stack, QHash<int, QWidget*>& tabs, int 
         old->deleteLater();
 }
 
-}  // namespace
+// Map a symbol as other screens spell it onto an F&O underlying name. Watchlist /
+// Markets / Equity Research publish yfinance-style or exchange-prefixed spellings
+// ("RELIANCE.NS", "NSE:RELIANCE-EQ", "^NSEI", "NIFTY 50"), none of which match the
+// instrument master's bare underlying ("RELIANCE", "NIFTY"), so a linked symbol change
+// silently did nothing. Unrecognised input passes through unchanged (and is still
+// validated against the broker's picker by ChainSubTab::request_underlying).
+QString fno_underlying_for_link(QString s) {
+    s = s.trimmed().toUpper();
+    if (const int c = s.indexOf(QLatin1Char(':')); c >= 0)
+        s = s.mid(c + 1);
+    for (const QString& suf : {QStringLiteral(".NS"), QStringLiteral(".BO"), QStringLiteral("-EQ"),
+                               QStringLiteral("-INDEX")}) {
+        if (s.endsWith(suf))
+            s.chop(int(suf.size()));
+    }
+    static const QHash<QString, QString> kAlias = {
+        {QStringLiteral("^NSEI"), QStringLiteral("NIFTY")},
+        {QStringLiteral("NIFTY 50"), QStringLiteral("NIFTY")},
+        {QStringLiteral("NIFTY50"), QStringLiteral("NIFTY")},
+        {QStringLiteral("^NSEBANK"), QStringLiteral("BANKNIFTY")},
+        {QStringLiteral("NIFTY BANK"), QStringLiteral("BANKNIFTY")},
+        {QStringLiteral("NIFTYBANK"), QStringLiteral("BANKNIFTY")},
+        {QStringLiteral("BANK NIFTY"), QStringLiteral("BANKNIFTY")},
+        {QStringLiteral("NIFTY FIN SERVICE"), QStringLiteral("FINNIFTY")},
+        {QStringLiteral("NIFTY MID SELECT"), QStringLiteral("MIDCPNIFTY")},
+    };
+    return kAlias.value(s, s);
+}
+
+} // namespace
+
+QString FnoScreen::tab_label_for(int index) {
+    switch (index) {
+        case TabChain:
+            return tr("Chain");
+        case TabBuilder:
+            return tr("Builder");
+        case TabOI:
+            return tr("OI");
+        case TabMultiStraddle:
+            return tr("Multi-Stra");
+        case TabFiiDii:
+            return tr("FII / DII");
+        case TabScreener:
+            return tr("Screener");
+        case TabPositions:
+            return tr("Positions");
+        default:
+            return {};
+    }
+}
+
+QString FnoScreen::tab_detail_for(int index) {
+    // Sub-title shown on a slot's placeholder. Every sub-tab is implemented, so
+    // the placeholder is replaced before it can be shown — these strings only
+    // surface if construction of a sub-tab ever fails. They describe what the
+    // tab does; the old "(Phase N)" roadmap markers were stale build notes.
+    switch (index) {
+        case TabChain:
+            return tr("Live option chain");
+        case TabBuilder:
+            return tr("Strategy builder + payoff");
+        case TabOI:
+            return tr("Open Interest analytics");
+        case TabMultiStraddle:
+            return tr("Multi straddle / strangle charts");
+        case TabFiiDii:
+            return tr("Institutional flows");
+        case TabScreener:
+            return tr("Chain screener");
+        case TabPositions:
+            return tr("Paper positions, orders & square-off");
+        default:
+            return {};
+    }
+}
 
 FnoScreen::FnoScreen(QWidget* parent) : QWidget(parent) {
     setObjectName("fnoScreen");
-    setStyleSheet(QStringLiteral(
-        "#fnoScreen { background:%1; }"
-        "#fnoTabBar { background:%1; border-bottom:1px solid %2; }"
-        "#fnoTabBtn { background:transparent; color:%3; border:none; padding:8px 18px; "
-        "             font-size:10px; font-weight:700; letter-spacing:0.5px; }"
-        "#fnoTabBtn:hover { background:%4; color:%5; }"
-        "#fnoTabBtn[active=\"true\"] { color:%6; border-bottom:2px solid %6; }"
-        "#fnoComingSoon { color:%3; font-size:14px; background:transparent; }"
-        "#fnoComingSoonHint { color:%7; font-size:11px; background:transparent; }")
+    setStyleSheet(QStringLiteral("#fnoScreen { background:%1; }"
+                                 "#fnoTabBar { background:%1; border-bottom:1px solid %2; }"
+                                 "#fnoTabBtn { background:transparent; color:%3; border:none; padding:8px 18px; "
+                                 "             font-size:10px; font-weight:700; letter-spacing:0.5px; }"
+                                 "#fnoTabBtn:hover { background:%4; color:%5; }"
+                                 "#fnoTabBtn[active=\"true\"] { color:%6; border-bottom:2px solid %6; }"
+                                 "#fnoComingSoon { color:%3; font-size:14px; background:transparent; }"
+                                 "#fnoComingSoonHint { color:%7; font-size:11px; background:transparent; }")
                       .arg(colors::BG_BASE(), colors::BORDER_DIM(), colors::TEXT_SECONDARY(), colors::BG_HOVER(),
                            colors::TEXT_PRIMARY(), colors::AMBER(), colors::TEXT_DIM()));
 
@@ -83,8 +151,7 @@ void FnoScreen::setup_ui() {
     // 1:1 to SubTab values. The Chain slot is replaced with the real widget
     // immediately so the user sees data on first reveal.
     for (int i = 0; i < TabCount; ++i) {
-        auto* placeholder =
-            build_placeholder(QString::fromLatin1(kTabDefs[i].label), QString::fromLatin1(kTabDefs[i].description));
+        auto* placeholder = build_placeholder(tab_label_for(i), tab_detail_for(i));
         stack_->addWidget(placeholder);
         tabs_.insert(i, placeholder);
     }
@@ -104,7 +171,7 @@ QWidget* FnoScreen::build_tab_bar() {
 
     tab_btns_.reserve(TabCount);
     for (int i = 0; i < TabCount; ++i) {
-        auto* btn = new QPushButton(QString::fromLatin1(kTabDefs[i].label).toUpper(), bar);
+        auto* btn = new QPushButton(tab_label_for(i).toUpper(), bar);
         btn->setObjectName("fnoTabBtn");
         btn->setCursor(Qt::PointingHandCursor);
         btn->setProperty("active", i == int(active_tab_));
@@ -122,7 +189,7 @@ QWidget* FnoScreen::build_placeholder(const QString& tab_name, const QString& de
     lay->setContentsMargins(0, 0, 0, 0);
     lay->setSpacing(6);
     lay->addStretch(1);
-    auto* title = new QLabel(tab_name + " — coming in a later phase", wrap);
+    auto* title = new QLabel(tr("%1 — coming in a later phase").arg(tab_name), wrap);
     title->setObjectName("fnoComingSoon");
     title->setAlignment(Qt::AlignCenter);
     auto* hint = new QLabel(detail, wrap);
@@ -144,6 +211,67 @@ void FnoScreen::ensure_tab_built(SubTab which) {
         BuilderSubTab* p = nullptr;
         replace_placeholder<BuilderSubTab>(stack_, tabs_, TabBuilder, p, this);
         builder_tab_ = p;
+        if (chain_tab_ && chain_tab_->table()) {
+            connect(chain_tab_->table(), &OptionChainTable::leg_clicked, builder_tab_,
+                    [this](qint64 token, double strike, bool is_call, int lots) {
+                        Q_UNUSED(token);
+                        // Resolve the leg from the chain the user is CLICKING in, not the
+                        // service-wide last_chain(): that is whichever series published last
+                        // (any underlying/expiry), so a click could pull another series'
+                        // token/expiry/premium for the same strike — and it carries no
+                        // Greeks/IV, which are only applied to the republished hub snapshot.
+                        if (!chain_tab_ || !chain_tab_->table())
+                            return;
+                        const auto& chain = chain_tab_->table()->chain_model()->chain();
+                        fincept::services::options::StrategyLeg leg;
+                        leg.strike = strike;
+                        leg.type =
+                            is_call ? fincept::trading::InstrumentType::CE : fincept::trading::InstrumentType::PE;
+                        leg.lots = lots;
+                        leg.expiry = chain.expiry;
+                        for (const auto& row : chain.rows) {
+                            if (std::abs(row.strike - strike) < 1e-6) {
+                                const auto& q = is_call ? row.ce_quote : row.pe_quote;
+                                leg.entry_price = q.ltp;
+                                leg.iv_at_entry = is_call ? row.ce_iv : row.pe_iv;
+                                // ORDER SAFETY: never invent a lot size. This used
+                                // to fall back to 1 when the provider omitted it
+                                // (Fyers' options-chain-v3 always does), which made
+                                // "1 lot" dispatch as ONE UNIT and understated every
+                                // payoff/Greek by the lot multiplier. Resolve it from
+                                // the instrument master instead, and leave it at 0 —
+                                // which the Builder's pre-flight check refuses to
+                                // trade — when it genuinely can't be determined.
+                                leg.lot_size = row.lot_size;
+                                leg.instrument_token = is_call ? row.ce_token : row.pe_token;
+                                leg.symbol = is_call ? row.ce_symbol : row.pe_symbol;
+                                break;
+                            }
+                        }
+                        if (leg.lot_size <= 0 && !leg.symbol.isEmpty()) {
+                            auto& insts = fincept::trading::InstrumentService::instance();
+                            if (auto inst = insts.find(leg.symbol, QStringLiteral("NFO"), chain.broker_id))
+                                leg.lot_size = inst->lot_size;
+                            if (leg.lot_size <= 0) {
+                                // All options on one underlying/expiry share a lot
+                                // size — borrow it from any sibling contract.
+                                const auto siblings = insts.find_options_for_underlying(
+                                    chain.broker_id, chain.underlying, chain.expiry, QStringLiteral("NFO"));
+                                for (const auto& in : siblings) {
+                                    if (in.lot_size > 0) {
+                                        leg.lot_size = in.lot_size;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (leg.lot_size <= 0)
+                            LOG_WARN("FnoScreen", QString("Leg %1 has no resolvable lot size — it will be blocked "
+                                                          "from the Builder's Trade All.")
+                                                      .arg(leg.symbol));
+                        builder_tab_->legs_view()->leg_model()->append_leg(leg);
+                    });
+        }
     }
     if (which == TabOI && !oi_tab_) {
         OISubTab* p = nullptr;
@@ -164,6 +292,14 @@ void FnoScreen::ensure_tab_built(SubTab which) {
         ScreenerSubTab* p = nullptr;
         replace_placeholder<ScreenerSubTab>(stack_, tabs_, TabScreener, p, this);
         screener_tab_ = p;
+    }
+    if (which == TabPositions && !positions_tab_) {
+        // Shared paper blotter: open positions / working orders / trades for every
+        // active paper account, with square-off. Self-populating and live via
+        // PaperMarkService — no per-screen marking wiring needed here.
+        common::PaperBlotterPanel* p = nullptr;
+        replace_placeholder<common::PaperBlotterPanel>(stack_, tabs_, TabPositions, p, this);
+        positions_tab_ = p;
     }
     // Phase 9: all six F&O sub-tabs are real (no more placeholders).
 }
@@ -258,7 +394,7 @@ void FnoScreen::on_group_symbol_changed(const fincept::SymbolRef& ref) {
         return;
     ensure_tab_built(TabChain);
     if (chain_tab_)
-        chain_tab_->request_underlying(ref.symbol.toUpper());
+        chain_tab_->request_underlying(fno_underlying_for_link(ref.symbol));
 }
 
 fincept::SymbolRef FnoScreen::current_symbol() const {
@@ -270,21 +406,42 @@ fincept::SymbolRef FnoScreen::current_symbol() const {
     fincept::SymbolRef ref;
     ref.symbol = underlying;
     static const QSet<QString> kIndexNames = {
-        QStringLiteral("NIFTY"), QStringLiteral("BANKNIFTY"),
-        QStringLiteral("FINNIFTY"), QStringLiteral("MIDCPNIFTY"),
+        QStringLiteral("NIFTY"),
+        QStringLiteral("BANKNIFTY"),
+        QStringLiteral("FINNIFTY"),
+        QStringLiteral("MIDCPNIFTY"),
     };
-    ref.asset_class = kIndexNames.contains(underlying) ? QStringLiteral("index")
-                                                       : QStringLiteral("equity");
+    ref.asset_class = kIndexNames.contains(underlying) ? QStringLiteral("index") : QStringLiteral("equity");
     ref.exchange = QStringLiteral("NSE");
     return ref;
 }
 
 void FnoScreen::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
+    // The chain subscription follows the SCREEN's visibility (not the Chain page's), so
+    // the other sub-tabs keep receiving chain updates.
+    if (chain_tab_)
+        chain_tab_->on_screen_shown();
 }
 
 void FnoScreen::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
+    // A hidden Chain page gets no hide event of its own when the screen goes away, so
+    // release the subscription explicitly (P3 / D3).
+    if (chain_tab_)
+        chain_tab_->on_screen_hidden();
+}
+
+void FnoScreen::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void FnoScreen::retranslateUi() {
+    for (int i = 0; i < tab_btns_.size(); ++i)
+        if (tab_btns_.at(i))
+            tab_btns_.at(i)->setText(tab_label_for(i).toUpper());
 }
 
 } // namespace fincept::screens::fno

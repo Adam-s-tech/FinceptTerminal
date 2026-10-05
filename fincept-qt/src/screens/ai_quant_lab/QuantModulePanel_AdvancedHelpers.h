@@ -12,6 +12,7 @@
 
 #include <QAbstractItemView>
 #include <QColor>
+#include <QCoreApplication>
 #include <QHeaderView>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -27,22 +28,26 @@
 namespace fincept::screens::quant_advanced_helpers {
 
 inline QString fmt_pct_safe(const QJsonValue& v, int decimals = 2) {
-    if (v.isNull() || v.isUndefined()) return QStringLiteral("—");
+    if (v.isNull() || v.isUndefined())
+        return QStringLiteral("—");
     return QString::number(v.toDouble() * 100.0, 'f', decimals) + "%";
 }
 
 inline QString fmt_num_safe(const QJsonValue& v, int decimals = 4) {
-    if (v.isNull() || v.isUndefined()) return QStringLiteral("—");
+    if (v.isNull() || v.isUndefined())
+        return QStringLiteral("—");
     return QString::number(v.toDouble(), 'f', decimals);
 }
 
 inline QString fmt_int_safe(const QJsonValue& v) {
-    if (v.isNull() || v.isUndefined()) return QStringLiteral("—");
+    if (v.isNull() || v.isUndefined())
+        return QStringLiteral("—");
     return QString::number(v.toInt());
 }
 
 inline QString fmt_bps(const QJsonValue& v, int decimals = 2) {
-    if (v.isNull() || v.isUndefined()) return QStringLiteral("—");
+    if (v.isNull() || v.isUndefined())
+        return QStringLiteral("—");
     return QString::number(v.toDouble(), 'f', decimals) + " bps";
 }
 
@@ -60,14 +65,20 @@ inline QString verdict_color_for(const QString& v) {
 }
 
 // Returns false if the payload was an error (already displayed via callback) — caller should bail.
-inline bool check_success(const QJsonObject& payload,
-                          const std::function<void(const QString&)>& display_error_fn) {
+//
+// Single implementation for every QuantModulePanel display TU. It used to be
+// copy-pasted into anonymous namespaces in CoreDisplays.cpp and
+// AIMLDisplays.cpp; those copies were translated while this one was not, so the
+// same message appeared translated on some panels and not on others.
+inline bool check_success(const QJsonObject& payload, const std::function<void(const QString&)>& display_error_fn) {
     if (!payload.value("success").toBool(false)) {
-        const QString err = payload.value("error").toString("Unknown error");
+        const QString err =
+            payload.value("error").toString(QCoreApplication::translate("QuantModulePanel", "Unknown error"));
         const QString kind = payload.value("error_kind").toString();
-        const QString prefix = kind == "validation" ? "Input error: "
-                              : kind == "runtime"    ? "Computation failed: "
-                                                     : "";
+        const QString prefix = kind == "validation" ? QCoreApplication::translate("QuantModulePanel", "Input error: ")
+                               : kind == "runtime"
+                                   ? QCoreApplication::translate("QuantModulePanel", "Computation failed: ")
+                                   : QString();
         display_error_fn(prefix + err);
         return false;
     }
@@ -75,9 +86,7 @@ inline bool check_success(const QJsonObject& payload,
 }
 
 // Render a {asset → weight} dict as a sorted-by-weight table.
-inline QTableWidget* build_weights_table(const QJsonObject& weights,
-                                         QWidget* parent,
-                                         int max_height = 320) {
+inline QTableWidget* build_weights_table(const QJsonObject& weights, QWidget* parent, int max_height = 320) {
     QList<QPair<QString, double>> rows;
     for (auto it = weights.begin(); it != weights.end(); ++it)
         rows.append({it.key(), it.value().toDouble()});
@@ -85,7 +94,9 @@ inline QTableWidget* build_weights_table(const QJsonObject& weights,
               [](const auto& a, const auto& b) { return std::abs(a.second) > std::abs(b.second); });
 
     auto* table = new QTableWidget(rows.size(), 2, parent);
-    table->setHorizontalHeaderLabels({"Asset", "Weight"});
+    // These two were the only untranslated column headers in the panel family.
+    table->setHorizontalHeaderLabels({QCoreApplication::translate("QuantModulePanel", "Asset"),
+                                      QCoreApplication::translate("QuantModulePanel", "Weight")});
     table->verticalHeader()->setVisible(false);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
@@ -96,8 +107,10 @@ inline QTableWidget* build_weights_table(const QJsonObject& weights,
         const double w = rows[r].second;
         auto* wi = new QTableWidgetItem(QString::number(w * 100.0, 'f', 3) + "%");
         wi->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        if (w > 0.001) wi->setForeground(QColor(fincept::ui::colors::POSITIVE()));
-        else if (w < -0.001) wi->setForeground(QColor(fincept::ui::colors::NEGATIVE()));
+        if (w > 0.001)
+            wi->setForeground(QColor(fincept::ui::colors::POSITIVE()));
+        else if (w < -0.001)
+            wi->setForeground(QColor(fincept::ui::colors::NEGATIVE()));
         table->setItem(r, 1, wi);
         table->setRowHeight(r, 24);
     }

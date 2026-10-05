@@ -1,12 +1,11 @@
 // QuantModulePanel_HFT.cpp — HFT (high-frequency trading) panel builder.
 // Method definition split from QuantModulePanel_Misc.cpp.
 
+#include "core/logging/Logger.h"
 #include "screens/ai_quant_lab/QuantModulePanel.h"
 #include "screens/ai_quant_lab/QuantModulePanel_Common.h"
 #include "screens/ai_quant_lab/QuantModulePanel_GsHelpers.h"
 #include "screens/ai_quant_lab/QuantModulePanel_Styles.h"
-
-#include "core/logging/Logger.h"
 #include "services/ai_quant_lab/AIQuantLabService.h"
 #include "services/file_manager/FileManagerService.h"
 #include "ui/theme/Theme.h"
@@ -59,29 +58,28 @@ using namespace fincept::screens::quant_styles;
 using namespace fincept::screens::quant_common;
 using namespace fincept::screens::quant_gs_helpers;
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // HFT PANEL
 // ═══════════════════════════════════════════════════════════════════════════════
 QWidget* QuantModulePanel::build_hft_panel() {
     const QString accent = module_.color.name();
 
-    auto* w  = new QWidget(this);
+    auto* w = new QWidget(this);
     auto* vl = new QVBoxLayout(w);
     vl->setContentsMargins(0, 0, 0, 0);
     vl->setSpacing(0);
 
     // ── Shared exchange/symbol bar ────────────────────────────────────────────
     auto* top_bar = new QWidget(w);
-    top_bar->setStyleSheet(QString("background:%1; border-bottom:1px solid %2;")
-                               .arg(ui::colors::BG_SURFACE(), ui::colors::BORDER_DIM()));
+    top_bar->setStyleSheet(
+        QString("background:%1; border-bottom:1px solid %2;").arg(ui::colors::BG_SURFACE(), ui::colors::BORDER_DIM()));
     auto* top_hl = new QHBoxLayout(top_bar);
     top_hl->setContentsMargins(12, 8, 12, 8);
     top_hl->setSpacing(8);
 
     auto* exch_lbl = new QLabel(tr("EXCHANGE"), top_bar);
-    exch_lbl->setStyleSheet(QString("color:%1; font-size:9px; font-weight:700; letter-spacing:0.5px;")
-                                .arg(ui::colors::TEXT_TERTIARY()));
+    exch_lbl->setStyleSheet(
+        QString("color:%1; font-size:9px; font-weight:700; letter-spacing:0.5px;").arg(ui::colors::TEXT_TERTIARY()));
     auto* hft_exchange = new QComboBox(top_bar);
     hft_exchange->addItems({"binance", "kraken", "coinbase", "bybit", "okx", "hyperliquid"});
     hft_exchange->setStyleSheet(combo_ss());
@@ -122,6 +120,22 @@ QWidget* QuantModulePanel::build_hft_panel() {
     top_hl->addWidget(latency_lbl);
     vl->addWidget(top_bar);
 
+    // Shared pre-flight guard. Every HFT action forwards the symbol straight to
+    // ccxt; a blank field used to surface as an opaque exchange traceback.
+    // Returns an empty string (after showing the error) when unusable.
+    auto require_symbol = [this]() -> QString {
+        const QString s = text_inputs_["hft_symbol"]->text().trimmed().toUpper();
+        if (s.isEmpty()) {
+            display_error(tr("Enter a symbol (e.g. BTC/USDT) before running."));
+            return {};
+        }
+        if (!s.contains('/')) {
+            display_error(tr("'%1' is not a valid pair. Use BASE/QUOTE form, e.g. BTC/USDT.").arg(s));
+            return {};
+        }
+        return s;
+    };
+
     // ── Tab widget ────────────────────────────────────────────────────────────
     auto* tabs = new QTabWidget(w);
     tabs->setStyleSheet(tab_ss(accent));
@@ -129,7 +143,7 @@ QWidget* QuantModulePanel::build_hft_panel() {
     // ════════════════════════════════════════════════════════
     // TAB 1 — LIVE ORDER BOOK
     // ════════════════════════════════════════════════════════
-    auto* ob_tab  = new QWidget(this);
+    auto* ob_tab = new QWidget(this);
     auto* ob_root = new QVBoxLayout(ob_tab);
     ob_root->setContentsMargins(12, 10, 12, 10);
     ob_root->setSpacing(8);
@@ -138,12 +152,15 @@ QWidget* QuantModulePanel::build_hft_panel() {
     auto* ob_ctrl = new QHBoxLayout;
     ob_ctrl->setSpacing(8);
     auto* ob_fetch = make_run_button(tr("FETCH LIVE ORDER BOOK"), ob_tab);
-    connect(ob_fetch, &QPushButton::clicked, this, [this]() {
+    connect(ob_fetch, &QPushButton::clicked, this, [this, require_symbol]() {
+        const QString sym = require_symbol();
+        if (sym.isEmpty())
+            return;
         status_label_->setText(tr("Fetching live order book..."));
         QJsonObject p;
         p["exchange"] = combo_inputs_["hft_exchange"]->currentText();
-        p["symbol"]   = text_inputs_["hft_symbol"]->text().trimmed();
-        p["depth"]    = combo_inputs_["hft_depth"]->currentText().toInt();
+        p["symbol"] = sym;
+        p["depth"] = combo_inputs_["hft_depth"]->currentText().toInt();
         AIQuantLabService::instance().hft_create_orderbook(p);
     });
     ob_ctrl->addWidget(ob_fetch);
@@ -162,22 +179,24 @@ QWidget* QuantModulePanel::build_hft_panel() {
         cvl->setContentsMargins(10, 6, 10, 6);
         cvl->setSpacing(2);
         auto* l = new QLabel(label, card);
-        l->setStyleSheet(QString("color:%1; font-size:9px; font-weight:700; letter-spacing:0.5px; background:transparent;")
-                             .arg(ui::colors::TEXT_TERTIARY()));
+        l->setStyleSheet(
+            QString("color:%1; font-size:9px; font-weight:700; letter-spacing:0.5px; background:transparent;")
+                .arg(ui::colors::TEXT_TERTIARY()));
         auto* v = new QLabel("—", card);
         v->setObjectName("hftCardVal");
-        v->setStyleSheet(QString("color:%1; font-size:13px; font-weight:700; font-family:'Courier New'; background:transparent;")
-                             .arg(ui::colors::TEXT_PRIMARY()));
+        v->setStyleSheet(
+            QString("color:%1; font-size:13px; font-weight:700; font-family:'Courier New'; background:transparent;")
+                .arg(ui::colors::TEXT_PRIMARY()));
         cvl->addWidget(l);
         cvl->addWidget(v);
         return {card, v};
     };
 
-    auto [mid_card, mid_val]         = make_card(tr("MID PRICE"), ob_tab);
-    auto [spread_card, spread_val]   = make_card(tr("SPREAD BPS"), ob_tab);
-    auto [obi_card, obi_val]         = make_card(tr("ORDER BOOK IMBALANCE"), ob_tab);
-    auto [pressure_card, pres_val]   = make_card(tr("PRESSURE"), ob_tab);
-    auto [wmid_card, wmid_val]       = make_card(tr("WEIGHTED MID"), ob_tab);
+    auto [mid_card, mid_val] = make_card(tr("MID PRICE"), ob_tab);
+    auto [spread_card, spread_val] = make_card(tr("SPREAD BPS"), ob_tab);
+    auto [obi_card, obi_val] = make_card(tr("ORDER BOOK IMBALANCE"), ob_tab);
+    auto [pressure_card, pres_val] = make_card(tr("PRESSURE"), ob_tab);
+    auto [wmid_card, wmid_val] = make_card(tr("WEIGHTED MID"), ob_tab);
 
     // Store for result update
     mid_val->setObjectName("hft_mid_val");
@@ -222,8 +241,8 @@ QWidget* QuantModulePanel::build_hft_panel() {
                 "QHeaderView::section { background:%2; color:%3; font-size:9px; font-weight:700;"
                 "  padding:3px 6px; border:none; border-bottom:1px solid %4; }"
                 "QTableWidget::item { padding:2px 6px; font-family:'Courier New'; font-size:10px; border:none; }")
-            .arg(ui::colors::BG_RAISED(), ui::colors::BG_SURFACE(),
-                 ui::colors::TEXT_TERTIARY(), ui::colors::BORDER_DIM()));
+            .arg(ui::colors::BG_RAISED(), ui::colors::BG_SURFACE(), ui::colors::TEXT_TERTIARY(),
+                 ui::colors::BORDER_DIM()));
     bids_vl->addWidget(bids_hdr);
     bids_vl->addWidget(bid_table, 1);
 
@@ -258,7 +277,7 @@ QWidget* QuantModulePanel::build_hft_panel() {
     // ════════════════════════════════════════════════════════
     // TAB 2 — MICROSTRUCTURE (Market Making + Toxic Flow)
     // ════════════════════════════════════════════════════════
-    auto* micro_tab  = new QWidget(this);
+    auto* micro_tab = new QWidget(this);
     auto* micro_root = new QVBoxLayout(micro_tab);
     micro_root->setContentsMargins(12, 10, 12, 10);
     micro_root->setSpacing(10);
@@ -272,14 +291,16 @@ QWidget* QuantModulePanel::build_hft_panel() {
     mm_vl->setSpacing(8);
 
     auto* mm_title = new QLabel(tr("MARKET MAKING  —  Avellaneda-Stoikov Model"), mm_section);
-    mm_title->setStyleSheet(QString("color:%1; font-size:10px; font-weight:700; letter-spacing:0.5px; background:transparent;")
-                                .arg(accent));
+    mm_title->setStyleSheet(
+        QString("color:%1; font-size:10px; font-weight:700; letter-spacing:0.5px; background:transparent;")
+            .arg(accent));
     mm_vl->addWidget(mm_title);
 
     auto* mm_params = new QHBoxLayout;
     mm_params->setSpacing(8);
     auto* inv_spin = make_double_spin(-1000, 1000, 0.0, 4, " units", mm_section);
-    int_inputs_["hft_inventory"] = nullptr;
+    // NOTE: do not insert nullptr sentinels into int_inputs_ — every other read
+    // site dereferences these hashes unconditionally.
     double_inputs_["hft_inventory_d"] = inv_spin;
     mm_params->addWidget(build_input_row(tr("Inventory"), inv_spin, mm_section));
     auto* spread_spin = make_double_spin(1.0, 10.0, 1.5, 2, "×", mm_section);
@@ -291,14 +312,17 @@ QWidget* QuantModulePanel::build_hft_panel() {
     mm_vl->addLayout(mm_params);
 
     auto* mm_run = make_run_button(tr("CALCULATE OPTIMAL QUOTES"), mm_section);
-    connect(mm_run, &QPushButton::clicked, this, [this]() {
+    connect(mm_run, &QPushButton::clicked, this, [this, require_symbol]() {
+        const QString sym = require_symbol();
+        if (sym.isEmpty())
+            return;
         status_label_->setText(tr("Fetching live data + computing quotes..."));
         QJsonObject p;
-        p["exchange"]         = combo_inputs_["hft_exchange"]->currentText();
-        p["symbol"]           = text_inputs_["hft_symbol"]->text().trimmed();
-        p["inventory"]        = double_inputs_["hft_inventory_d"]->value();
+        p["exchange"] = combo_inputs_["hft_exchange"]->currentText();
+        p["symbol"] = sym;
+        p["inventory"] = double_inputs_["hft_inventory_d"]->value();
         p["spread_multiplier"] = double_inputs_["hft_spread_mult"]->value();
-        p["risk_aversion"]    = double_inputs_["hft_risk_aversion"]->value();
+        p["risk_aversion"] = double_inputs_["hft_risk_aversion"]->value();
         AIQuantLabService::instance().hft_market_making_quotes(p);
     });
     mm_vl->addWidget(mm_run);
@@ -308,9 +332,9 @@ QWidget* QuantModulePanel::build_hft_panel() {
     mm_results->setSpacing(6);
     auto [bid_card, bid_val2] = make_card(tr("BID QUOTE"), mm_section);
     auto [ask_card, ask_val2] = make_card(tr("ASK QUOTE"), mm_section);
-    auto [qs_card, qs_val]    = make_card(tr("QUOTED SPREAD BPS"), mm_section);
+    auto [qs_card, qs_val] = make_card(tr("QUOTED SPREAD BPS"), mm_section);
     auto [edge_card, edge_val] = make_card(tr("EDGE/SIDE BPS"), mm_section);
-    auto [rec_card, rec_val]  = make_card(tr("RECOMMENDATION"), mm_section);
+    auto [rec_card, rec_val] = make_card(tr("RECOMMENDATION"), mm_section);
     bid_val2->setObjectName("hft_mm_bid");
     ask_val2->setObjectName("hft_mm_ask");
     qs_val->setObjectName("hft_mm_qspread");
@@ -332,8 +356,9 @@ QWidget* QuantModulePanel::build_hft_panel() {
     tox_vl->setSpacing(8);
 
     auto* tox_title = new QLabel(tr("TOXIC FLOW DETECTION  —  PIN Score Model"), tox_section);
-    tox_title->setStyleSheet(QString("color:%1; font-size:10px; font-weight:700; letter-spacing:0.5px; background:transparent;")
-                                 .arg(accent));
+    tox_title->setStyleSheet(
+        QString("color:%1; font-size:10px; font-weight:700; letter-spacing:0.5px; background:transparent;")
+            .arg(accent));
     tox_vl->addWidget(tox_title);
 
     auto* tox_params = new QHBoxLayout;
@@ -348,22 +373,25 @@ QWidget* QuantModulePanel::build_hft_panel() {
     tox_vl->addLayout(tox_params);
 
     auto* tox_run = make_run_button(tr("DETECT TOXIC FLOW"), tox_section);
-    connect(tox_run, &QPushButton::clicked, this, [this]() {
+    connect(tox_run, &QPushButton::clicked, this, [this, require_symbol]() {
+        const QString sym = require_symbol();
+        if (sym.isEmpty())
+            return;
         status_label_->setText(tr("Fetching trades + analyzing flow..."));
         QJsonObject p;
         p["exchange"] = combo_inputs_["hft_exchange"]->currentText();
-        p["symbol"]   = text_inputs_["hft_symbol"]->text().trimmed();
-        p["limit"]    = combo_inputs_["hft_tox_limit"]->currentText().toInt();
+        p["symbol"] = sym;
+        p["limit"] = combo_inputs_["hft_tox_limit"]->currentText().toInt();
         AIQuantLabService::instance().hft_detect_toxic(p);
     });
     tox_vl->addWidget(tox_run);
 
     auto* tox_results = new QHBoxLayout;
     tox_results->setSpacing(6);
-    auto [pin_card, pin_val]      = make_card(tr("PIN SCORE (0-100)"), tox_section);
-    auto [vol_card, vol_val]      = make_card(tr("VOLUME IMBALANCE"), tox_section);
+    auto [pin_card, pin_val] = make_card(tr("PIN SCORE (0-100)"), tox_section);
+    auto [vol_card, vol_val] = make_card(tr("VOLUME IMBALANCE"), tox_section);
     auto [impact_card, impact_val] = make_card(tr("PRICE IMPACT BPS"), tox_section);
-    auto [class_card, class_val]  = make_card(tr("CLASSIFICATION"), tox_section);
+    auto [class_card, class_val] = make_card(tr("CLASSIFICATION"), tox_section);
     auto [action_card, action_val] = make_card(tr("RECOMMENDED ACTION"), tox_section);
     pin_val->setObjectName("hft_tox_pin");
     vol_val->setObjectName("hft_tox_vol");
@@ -383,7 +411,7 @@ QWidget* QuantModulePanel::build_hft_panel() {
     // ════════════════════════════════════════════════════════
     // TAB 3 — SLIPPAGE ESTIMATOR
     // ════════════════════════════════════════════════════════
-    auto* slip_tab  = new QWidget(this);
+    auto* slip_tab = new QWidget(this);
     auto* slip_root = new QVBoxLayout(slip_tab);
     slip_root->setContentsMargins(12, 10, 12, 10);
     slip_root->setSpacing(10);
@@ -396,14 +424,17 @@ QWidget* QuantModulePanel::build_hft_panel() {
     slip_vl->setSpacing(8);
 
     auto* slip_title = new QLabel(tr("SLIPPAGE ESTIMATOR  —  Real Order Book Walk"), slip_section);
-    slip_title->setStyleSheet(QString("color:%1; font-size:10px; font-weight:700; letter-spacing:0.5px; background:transparent;")
-                                  .arg(accent));
+    slip_title->setStyleSheet(
+        QString("color:%1; font-size:10px; font-weight:700; letter-spacing:0.5px; background:transparent;")
+            .arg(accent));
     slip_vl->addWidget(slip_title);
 
-    auto* slip_desc = new QLabel(
-        tr("Walks the live order book level-by-level to compute actual fill price and slippage for a given order size."), slip_section);
+    auto* slip_desc = new QLabel(tr("Walks the live order book level-by-level to compute actual fill price and "
+                                    "slippage for a given order size."),
+                                 slip_section);
     slip_desc->setWordWrap(true);
-    slip_desc->setStyleSheet(QString("color:%1; font-size:10px; background:transparent;").arg(ui::colors::TEXT_SECONDARY()));
+    slip_desc->setStyleSheet(
+        QString("color:%1; font-size:10px; background:transparent;").arg(ui::colors::TEXT_SECONDARY()));
     slip_vl->addWidget(slip_desc);
 
     auto* slip_params = new QHBoxLayout;
@@ -419,12 +450,15 @@ QWidget* QuantModulePanel::build_hft_panel() {
     slip_vl->addLayout(slip_params);
 
     auto* slip_run = make_run_button(tr("ESTIMATE SLIPPAGE"), slip_section);
-    connect(slip_run, &QPushButton::clicked, this, [this]() {
+    connect(slip_run, &QPushButton::clicked, this, [this, require_symbol]() {
+        const QString sym = require_symbol();
+        if (sym.isEmpty())
+            return;
         status_label_->setText(tr("Walking order book..."));
         QJsonObject p;
         p["exchange"] = combo_inputs_["hft_exchange"]->currentText();
-        p["symbol"]   = text_inputs_["hft_symbol"]->text().trimmed();
-        p["side"]     = combo_inputs_["hft_slip_side"]->currentText();
+        p["symbol"] = sym;
+        p["side"] = combo_inputs_["hft_slip_side"]->currentText();
         p["quantity"] = double_inputs_["hft_slip_qty"]->value();
         AIQuantLabService::instance().hft_execute_order(p);
     });
@@ -433,10 +467,10 @@ QWidget* QuantModulePanel::build_hft_panel() {
     // Slippage result cards
     auto* slip_results = new QHBoxLayout;
     slip_results->setSpacing(6);
-    auto [avgp_card, avgp_val]     = make_card(tr("AVG FILL PRICE"), slip_section);
-    auto [slbps_card, slbps_val]   = make_card(tr("SLIPPAGE BPS"), slip_section);
-    auto [cost_card, cost_val]     = make_card(tr("TOTAL COST"), slip_section);
-    auto [fills_card, fills_val]   = make_card(tr("FILL LEVELS"), slip_section);
+    auto [avgp_card, avgp_val] = make_card(tr("AVG FILL PRICE"), slip_section);
+    auto [slbps_card, slbps_val] = make_card(tr("SLIPPAGE BPS"), slip_section);
+    auto [cost_card, cost_val] = make_card(tr("TOTAL COST"), slip_section);
+    auto [fills_card, fills_val] = make_card(tr("FILL LEVELS"), slip_section);
     auto [viable_card, viable_val] = make_card(tr("VIABILITY"), slip_section);
     avgp_val->setObjectName("hft_slip_avgp");
     slbps_val->setObjectName("hft_slip_bps");
@@ -465,8 +499,8 @@ QWidget* QuantModulePanel::build_hft_panel() {
                 "QHeaderView::section { background:%3; color:%4; font-size:9px; font-weight:700;"
                 "  padding:3px 6px; border:none; border-bottom:1px solid %2; }"
                 "QTableWidget::item { padding:2px 6px; font-family:'Courier New'; font-size:10px; }")
-            .arg(ui::colors::BG_BASE(), ui::colors::BORDER_DIM(),
-                 ui::colors::BG_SURFACE(), ui::colors::TEXT_TERTIARY()));
+            .arg(ui::colors::BG_BASE(), ui::colors::BORDER_DIM(), ui::colors::BG_SURFACE(),
+                 ui::colors::TEXT_TERTIARY()));
     slip_vl->addWidget(fills_table);
 
     slip_root->addWidget(slip_section);
@@ -475,22 +509,26 @@ QWidget* QuantModulePanel::build_hft_panel() {
 
     // ── Full Analyze button (bottom bar) ─────────────────────────────────────
     auto* bottom_bar = new QWidget(w);
-    bottom_bar->setStyleSheet(QString("background:%1; border-top:1px solid %2;")
-                                  .arg(ui::colors::BG_SURFACE(), ui::colors::BORDER_DIM()));
+    bottom_bar->setStyleSheet(
+        QString("background:%1; border-top:1px solid %2;").arg(ui::colors::BG_SURFACE(), ui::colors::BORDER_DIM()));
     auto* bot_hl = new QHBoxLayout(bottom_bar);
     bot_hl->setContentsMargins(12, 6, 12, 6);
     auto* analyze_btn = make_run_button(tr("⚡ FULL ANALYSIS — FETCH ALL & COMPUTE"), bottom_bar);
-    analyze_btn->setToolTip(tr("Fetches live order book + trades, computes book metrics, market making quotes, toxic flow, and slippage in one call"));
-    connect(analyze_btn, &QPushButton::clicked, this, [this]() {
+    analyze_btn->setToolTip(tr("Fetches live order book + trades, computes book metrics, market making quotes, toxic "
+                               "flow, and slippage in one call"));
+    connect(analyze_btn, &QPushButton::clicked, this, [this, require_symbol]() {
+        const QString sym = require_symbol();
+        if (sym.isEmpty())
+            return;
         status_label_->setText(tr("Running full microstructure analysis..."));
         QJsonObject p;
-        p["exchange"]          = combo_inputs_["hft_exchange"]->currentText();
-        p["symbol"]            = text_inputs_["hft_symbol"]->text().trimmed();
-        p["depth"]             = combo_inputs_["hft_depth"]->currentText().toInt();
-        p["limit"]             = combo_inputs_["hft_tox_limit"]->currentText().toInt();
-        p["inventory"]         = double_inputs_["hft_inventory_d"]->value();
+        p["exchange"] = combo_inputs_["hft_exchange"]->currentText();
+        p["symbol"] = sym;
+        p["depth"] = combo_inputs_["hft_depth"]->currentText().toInt();
+        p["limit"] = combo_inputs_["hft_tox_limit"]->currentText().toInt();
+        p["inventory"] = double_inputs_["hft_inventory_d"]->value();
         p["spread_multiplier"] = double_inputs_["hft_spread_mult"]->value();
-        p["quantity"]          = double_inputs_["hft_slip_qty"]->value();
+        p["quantity"] = double_inputs_["hft_slip_qty"]->value();
         AIQuantLabService::instance().hft_snapshot(p);
     });
     bot_hl->addWidget(analyze_btn, 1);

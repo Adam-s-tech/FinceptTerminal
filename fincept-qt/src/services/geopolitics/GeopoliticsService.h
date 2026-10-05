@@ -1,5 +1,6 @@
 // src/services/geopolitics/GeopoliticsService.h
 #pragma once
+#include "datahub/Producer.h"
 #include "services/geopolitics/GeopoliticsTypes.h"
 
 #include <QHash>
@@ -7,14 +8,10 @@
 
 #include <functional>
 
-#    include "datahub/Producer.h"
-
 namespace fincept::services::geo {
 
 /// Singleton service for geopolitics data — news events API + HDX Python + trade analysis.
-class GeopoliticsService : public QObject
-    , public fincept::datahub::Producer
-{
+class GeopoliticsService : public QObject, public fincept::datahub::Producer {
     Q_OBJECT
   public:
     static GeopoliticsService& instance();
@@ -34,8 +31,8 @@ class GeopoliticsService : public QObject
     // `page` is 1-indexed. `source`, `date_from`, `date_to` are forwarded
     // verbatim — server validates and ignores empty values.
     void fetch_events(const QString& country = {}, const QString& city = {}, const QString& category = {},
-                      int limit = 100, int page = 1, const QString& source = {},
-                      const QString& date_from = {}, const QString& date_to = {});
+                      int limit = 100, int page = 1, const QString& source = {}, const QString& date_from = {},
+                      const QString& date_to = {});
     void fetch_unique_countries();
     void fetch_unique_categories();
     void fetch_unique_cities();
@@ -50,6 +47,10 @@ class GeopoliticsService : public QObject
     // ── Trade Analysis (Python) ─────────────────────────────────────────────
     void analyze_trade_benefits(const QJsonObject& params);
     void analyze_trade_restrictions(const QJsonObject& params);
+    /// Trading-bloc integration (trade creation vs diversion) — script mode `trading_blocs`.
+    void analyze_trading_blocs(const QJsonObject& params);
+    /// Impact of removing trade barriers (FDI / employment / GDP) — script mode `barrier_removal`.
+    void analyze_barrier_removal(const QJsonObject& params);
 
     // ── Geolocation (Python) ────────────────────────────────────────────────
     void extract_geolocations(const QStringList& headlines);

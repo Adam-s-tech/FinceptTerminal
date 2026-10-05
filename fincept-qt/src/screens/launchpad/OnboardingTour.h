@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QDialog>
+#include <QEvent>
+#include <QVector>
 
 class QLabel;
 class QPushButton;
@@ -16,9 +18,10 @@ namespace fincept::screens {
 /// settings — and persists `onboarding.tour_seen=true` in
 /// `SettingsRepository` on completion so subsequent launches skip it.
 ///
-/// Re-run path: the user can replay the tour from the Help screen via the
-/// `help.tour` action (Phase 9 follow-up — interface stable; static
-/// `OnboardingTour::show_for(parent)` already re-entrant).
+/// Re-run path: the `help.replay_tour` action (registered in
+/// core/actions/builtin_actions.cpp, reachable from the command palette) and
+/// the Help Center's "Replay Welcome Tour" quick action both call
+/// `reset_seen()` + `show_for(parent)`; `show_for()` is re-entrant.
 ///
 /// Skip-able: every step has a "Skip" button, and the OS close button on
 /// the dialog title bar dismisses too. Either records `tour_seen=true`.
@@ -38,23 +41,35 @@ class OnboardingTour : public QDialog {
     static void mark_seen();
 
     /// Reset the seen-flag so the tour fires again on next launchpad
-    /// surface. Wired to `help.replay_tour` action (TODO: action TBD).
+    /// surface. Used by the `help.replay_tour` action and the Help screen.
     static void reset_seen();
 
   protected:
     void closeEvent(QCloseEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     explicit OnboardingTour(QWidget* parent);
 
     void build_ui();
     QWidget* build_step(const QString& title, const QString& body, const QString& tip);
+    void retranslateUi();
     void on_next();
     void on_back();
     void on_skip();
     void on_finish();
     void update_buttons();
 
+    // Per-step text labels (cached for retranslateUi). Index aligns with the
+    // step order added to steps_.
+    struct StepLabels {
+        QLabel* title = nullptr;
+        QLabel* body = nullptr;
+        QLabel* tip = nullptr;
+    };
+    QVector<StepLabels> step_labels_;
+
+    QLabel* heading_ = nullptr; // "A 30-second tour" title
     QStackedWidget* steps_ = nullptr;
     QPushButton* btn_back_ = nullptr;
     QPushButton* btn_next_ = nullptr;

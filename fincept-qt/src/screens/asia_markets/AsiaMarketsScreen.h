@@ -3,6 +3,7 @@
 #include "screens/common/IStatefulScreen.h"
 
 #include <QComboBox>
+#include <QEvent>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
@@ -41,6 +42,7 @@ class AsiaMarketsScreen : public QWidget, public IStatefulScreen {
 
   protected:
     void showEvent(QShowEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void on_category_changed(int index);
@@ -49,6 +51,7 @@ class AsiaMarketsScreen : public QWidget, public IStatefulScreen {
     void on_search_changed(const QString& text);
     void on_execute();
     void on_view_toggle();
+    void on_refresh();
 
   private:
     void setup_ui();
@@ -59,10 +62,16 @@ class AsiaMarketsScreen : public QWidget, public IStatefulScreen {
     QWidget* create_data_panel();
     QWidget* create_status_bar();
 
+    /// Re-apply tr() lookups to every widget whose text we keep a handle to.
+    /// Called from changeEvent() on QEvent::LanguageChange.
+    void retranslateUi();
+
     void load_endpoints(int cat_index);
     void populate_endpoint_list(const QJsonObject& result);
-    void execute_query(const QString& endpoint, const QStringList& extra_args);
-    void display_table(const QJsonArray& data);
+    /// `force` skips (and evicts) the 2-minute result cache — used by REFRESH.
+    void execute_query(const QString& endpoint, const QStringList& extra_args, bool force = false);
+    void run_query(bool force);
+    void display_table(const QJsonArray& data, const QStringList& columns = {});
     void display_json(const QJsonArray& data);
     void display_error(const QString& error);
     void set_loading(bool loading);
@@ -83,11 +92,16 @@ class AsiaMarketsScreen : public QWidget, public IStatefulScreen {
     QList<QPushButton*> cat_btns_;
     QList<QPushButton*> region_btns_;
 
+    // UI — header (cached for retranslateUi)
+    QLabel* header_title_ = nullptr;
+    QLabel* header_sub_ = nullptr;
+
     // UI — left panel
     QListWidget* endpoint_list_ = nullptr;
     QLineEdit* search_input_ = nullptr;
     QLineEdit* symbol_input_ = nullptr;
     QLabel* endpoint_count_label_ = nullptr;
+    QLabel* sym_label_ = nullptr; // (cached for retranslateUi)
 
     // UI — data panel
     QStackedWidget* view_stack_ = nullptr;
@@ -95,16 +109,24 @@ class AsiaMarketsScreen : public QWidget, public IStatefulScreen {
     QTextEdit* json_view_ = nullptr;
     QPushButton* view_toggle_btn_ = nullptr;
     QPushButton* exec_btn_ = nullptr;
+    QPushButton* refresh_btn_ = nullptr; // (cached for retranslateUi)
     QLabel* data_status_ = nullptr;
     QLabel* record_count_ = nullptr;
 
     // UI — status bar
+    QLabel* status_left_ = nullptr; // (cached for retranslateUi)
     QLabel* status_category_ = nullptr;
     QLabel* status_region_ = nullptr;
 
     bool is_table_view_ = true;
     bool loading_ = false;
     QJsonArray last_data_;
+
+    // Bumped whenever the category or the query changes; an async callback that finds a different
+    // value is stale (e.g. category A's endpoint list arriving after the user moved on to B, which
+    // used to auto-run A's endpoint through B's script) and must not touch the UI.
+    int request_seq_ = 0;
+    QString pending_endpoint_; // endpoint to re-select once the list is populated (restore_state)
 };
 
 } // namespace fincept::screens

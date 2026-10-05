@@ -10,7 +10,9 @@
 
 #include <QFrame>
 #include <QLabel>
+#include <QLayout>
 #include <QString>
+#include <QVBoxLayout>
 
 namespace fincept::screens::support_internal {
 
@@ -29,9 +31,8 @@ inline QString SS_INPUT() {
                    "QScrollBar:vertical { background: %1; width: 6px; }"
                    "QScrollBar::handle:vertical { background: %3; border-radius: 3px; }"
                    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }")
-        .arg(fincept::ui::colors::BG_SURFACE(), fincept::ui::colors::TEXT_PRIMARY(),
-             fincept::ui::colors::BORDER_MED(), MF, fincept::ui::colors::AMBER(),
-             fincept::ui::colors::BG_RAISED(), fincept::ui::colors::BG_BASE());
+        .arg(fincept::ui::colors::BG_SURFACE(), fincept::ui::colors::TEXT_PRIMARY(), fincept::ui::colors::BORDER_MED(),
+             MF, fincept::ui::colors::AMBER(), fincept::ui::colors::BG_RAISED(), fincept::ui::colors::BG_BASE());
 }
 
 inline QString SS_BTN_PRIMARY() {
@@ -40,9 +41,8 @@ inline QString SS_BTN_PRIMARY() {
                    "QPushButton:hover { background: %4; }"
                    "QPushButton:pressed { background: %5; }"
                    "QPushButton:disabled { background: %6; color: %7; }")
-        .arg(fincept::ui::colors::AMBER(), fincept::ui::colors::BG_BASE(), MF,
-             fincept::ui::colors::AMBER_DIM(), "#92400e",
-             fincept::ui::colors::BORDER_MED(), fincept::ui::colors::TEXT_DIM());
+        .arg(fincept::ui::colors::AMBER(), fincept::ui::colors::BG_BASE(), MF, fincept::ui::colors::AMBER_DIM(),
+             "#92400e", fincept::ui::colors::BORDER_MED(), fincept::ui::colors::TEXT_DIM());
 }
 
 inline QString SS_BTN_SUCCESS() {
@@ -51,8 +51,8 @@ inline QString SS_BTN_SUCCESS() {
                    "QPushButton:hover { background: #15803d; }"
                    "QPushButton:pressed { background: #14532d; }"
                    "QPushButton:disabled { background: %4; color: %5; }")
-        .arg(fincept::ui::colors::POSITIVE(), fincept::ui::colors::BG_BASE(), MF,
-             fincept::ui::colors::BORDER_MED(), fincept::ui::colors::TEXT_DIM());
+        .arg(fincept::ui::colors::POSITIVE(), fincept::ui::colors::BG_BASE(), MF, fincept::ui::colors::BORDER_MED(),
+             fincept::ui::colors::TEXT_DIM());
 }
 
 inline QString SS_BTN_DANGER() {
@@ -60,8 +60,7 @@ inline QString SS_BTN_DANGER() {
                    "  padding: 6px 14px; font-size: 11px; font-weight: 600; %2 }"
                    "QPushButton:hover { background: %1; color: %3; }"
                    "QPushButton:disabled { border-color: %4; color: %4; }")
-        .arg(fincept::ui::colors::NEGATIVE(), MF, fincept::ui::colors::BG_BASE(),
-             fincept::ui::colors::TEXT_DIM());
+        .arg(fincept::ui::colors::NEGATIVE(), MF, fincept::ui::colors::BG_BASE(), fincept::ui::colors::TEXT_DIM());
 }
 
 inline QString SS_BTN_OUTLINE() {
@@ -69,8 +68,7 @@ inline QString SS_BTN_OUTLINE() {
                    "  padding: 6px 14px; font-size: 11px; font-weight: 600; %2 }"
                    "QPushButton:hover { background: %1; color: %3; }"
                    "QPushButton:disabled { border-color: %4; color: %4; }")
-        .arg(fincept::ui::colors::POSITIVE(), MF, fincept::ui::colors::BG_BASE(),
-             fincept::ui::colors::TEXT_DIM());
+        .arg(fincept::ui::colors::POSITIVE(), MF, fincept::ui::colors::BG_BASE(), fincept::ui::colors::TEXT_DIM());
 }
 
 inline QString SS_BTN_GHOST() {
@@ -91,6 +89,22 @@ inline QLabel* lbl(const QString& text, const QString& color, int px = 12, bool 
                          .arg(MF)
                          .arg(bold ? "font-weight:600;" : ""));
     return l;
+}
+
+/// Remove every item of `lay` except the trailing stretch. The old
+/// `delete lay->takeAt(0)->widget()` freed the widget but leaked the
+/// QLayoutItem, and deleted widgets synchronously from inside slots (P13).
+inline void clear_layout_keep_stretch(QVBoxLayout* lay) {
+    if (!lay)
+        return;
+    while (lay->count() > 1) {
+        QLayoutItem* item = lay->takeAt(0);
+        if (QWidget* w = item->widget()) {
+            w->hide();
+            w->deleteLater();
+        }
+        delete item;
+    }
 }
 
 inline QFrame* hsep() {

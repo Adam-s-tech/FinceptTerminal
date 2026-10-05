@@ -1,281 +1,146 @@
-# Terminal Fincept
+> [!IMPORTANT]
+> ## 🔒 Fincept Terminal **Enterprise** — l'édition privée. Prix de lancement : **−90 %, pour une durée limitée.**
+> Données propriétaires en temps réel · Recherche IA multi-agents · Exécution courtier & algo en direct · Support prioritaire
+>
+> | Offre | Avant | **Prix de lancement** |
+> |:--|:--:|:--:|
+> | **Exclusive** | ~~99 $~~ | **10 $** /utilisateur/mois |
+> | **Exclusive+** | ~~199 $~~ | **20 $** /utilisateur/mois |
+> | **Exclusive Pro** ⭐ La plus choisie | ~~299 $~~ | **40 $** /utilisateur/mois |
+>
+> [![🔥 Profiter du prix de lancement →](https://img.shields.io/badge/%F0%9F%94%A5_Profiter_du_prix_de_lancement_%E2%86%92-C06524?style=for-the-badge)](https://fincept.in/enterprise/signup) &nbsp; [![Comparer les offres](https://img.shields.io/badge/Comparer_les_offres-1F2328?style=for-the-badge)](https://fincept.in/pricing)
+>
+> <sub>Les premiers postes conservent le prix de lancement à vie · Sans engagement annuel, résiliable à tout moment · Ce dépôt open source reste gratuit sous AGPL-3.0</sub>
+
+# Fincept Terminal
 
 <div align="center">
 
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-C06524)](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/LICENSE)[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus)](https://isocpp.org/)[![Qt6](https://img.shields.io/badge/Qt-6-41CD52?logo=qt&logoColor=white)](https://www.qt.io/)[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)[![Hits](https://hits.sh/github.com/Fincept-Corporation/FinceptTerminal.svg?label=Visits)](https://hits.sh/github.com/Fincept-Corporation/FinceptTerminal/)
-
-[![Twitter](https://img.shields.io/badge/-Twitter-1DA1F2?style=flat-square&logo=twitter&logoColor=white)](https://twitter.com/intent/tweet?text=Check%20out%20FinceptTerminal&url=https%3A//github.com/Fincept-Corporation/FinceptTerminal/)[![LinkedIn](https://img.shields.io/badge/-LinkedIn-0077B5?style=flat-square&logo=linkedin&logoColor=white)](https://www.linkedin.com/sharing/share-offsite/?url=https%3A//github.com/Fincept-Corporation/FinceptTerminal/)[![Facebook](https://img.shields.io/badge/-Facebook-1877F2?style=flat-square&logo=facebook&logoColor=white)](https://www.facebook.com/sharer/sharer.php?u=https%3A//github.com/Fincept-Corporation/FinceptTerminal/)[![Reddit](https://img.shields.io/badge/-Reddit-FF4500?style=flat-square&logo=reddit&logoColor=white)](https://www.reddit.com/submit?url=https%3A//github.com/Fincept-Corporation/FinceptTerminal/&title=FinceptTerminal)[![WhatsApp](https://img.shields.io/badge/-WhatsApp-25D366?style=flat-square&logo=whatsapp&logoColor=white)](https://api.whatsapp.com/send?text=Check%20out%20FinceptTerminal%3A%20https%3A//github.com/Fincept-Corporation/FinceptTerminal/)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-C06524)](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/LICENSE)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus)](https://isocpp.org/)
+[![Qt6](https://img.shields.io/badge/Qt-6-41CD52?logo=qt&logoColor=white)](https://www.qt.io/)
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
 ### **Votre réflexion est la seule limite. Les données ne le sont pas.**
 
-Plateforme de renseignement financier de pointe avec analyses financières de niveau institutionnel, automatisation de l'IA et connectivité de données illimitée.
+Plateforme d'intelligence financière de pointe : analyse de niveau institutionnel, automatisation par IA et connectivité de données sans limite.
 
-[📥 Télécharger](https://github.com/Fincept-Corporation/FinceptTerminal/releases)·[📚 Documents](https://github.com/Fincept-Corporation/FinceptTerminal/tree/main/docs)·[💬 Discussions](https://github.com/Fincept-Corporation/FinceptTerminal/discussions)·[💬 Discorde](https://discord.gg/ae87a8ygbN)·[🤝 Partenaire](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/docs/COMMERCIAL_LICENSE.md)
+[📥 Télécharger](https://github.com/Fincept-Corporation/FinceptTerminal/releases) · [🏢 Enterprise](https://fincept.in/enterprise) · [💳 Tarifs](https://fincept.in/pricing) · [📖 Manuel](https://fincept.in/manual) · [💬 Discord](https://discord.gg/ae87a8ygbN)
 
-![Fincept Terminal](https://raw.githubusercontent.com/Fincept-Corporation/FinceptTerminal/main/images/Dashboard.png)
+![Fincept Terminal](https://raw.githubusercontent.com/Fincept-Corporation/FinceptTerminal/main/images/FinceptBanner.png)
 
 </div>
 
-* * *
+---
 
 ## À propos
 
-**Fincept Terminal vch**est une application de bureau C++20 purement native. Il utilise**Qt6**pour l'interface utilisateur et le rendu, intégré**Python**pour l'analyse et offre des performances de classe terminal professionnel dans un seul binaire natif.
+**Fincept Terminal** est un terminal de bureau natif en C++20 dédié à la recherche financière — interface Qt6, analyse Python 3.11 embarquée, un seul binaire, sans Electron.
 
-* * *
+Deux éditions reposent sur un socle de données commun. **[Enterprise](https://fincept.in/enterprise)** est la version privée, à code fermé, sur laquelle l'équipe travaille au quotidien, destinée aux fonds, family offices et desks de recherche. **Ce dépôt** est l'édition libre AGPL-3.0 — apprentissage, usage personnel, recherche académique — avec une version par mois.
 
-## Caractéristiques
+Prenez l'édition ouverte si vous êtes étudiant, amateur ou universitaire. Prenez Enterprise si vous êtes une société, ou si le terminal est votre gagne-pain : le copyleft AGPL ne s'applique pas, et le vrai coût de l'édition ouverte, ce sont vos propres factures de données et de LLM, facturées au token et sans plafond.
 
-| **Fonctionnalité**                       | **Description**                                                                                                                                                                                                                                    |
-| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 📊**Analyses multi-actifs**              | Modèles DCF, optimisation de portefeuille, mesures de risque (VaR, Sharpe), tarification des produits dérivés sur actions, taux, dérivés, portefeuille et alternatifs via Python intégré                                                          |
-| 🤖**AI Agents**                          | Plus de 20 personnalités d'investisseurs (Buffett, Dalio, Graham), stratégies de hedge funds, support LLM local, multi-fournisseurs (OpenAI, Anthropic, Gemini, Groq, DeepSeek, MiniMax, OpenRouter, Ollama)                                       |
-| 🌐**Plus de 100 connecteurs de données** | DBnomics, Polygon, Kraken, Yahoo Finance, FRED, FMI, Banque mondiale, AkShare, API gouvernementales, ainsi que des superpositions de données alternatives facultatives telles que le sentiment du marché Adanos pour la recherche sur les actions. |
-| 📈**Trading en temps réel**              | Crypto (Kraken/HyperLiquid WebSocket), actions, trading algo, moteur de trading papier                                                                                                                                                             |
-| 🔬**QuantLib Suite**                     | 18 modules d'analyse quantitative — tarification, risque, stochastique, volatilité, titres à revenu fixe                                                                                                                                           |
-| 🚢**Renseignement mondial**              | Suivi maritime, analyse géopolitique, cartographie des relations, données satellite                                                                                                                                                                |
-| 🎨**Flux de travail visuels**            | Éditeur de nœuds pour les pipelines d'automatisation, intégration de l'outil MCP                                                                                                                                                                   |
-| 🧠**AI Quant Lab**                       | Modèles ML, découverte de facteurs, HFT, trading d'apprentissage par renforcement                                                                                                                                                                  |
+| | Open source | **Enterprise** |
+|---|---|---|
+| **Licence** | AGPL-3.0 — copyleft fort | Propriétaire — aucune obligation de copyleft |
+| **Coût** | Gratuit, plus vos factures de données et de LLM | ~~99 $ / 199 $ / 299 $~~ **10 $ / 20 $ / 40 $** par utilisateur/mois — prix de lancement |
+| **Données** | Flux publics gratuits, vos propres clés | Jeux de données privés, historique plus profond, point-in-time |
+| **IA** | Votre clé LLM | 400–5 000 crédits inclus · recherche multi-agents · data room privée |
+| **Trading** | Papier + intégrations courtier | Routage courtier en direct + déploiement d'algos en direct |
+| **Contrôles** | — | SSO/SAML, journaux d'audit, RBAC, support adossé à un SLA |
 
-* * *
+[**Découvrir Enterprise →**](https://fincept.in/enterprise) · [Comparatif complet](https://fincept.in/comparison) · [Tarifs](https://fincept.in/pricing) · [FAQ](https://fincept.in/faq)
+
+---
+
+## Enterprise
+
+41 modules répartis sur six desks — recherche agentique, quant lab et backtesting, analyse fondamentale approfondie, marchés et exécution, macro et intelligence globale, et votre propre espace de travail. Le tout dans un [manuel de 700 pages](https://fincept.in/manual).
+
+| | **Exclusive** | **Exclusive+** | **Exclusive Pro** ★ |
+|---|---|---|---|
+| | ~~99 $~~ **10 $**/utilisateur/mois | ~~199 $~~ **20 $**/utilisateur/mois | ~~299 $~~ **40 $**/utilisateur/mois |
+| Crédits IA / mois | 400 | 2 000 | 5 000 |
+| Deep research + équipes d'agents | — | ✓ | ✓ |
+| Trading en direct + algos | — | — | ✓ |
+
+Facturation mensuelle, sans engagement, sans minimum de postes, 10 % de remise au trimestre — au prix de lancement, soit **120 à 480 $ par utilisateur et par an**, contre environ 27 000 $ pour un poste Bloomberg. **Universités :** 5 postes Exclusive Pro pour **699 $/mois**. Ces formules constituent toute la grille tarifaire : aucun tarif négocié, aucune licence commerciale distincte.
+
+Enterprise exige son propre compte — les identifiants Fincept gratuits n'y donnent pas accès.
+
+[**Créer un compte**](https://fincept.in/enterprise/signup) · [**Réserver une démo**](https://calendly.com/nikultilak/fincept-terminal-demo)
+
+---
 
 ## Installation
 
-### Option 1 — Télécharger le binaire prédéfini (recommandé)
+Les installateurs pour **Windows x64**, **Linux x64** (`.run` / `.deb` / `.rpm`) et **macOS (Apple silicon)** se trouvent sur la [page des releases](https://github.com/Fincept-Corporation/FinceptTerminal/releases/latest).
 
-Des binaires prédéfinis sont disponibles sur le[Page des versions](https://github.com/Fincept-Corporation/FinceptTerminal/releases). Aucun outil de construction requis : il suffit d'extraire et d'exécuter.
+**Compiler depuis les sources** — Linux/macOS : `git clone … && ./setup.sh`. Windows, compilation manuelle, chaîne d'outils figée (**CMake 3.27.7 · Ninja 1.11.1 · Qt 6.8.3 · Python 3.11.9**) et dépannage : voir **[docs/GETTING_STARTED.md](../GETTING_STARTED.md)**. Les versions sont figées — les autres ne sont pas prises en charge.
 
-| Plate-forme                | Télécharger                              | Courir                                               |
-| -------------------------- | ---------------------------------------- | ---------------------------------------------------- |
-| **Windows x64**            | `FinceptTerminal-Windows-x64.zip`        | Extraire →`FinceptTerminal.exe`                      |
-| **WindowsARM64**           | `FinceptTerminal-Windows-arm64.zip`      | Extraire →`FinceptTerminal.exe`                      |
-| **Linuxx64**               | `FinceptTerminal-Linux-x86_64.AppImage`  | `chmod +x`→`./FinceptTerminal-Linux-x86_64.AppImage` |
-| **macOS (Apple Silicium)** | `FinceptTerminal-macOS-arm64.tar.gz`     | Extraire →`./FinceptTerminal`                        |
-| **macOS (Intel)**          | `FinceptTerminal-macOS-x64.tar.gz`       | Extraire →`./FinceptTerminal`                        |
-| **macOS (universel)**      | `FinceptTerminal-macOS-universal.tar.gz` | Extraire →`./FinceptTerminal`                        |
+> Vous cherchez la version Enterprise ? Elle dispose de ses propres installateurs signés pour Windows, macOS et Linux, derrière une authentification Enterprise — [à récupérer ici](https://fincept.in/enterprise).
 
-* * *
+---
 
-### Option 2 — Démarrage rapide (construction en un clic)
+## Ce que contient l'édition ouverte
 
-Clonez et exécutez le script d'installation : il installe toutes les dépendances et crée automatiquement l'application :
+- **Analyse** — DCF, optimisation de portefeuille, VaR/Sharpe, valorisation de dérivés, taux, actifs alternatifs, plus une suite QuantLib de 18 modules
+- **IA** — 37 agents trader/investisseur, économie et géopolitique ; avec votre propre clé (OpenAI, Anthropic, Gemini, Groq, DeepSeek, OpenRouter, Ollama)
+- **Données** — plus de 100 connecteurs : FRED, FMI, Banque mondiale, DBnomics, AkShare, Polygon, Kraken, Yahoo Finance, API publiques
+- **Trading** — flux crypto et actions, moteur de paper trading, 16 intégrations courtier
+- **Automatisation** — éditeur de nœuds visuel, outils MCP, AI Quant Lab (ML, découverte de facteurs, RL)
+- **Renseignement global** — suivi maritime, analyse géopolitique, cartographie de relations
 
-```bash
-# Linux / macOS
-git clone https://github.com/Fincept-Corporation/FinceptTerminal.git
-cd FinceptTerminal
-chmod +x setup.sh && ./setup.sh
-```
+C++20 natif · Qt6 · Python 3.11 embarqué · un seul binaire · sans Node.js ni navigateur.
 
-```bat
-# Windows — run from Developer Command Prompt for VS 2022
-git clone https://github.com/Fincept-Corporation/FinceptTerminal.git
-cd FinceptTerminal
-setup.bat
-```
+---
 
-Le script gère : la vérification du compilateur, CMake, Qt6, Python, la construction et le lancement.
+## Comment ce dépôt est maintenu
 
-* * *
+Ce dépôt **reste public et ne sera pas supprimé**. Tout ce qui a été publié le reste.
 
-### Option 3 — Docker
+Il passe à **une version par mois** plutôt qu'un développement continu, l'équipe travaillant au quotidien sur Enterprise. Les issues et pull requests sont toujours examinées, et les correctifs arrivent au rythme mensuel. Signalements de sécurité : [support@fincept.in](mailto:support@fincept.in).
 
-```bash
-# Pull and run
-docker pull ghcr.io/fincept-corporation/fincept-terminal:latest
-docker run --rm -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix \
-    ghcr.io/fincept-corporation/fincept-terminal:latest
-
-# Or build from source
-git clone https://github.com/Fincept-Corporation/FinceptTerminal.git
-cd FinceptTerminal
-docker build -t fincept-terminal .
-docker run --rm -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix fincept-terminal
-```
-
-> **Note:**Docker est principalement destiné à Linux. macOS et Windows nécessitent une configuration XServer supplémentaire.
-
-* * *
-
-### Option 4 — Construire à partir de la source (manuel)
-
-> **Les versions sont épinglées** (Qt 6.7.2, CMake 3.27.7, MSVC 19.38 / GCC 12.3 / Apple Clang 15.0, Python 3.11.9). Pour éviter la dérive de traduction, suivez les instructions officielles en anglais :
->
-> 👉 **[README.md (English) — Build from Source](../../README.md#option-4--build-from-source-manual)**
->
-> Démarrage rapide avec les presets CMake :
-> ```bash
-> ./setup.sh                                            # Linux / macOS — installation automatisée
-> setup.bat                                             # Windows (VS 2022 Developer Cmd)
->
-> # Ou manuellement :
-> cd FinceptTerminal/fincept-qt
-> cmake --preset linux-release   && cmake --build --preset linux-release
-> cmake --preset macos-release   && cmake --build --preset macos-release
-> cmake --preset win-release     && cmake --build --preset win-release
-> ```
-
-<details>
-<summary>Instructions originales (obsolètes — conservées pour référence)</summary>
-
-#### Conditions préalables
-
-| Outil               | Version | Fenêtres                                                        | Linux                 | macOS                              |
-| ------------------- | ------- | --------------------------------------------------------------- | --------------------- | ---------------------------------- |
-| **Git**             | dernier | `winget install Git.Git`                                        | `apt install git`     | `brew install git`                 |
-| **CMake**           | 3.20+   | `winget install Kitware.CMake`                                  | `apt install cmake`   | `brew install cmake`               |
-| **Compilateur C++** | C++20   | MSVC2022 ([Studio visuel](https://visualstudio.microsoft.com/)) | `apt install g++`     | XcodeCLT :`xcode-select --install` |
-| **Qt6**             | 6.5+    | Voir ci-dessous                                                 | Voir ci-dessous       | Voir ci-dessous                    |
-| **Python**          | 3.11+   | [python.org](https://www.python.org/downloads/)                 | `apt install python3` | `brew install python`              |
-
-#### Installer Qt6
-
-**Fenêtres :**
-
-```powershell
-# Via Qt online installer (recommended — includes windeployqt)
-# Download from https://www.qt.io/download-qt-installer
-# Select: Qt 6.x > MSVC 2022 64-bit
-
-# Or via winget
-winget install Qt.QtCreator
-```
-
-**Linux (Ubuntu/Debian) :**
-
-```bash
-sudo apt install -y \
-  qt6-base-dev qt6-charts-dev qt6-tools-dev \
-  libqt6sql6-sqlite libqt6websockets6-dev \
-  libgl1-mesa-dev libglu1-mesa-dev
-```
-
-**macOS :**
-
-```bash
-brew install qt
-```
-
-#### Construire
-
-```bash
-git clone https://github.com/Fincept-Corporation/FinceptTerminal.git
-cd FinceptTerminal/fincept-qt
-
-# Linux / macOS
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-
-# Windows (from Developer Command Prompt for VS 2022)
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="C:/Qt/6.x.x/msvc2022_64"
-cmake --build build --config Release --parallel
-```
-
-#### Courir
-
-```bash
-./build/FinceptTerminal              # Linux / macOS
-.\build\Release\FinceptTerminal.exe  # Windows
-```
-
-</details>
-
-* * *
-
-## Ce qui nous distingue
-
-**Terminal Fincept**est une plateforme financière open source conçue pour ceux qui refusent d'être limités par les logiciels traditionnels. Nous sommes en compétition sur**profondeur d'analyse**et**accessibilité des données**– pas sur les informations privilégiées ou les flux exclusifs.
-
-Les versions récentes prennent également en charge les options facultatives**Adanos Market Sentiment**connectivité dans**Sources de données → Données alternatives**. Une fois configuré, Equity Research peut générer des instantanés du sentiment des détaillants multi-sources sur Reddit, X, Finance News et Polymarket. Sans connexion Adanos active, la fonctionnalité reste inactive et le reste de l'application se comporte exactement comme avant.
-
--   **Performances natives**— C++20 avec Qt6, pas de surcharge Electron/Web
--   **Binaire simple**- pas de Node.js, pas d'exécution de navigateur, pas de bundle JavaScript
--   **Boîte à outils complète d'analyste buy-side**— actions, portefeuille, dérivés, taux, finance d'entreprise, alternatifs
--   **Plus de 100 connecteurs de données**— de Yahoo Finance aux bases de données gouvernementales
--   **Gratuit et open source**(AGPL-3.0) avec licences commerciales disponibles
-
-* * *
-
-## Feuille de route
-
-| Chronologie | Jalon                                                                                        |
-| ----------- | -------------------------------------------------------------------------------------------- |
-| **T1 2026** | Streaming en temps réel, backtesting avancé, intégrations de courtiers                       |
-| **Q2 2026** | Constructeur de stratégie d'options, gestion multi-portefeuilles, plus de 50 agents IA       |
-| **KZ 2026** | API programmatique, interface utilisateur de formation ML, fonctionnalités institutionnelles |
-| **Avenir**  | Compagnon mobile, synchronisation cloud, marché communautaire                                |
-
-* * *
+---
 
 ## Contribuer
 
-Nous construisons l’avenir de l’analyse financière – ensemble.
+Nouveaux connecteurs de données, agents IA, modules d'analyse, écrans C++ et documentation : tout est bienvenu.
 
-**Contribuer:**Nouveaux connecteurs de données, agents IA, modules d'analyse, écrans C++, documentation
+[Guide de contribution](../CONTRIBUTING.md) · [Guide C++](../CPP_CONTRIBUTOR_GUIDE.md) · [Guide Python](../PYTHON_CONTRIBUTOR_GUIDE.md) · [Architecture](../ARCHITECTURE.md) · [Signaler un bug](https://github.com/Fincept-Corporation/FinceptTerminal/issues) · [Proposer une fonctionnalité](https://github.com/Fincept-Corporation/FinceptTerminal/discussions)
 
--   [Guide de contribution](docs/CONTRIBUTING.md)
--   [Guide de contribution C++](fincept-qt/CONTRIBUTING.md)
--   [Guide du contributeur Python](docs/PYTHON_CONTRIBUTOR_GUIDE.md)
--   [Signaler un bug](https://github.com/Fincept-Corporation/FinceptTerminal/issues)
--   [Fonctionnalité de demande](https://github.com/Fincept-Corporation/FinceptTerminal/discussions)
+---
 
-* * *
+## Également chez Fincept
 
-## Pour les universités et les enseignants
+- **[Fincept Data API](https://docs.fincept.in)** — plus de 500 endpoints REST, plus de 423 000 instruments, plus de 2 000 sources. Palier gratuit inclus avec tout compte.
+- **[Quantcept](https://quantcept.io)** — desk de recherche IA pour les marchés : données primaires, backtests, portefeuilles, documents et moniteurs 24h/24. Démarrez gratuitement ; Alpha 14 $ / Apex 24 $ par 30 jours.
 
-**Apportez des analyses financières de qualité professionnelle à votre classe.**
-
--   **799 $/mois**pour 20 comptes
--   Accès complet aux données et API Fincept
--   Parfait pour les cours de finance, d'économie et de science des données
--   Analyses intégrées actions, portefeuille, dérivés, taux et économie
-
-**Intéressé?**E-mail**[support@fincept.in](mailto:support@fincept.in)**avec le nom de votre établissement.
-
-[Détails de la licence universitaire](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/docs/COMMERCIAL_LICENSE.md)
-
-* * *
+---
 
 ## Licence
 
-**Double licence : AGPL-3.0 (Open Source) + Commerciale**
+**AGPL-3.0-or-later** — texte intégral dans [LICENSE](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/LICENSE).
 
-### Source ouverte (AGPL-3.0)
+Gratuit pour l'usage personnel, l'apprentissage et la recherche académique. AGPL-3.0 est une licence **copyleft forte, non permissive** : si vous distribuez une version modifiée, ou si vous l'exploitez comme un service accessible à d'autres, vous devez publier vos modifications sous la même licence. Pour la plupart des directions juridiques, c'est la ligne qui clôt le débat — d'où le choix d'**[Enterprise](https://fincept.in/enterprise)** par les sociétés : propriétaire, sans aucune obligation de copyleft à gérer. L'usage personnel non distribué n'entraîne aucune obligation.
 
--   Gratuit pour un usage personnel, éducatif et non commercial
--   Nécessite des modifications de partage lorsqu'il est distribué ou utilisé comme service réseau
--   Transparence totale du code source
+Fincept ne vend plus de licence commerciale ou académique distincte pour ce dépôt. Les besoins commerciaux, d'entreprise et universitaires sont couverts par **[Fincept Terminal Enterprise](https://fincept.in/enterprise)** aux tarifs publiés ci-dessus.
 
-### Licence commerciale
+**Marques.** « Fincept », « Fincept Terminal » et le logo Fincept sont des marques de Fincept Corporation. Leur usage dans tout produit forké, dérivé, renommé ou commercial requiert une autorisation écrite préalable.
 
--   Requis pour un usage professionnel ou pour accéder commercialement aux données/API Fincept
--   Contact:**[support@fincept.in](mailto:support@fincept.in)**
--   Détails:[Guide des licences commerciales](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/docs/COMMERCIAL_LICENSE.md)
+Questions : [support@fincept.in](mailto:support@fincept.in) · [Conditions](https://fincept.in/terms) · [Confidentialité](https://fincept.in/privacy)
 
-### Marques déposées
+© 2025–2026 Fincept Corporation. Tous droits réservés.
 
-« Fincept Terminal » et « Fincept » sont des marques commerciales de Fincept Corporation.
-
-© 2025-2026 Fincept Corporation. Tous droits réservés.
-
-* * *
+---
 
 <div align="center">
 
 ### **Votre réflexion est la seule limite. Les données ne le sont pas.**
 
-<div align="center">
-<a href="https://star-history.com/#Fincept-Corporation/FinceptTerminal&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Fincept-Corporation/FinceptTerminal&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Fincept-Corporation/FinceptTerminal&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Fincept-Corporation/FinceptTerminal&type=Date" />
- </picture>
-</a>
-</div>
+⭐ **Star** · 🔄 **Partager** · 🤝 **Contribuer**
 
-[![Email](https://img.shields.io/badge/Email-support@fincept.in-blue)](mailto:support@fincept.in)
-
-⭐**Étoile**· 🔄**Partager**· 🤝**Contribuer**
+<sub>Version originale anglaise : <a href="../../README.md">README.md</a></sub>
 
 </div>

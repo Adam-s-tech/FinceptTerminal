@@ -20,6 +20,7 @@
 
 #include "trading/TradingTypes.h"
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QJsonObject>
 #include <QMutex>
@@ -33,10 +34,6 @@
 #include <memory>
 
 class QThread;
-
-namespace fincept::trading::kraken {
-class KrakenWsClient;
-} // namespace fincept::trading::kraken
 
 namespace fincept::trading {
 
@@ -53,9 +50,7 @@ struct SessionPublisher {
 class ExchangeSession : public QObject {
     Q_OBJECT
   public:
-    explicit ExchangeSession(const QString& exchange_id,
-                             SessionPublisher publisher,
-                             QObject* parent = nullptr);
+    explicit ExchangeSession(const QString& exchange_id, SessionPublisher publisher, QObject* parent = nullptr);
     ~ExchangeSession() override;
 
     QString exchange_id() const { return exchange_id_; }
@@ -76,8 +71,21 @@ class ExchangeSession : public QObject {
     // ── WS lifecycle ───────────────────────────────────────────────────────
     /// Returns true if the WS subprocess was spawned; see
     /// ExchangeService::start_ws_stream for full semantics.
-    bool start_ws(const QString& primary_symbol, const QStringList& all_symbols);
+    /// `hub_owned` marks a stream launched on behalf of DataHub subscribers
+    /// (ExchangeSessionManager) rather than by a screen; screens never pass it.
+    bool start_ws(const QString& primary_symbol, const QStringList& all_symbols, bool hub_owned = false);
     void stop_ws();
+    /// True when the running WS subprocess was launched by the DataHub demand path
+    /// (and may therefore be stopped by it once no subscriber remains).
+    bool is_ws_hub_owned() const { return ws_hub_owned_; }
+    /// Symbols the current / most recent WS launch was asked to stream (a copy).
+    /// Main thread only, like start_ws().
+    QStringList ws_symbols() const { return ws_all_symbols_; }
+    /// Pairs DataHub subscribers need streamed on this exchange. start_ws() folds
+    /// them into every launch list, so a screen (re)starting the stream does not
+    /// silently drop the tiles that are subscribed to `ws:<exchange>:*` topics.
+    /// Main thread only.
+    void set_hub_pairs(const QStringList& pairs) { hub_pairs_ = pairs; }
     bool is_ws_connected() const { return ws_connected_.load(); }
     /// True once a WS subprocess has been spawned and has not yet exited.
     /// Distinct from `is_ws_connected` — the process may be up but the remote
@@ -85,15 +93,9 @@ class ExchangeSession : public QObject {
     /// re-spawning when switching back to a session that's already live.
     bool is_ws_active() const;
     void set_ws_primary_symbol(const QString& symbol);
+    /// Re-point only the OHLC stream to a new chart timeframe (no restart).
+    void set_ws_timeframe(const QString& timeframe);
     QString get_ws_primary_symbol() const;
-
-    /// Direct access to the native Kraken WS client when this session is the
-    /// Kraken session and the stream is running. Returns nullptr otherwise.
-    /// Screens connect to its signals directly to bypass the hub — the
-    /// hub-based fan-out for Kraken caused intermittent crashes under high
-    /// BBO update rates (Phase 6 design coupled coalesce + pattern matching
-    /// + per-policy retention; the native path doesn't need that machinery).
-    kraken::KrakenWsClient* kraken_ws_client() const { return kraken_ws_; }
 
     // ── Watch management (for paper-trading bookkeeping) ───────────────────
     void watch_symbol(const QString& symbol, const QString& portfolio_id);
@@ -115,7 +117,8 @@ class ExchangeSession : public QObject {
     // ── Authenticated — need credentials on the daemon.
     QJsonObject fetch_balance();
     QJsonObject place_exchange_order(const QString& symbol, const QString& side, const QString& type, double amount,
-                                     double price = 0.0);
+                                     double price = 0.0, double stop_price = 0.0, double sl = 0.0, double tp = 0.0,
+                                     bool reduce_only = false);
     QJsonObject cancel_exchange_order(const QString& order_id, const QString& symbol);
     QJsonObject fetch_positions_live(const QString& symbol = "");
     QJsonObject fetch_open_orders_live(const QString& symbol = "");
@@ -135,6 +138,11 @@ class ExchangeSession : public QObject {
     void handle_ws_line(const QString& line);
     void drain_ws_buffer();
 
+    /// QProcess::finished handler for the WS subprocess. Clears the connected
+    /// flag (so the polled UI badge drops to OFFLINE) and — if the stream was
+    /// still supposed to be up — schedules a bounded, backed-off respawn.
+    void handle_ws_finished(int exit_code, QProcess::ExitStatus status);
+
     /// Apply the exchange→requested symbol remap (e.g. on Hyperliquid,
     /// `BTC/USDC:USDC` → `BTC/USDT`). Returns the input unchanged when no
     /// remap is known. Thread-safe — takes the session mutex internally.
@@ -153,19 +161,18 @@ class ExchangeSession : public QObject {
     ExchangeCredentials credentials_;
 
     QProcess* ws_process_ = nullptr;
-    // Kraken native WS — production-grade dedicated I/O thread so socket reads
-    // never starve under main-thread pressure (paint storms, modals, SQLite).
-    // The worker thread owns kraken_ws_; we never touch *kraken_ws_ from the
-    // main thread except through QMetaObject::invokeMethod or via signals.
-    QThread* kraken_ws_thread_ = nullptr;
-    kraken::KrakenWsClient* kraken_ws_ = nullptr;  // raw — owned by thread
     std::atomic<bool> ws_connected_{false};
+    bool ws_hub_owned_ = false;   // current subprocess was started by the DataHub demand path
+    QStringList hub_pairs_;       // pairs DataHub subscribers need (folded into every launch)
+    bool ws_should_run_ = false;  // true between a successful start_ws() and stop_ws()
+    int ws_restart_attempts_ = 0; // consecutive auto-restarts; reset after a healthy run
+    QElapsedTimer ws_uptime_;     // since the current ws_process_ was spawned
     QString ws_primary_symbol_;
     QStringList ws_all_symbols_;
-    QHash<QString, QString> ws_symbol_map_;  // exchange_symbol → requested_symbol
+    QHash<QString, QString> ws_symbol_map_; // exchange_symbol → requested_symbol
 
     QHash<QString, TickerData> price_cache_;
-    QHash<QString, QSet<QString>> watched_;   // symbol → set of portfolio_ids
+    QHash<QString, QSet<QString>> watched_; // symbol → set of portfolio_ids
 
     mutable QMutex mutex_;
 };

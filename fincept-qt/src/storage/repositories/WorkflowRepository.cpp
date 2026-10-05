@@ -1,6 +1,7 @@
 #include "storage/repositories/WorkflowRepository.h"
 
 #include "core/logging/Logger.h"
+#include "storage/sync/SyncOutbox.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -20,8 +21,17 @@ WorkflowRow WorkflowRepository::map_row(QSqlQuery& q) {
 }
 
 Result<void> WorkflowRepository::save(const workflow::WorkflowDef& wf) {
-    // Upsert the workflow header
-    auto r = exec_write("INSERT INTO workflows (id, name, description, status, static_data, updated_at) "
+    // Persist header + nodes + edges atomically. save() DELETEs all existing
+    // nodes/edges then re-INSERTs them; without a transaction a mid-sequence
+    // failure (constraint / disk-full) or a crash would leave the graph
+    // partially wiped and the next load() would return an empty/corrupt
+    // workflow. Wrap the whole rewrite in one transaction, roll back on error.
+    if (auto tx = db().begin_transaction(); tx.is_err())
+        return tx;
+
+    const auto body = [&]() -> Result<void> {
+        // Upsert the workflow header
+        auto r = exec_write("INSERT INTO workflows (id, name, description, status, static_data, updated_at) "
                         "VALUES (?, ?, ?, ?, ?, datetime('now')) "
                         "ON CONFLICT(id) DO UPDATE SET "
                         "  name = excluded.name,"
@@ -73,9 +83,19 @@ Result<void> WorkflowRepository::save(const workflow::WorkflowDef& wf) {
         if (r.is_err())
             return r;
     }
+        return Result<void>::ok();
+    }; // body
+
+    if (Result<void> br = body(); br.is_err()) {
+        db().rollback();
+        return br;
+    }
+    if (auto cr = db().commit(); cr.is_err())
+        return cr;
 
     LOG_INFO("WorkflowRepo",
              QString("Saved workflow: %1 (%2 nodes, %3 edges)").arg(wf.name).arg(wf.nodes.size()).arg(wf.edges.size()));
+    SyncOutbox::record_unique("workflow", wf.id, "upsert");
     return Result<void>::ok();
 }
 
@@ -171,7 +191,10 @@ Result<QVector<WorkflowRow>> WorkflowRepository::list_all() {
 
 Result<void> WorkflowRepository::remove(const QString& id) {
     // Foreign key cascade handles nodes and edges
-    return exec_write("DELETE FROM workflows WHERE id = ?", {id});
+    auto r = exec_write("DELETE FROM workflows WHERE id = ?", {id});
+    if (r.is_ok())
+        SyncOutbox::record("workflow", id, "delete");
+    return r;
 }
 
 } // namespace fincept

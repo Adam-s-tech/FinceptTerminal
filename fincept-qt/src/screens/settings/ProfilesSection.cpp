@@ -12,8 +12,10 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QProcess>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QString>
 #include <QStringList>
@@ -21,17 +23,53 @@
 
 namespace fincept::screens {
 
+namespace {
+/// Relaunch the terminal under `profile` and quit this process — but only when the
+/// new process really started. The startDetached() result used to be ignored, so a
+/// failed launch (exe moved/locked, blocked by security software) still quit the app
+/// and left the user with no terminal at all.
+void profiles_relaunch_and_quit(QWidget* parent, const QString& profile) {
+    const QString exe = QCoreApplication::applicationFilePath();
+    if (!QProcess::startDetached(exe, {"--profile", profile})) {
+        QMessageBox::critical(parent, ProfilesSection::tr("Switch Profile"),
+                              ProfilesSection::tr("Could not launch Fincept Terminal for profile \"%1\". "
+                                                  "The current session stays open.")
+                                  .arg(profile));
+        return;
+    }
+    QCoreApplication::quit();
+}
+} // namespace
+
 ProfilesSection::ProfilesSection(QWidget* parent) : QWidget(parent) {
     build_ui();
 }
 
 void ProfilesSection::build_ui() {
+    host_layout_ = new QVBoxLayout(this);
+    host_layout_->setContentsMargins(0, 0, 0, 0);
+    host_layout_->setSpacing(0);
+    rebuild();
+}
+
+void ProfilesSection::rebuild() {
+    if (content_) {
+        host_layout_->removeWidget(content_);
+        content_->deleteLater();
+    }
+    content_ = build_content();
+    host_layout_->addWidget(content_);
+}
+
+void ProfilesSection::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        rebuild(); // re-runs every tr() lookup in build_content()
+    QWidget::changeEvent(event);
+}
+
+QWidget* ProfilesSection::build_content() {
     using namespace settings_styles;
     using namespace settings_helpers;
-
-    auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(0, 0, 0, 0);
-    root->setSpacing(0);
 
     auto* scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
@@ -81,17 +119,27 @@ void ProfilesSection::build_ui() {
 
         if (name == pm.active()) {
             auto* badge = new QLabel(tr("ACTIVE"));
-            badge->setStyleSheet(QString("color:%1;font-weight:700;font-size:10px;background:transparent;")
-                                     .arg(ui::colors::AMBER()));
+            badge->setStyleSheet(
+                QString("color:%1;font-weight:700;font-size:10px;background:transparent;").arg(ui::colors::AMBER()));
             hl->addWidget(badge);
         } else {
             auto* switch_btn = new QPushButton(tr("Switch"));
             switch_btn->setFixedWidth(72);
             switch_btn->setStyleSheet(btn_secondary_ss());
-            connect(switch_btn, &QPushButton::clicked, this, [name]() {
-                const QString exe = QCoreApplication::applicationFilePath();
-                QProcess::startDetached(exe, {"--profile", name});
-                QCoreApplication::quit();
+            switch_btn->setAccessibleName(tr("Switch to profile %1").arg(name));
+            connect(switch_btn, &QPushButton::clicked, this, [this, name]() {
+                // Switching relaunches the process and quits this one. That is
+                // as destructive as closing the terminal, and it used to happen
+                // on a single unconfirmed click.
+                const auto reply = QMessageBox::question(
+                    this, tr("Switch Profile"),
+                    tr("Switch to profile \"%1\"?\n\nFincept Terminal will restart. Unsaved work in the "
+                       "current session may be lost.")
+                        .arg(name),
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                if (reply != QMessageBox::Yes)
+                    return;
+                profiles_relaunch_and_quit(this, name);
             });
             hl->addWidget(switch_btn);
         }
@@ -112,17 +160,41 @@ void ProfilesSection::build_ui() {
     auto* name_input = new QLineEdit;
     name_input->setPlaceholderText(tr("profile-name  (alphanumeric, - and _ only)"));
     name_input->setStyleSheet(input_ss());
+    name_input->setMaxLength(32);
+    name_input->setAccessibleName(tr("New profile name"));
     new_hl->addWidget(name_input, 1);
 
     auto* create_btn = new QPushButton(tr("Create & Switch"));
     create_btn->setStyleSheet(btn_primary_ss());
-    connect(create_btn, &QPushButton::clicked, this, [name_input]() {
+    create_btn->setAccessibleName(tr("Create profile and switch to it"));
+    connect(name_input, &QLineEdit::returnPressed, create_btn, &QPushButton::click);
+    connect(create_btn, &QPushButton::clicked, this, [this, name_input]() {
         const QString name = name_input->text().trimmed().toLower();
-        if (name.isEmpty()) return;
+        // The placeholder advertised a character set that nothing enforced.
+        // ProfileManager sanitises the name before using it as a directory, so
+        // an unsanitised value silently landed the user in a *differently
+        // named* profile than the one they typed.
+        static const QRegularExpression kValidName(QStringLiteral("^[a-z0-9_-]{1,32}$"));
+        if (name.isEmpty() || !kValidName.match(name).hasMatch()) {
+            QMessageBox::warning(this, tr("Invalid Profile Name"),
+                                 tr("Use 1-32 characters: lowercase letters, digits, hyphen or underscore."));
+            return;
+        }
+        if (ProfileManager::instance().list_profiles().contains(name)) {
+            QMessageBox::warning(this, tr("Profile Exists"), tr("A profile named \"%1\" already exists.").arg(name));
+            return;
+        }
+        const auto reply =
+            QMessageBox::question(this, tr("Create Profile"),
+                                  tr("Create profile \"%1\" and switch to it?\n\nFincept Terminal will restart. "
+                                     "Unsaved work in the current session may be lost.")
+                                      .arg(name),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (reply != QMessageBox::Yes)
+            return;
+
         ProfileManager::instance().create_profile(name);
-        const QString exe = QCoreApplication::applicationFilePath();
-        QProcess::startDetached(exe, {"--profile", name});
-        QCoreApplication::quit();
+        profiles_relaunch_and_quit(this, name);
     });
     new_hl->addWidget(create_btn);
     vl->addWidget(new_row);
@@ -135,7 +207,7 @@ void ProfilesSection::build_ui() {
 
     vl->addStretch();
     scroll->setWidget(page);
-    root->addWidget(scroll);
+    return scroll;
 }
 
 } // namespace fincept::screens

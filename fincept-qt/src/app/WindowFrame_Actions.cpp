@@ -7,9 +7,8 @@
 //
 // Part of the partial-class split of WindowFrame.cpp.
 
-#include "app/WindowFrame.h"
-
 #include "app/DockScreenRouter.h"
+#include "app/WindowFrame.h"
 #include "core/logging/Logger.h"
 #include "core/session/SessionManager.h"
 #include "screens/chat_mode/ChatModeScreen.h"
@@ -32,7 +31,8 @@
 namespace fincept {
 
 void WindowFrame::toggle_chat_mode() {
-    if (locked_) return;
+    if (locked_)
+        return;
     chat_mode_ = !chat_mode_;
 
     if (chat_mode_) {
@@ -64,7 +64,6 @@ void WindowFrame::toggle_chat_mode() {
     }
 }
 
-
 void WindowFrame::toggle_focus_mode() {
     // Don't let focus mode toggle shell visibility while the user is on an
     // auth screen — the toolbar must stay hidden there. Mirrors the gate
@@ -89,8 +88,24 @@ void WindowFrame::refresh_focused_panel() {
     if (!dock_manager_)
         return;
     auto* focused = dock_manager_->focusedDockWidget();
-    if (focused && focused->widget())
-        QMetaObject::invokeMethod(focused->widget(), "refresh", Qt::QueuedConnection);
+    if (!focused || !focused->widget())
+        return;
+    QWidget* panel = focused->widget();
+    // No top-level screen defines a plain refresh() slot, so the F5 / View ▸ Refresh
+    // path used to be a silent no-op everywhere. Several screens do expose their
+    // Refresh-button handler as a (private) slot under a conventional name — try
+    // those too. Probe before invoking: invokeMethod on a missing method logs a Qt
+    // "No such method" warning.
+    static const char* const kRefreshSlots[] = {"refresh", "on_refresh", "on_refresh_clicked"};
+    const QMetaObject* mo = panel->metaObject();
+    for (const char* name : kRefreshSlots) {
+        if (mo->indexOfMethod(QMetaObject::normalizedSignature((QByteArray(name) + "()").constData())) >= 0) {
+            QMetaObject::invokeMethod(panel, name, Qt::QueuedConnection);
+            return;
+        }
+    }
+    LOG_DEBUG("WindowFrame", QString("refresh: '%1' exposes no refresh slot — ignored")
+                                 .arg(QString::fromLatin1(mo->className())));
 }
 
 void WindowFrame::open_component_browser() {
@@ -148,8 +163,9 @@ void WindowFrame::open_command_palette() {
 }
 
 void WindowFrame::schedule_dock_layout_save() {
-    if (dock_layout_save_timer_)
-        dock_layout_save_timer_->start();
+    if (suppress_layout_save_ || !dock_layout_save_timer_)
+        return;
+    dock_layout_save_timer_->start();
 }
 
 } // namespace fincept

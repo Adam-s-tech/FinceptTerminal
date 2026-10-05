@@ -1,12 +1,17 @@
 #include "trading/brokers/saxo/SaxoBankBroker.h"
 
+#include "trading/brokers/BrokerClientOrderId.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
 
 #include <QDateTime>
-#include <QTimeZone>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QTimeZone>
 #include <QUrlQuery>
+
+#include <algorithm>
+#include <limits>
 
 namespace fincept::trading {
 
@@ -20,6 +25,19 @@ static int64_t now_ts() {
     return QDateTime::currentSecsSinceEpoch();
 }
 
+// exchange_token() records which gateway minted the token under additional_data
+// {"environment":"sim"|"live"}. A SIM token is rejected by the live gateway (and vice versa), so
+// every REST call must follow it; before this, only the profile lookup inside exchange_token()
+// honoured "sim:::" and every later call hit the live host. Anything unmarked stays live.
+static QString saxo_base_url(const BrokerCredentials& creds) {
+    if (!creds.additional_data.isEmpty()) {
+        const auto ad = QJsonDocument::fromJson(creds.additional_data.toUtf8()).object();
+        if (ad.value("environment").toString() == QLatin1String("sim"))
+            return QString::fromLatin1(BASE_SIM);
+    }
+    return QString::fromLatin1(BASE_LIVE);
+}
+
 // ---------- Static helpers ----------
 
 QString SaxoBankBroker::extract_uic(const QString& symbol) {
@@ -28,6 +46,14 @@ QString SaxoBankBroker::extract_uic(const QString& symbol) {
     if (parts.size() >= 3)
         return parts[2];
     return {};
+}
+
+QString SaxoBankBroker::extract_asset_type(const QString& symbol) {
+    // Optional 4th part: "FXCM:EURUSD:21:FxSpot" — AssetType is 4th part; default "Stock".
+    QStringList parts = symbol.split(":");
+    if (parts.size() >= 4 && !parts[3].trimmed().isEmpty())
+        return parts[3].trimmed();
+    return QStringLiteral("Stock");
 }
 
 const BrokerEnumMap<QString>& SaxoBankBroker::saxo_enum_map() {
@@ -115,7 +141,7 @@ QMap<QString, QString> SaxoBankBroker::auth_headers(const BrokerCredentials& cre
 TokenExchangeResponse SaxoBankBroker::exchange_token(const QString& api_key, const QString& api_secret,
                                                      const QString& auth_code) {
     if (auth_code.trimmed().isEmpty())
-        return {false, "", "", "", "Authorization code is required", ""};
+        return {.success = false, .error = "Authorization code is required"};
 
     // Try live token endpoint first; fall back to SIM if it fails
     // In practice user should specify sim vs live via auth_code prefix "sim:::code"
@@ -135,18 +161,18 @@ TokenExchangeResponse SaxoBankBroker::exchange_token(const QString& api_key, con
                               {{"Content-Type", "application/x-www-form-urlencoded"}, {"Accept", "application/json"}});
 
     if (!resp.success)
-        return {false, "", "", "", "Token exchange failed: " + resp.error, ""};
+        return {.success = false, .error = "Token exchange failed: " + resp.error};
 
     QJsonDocument doc = QJsonDocument::fromJson(resp.raw_body.toUtf8());
     if (!doc.isObject())
-        return {false, "", "", "", "Token exchange: invalid response", ""};
+        return {.success = false, .error = "Token exchange: invalid response"};
 
     QJsonObject obj = doc.object();
     QString access_token = obj.value("access_token").toString();
     QString refresh_token = obj.value("refresh_token").toString();
 
     if (access_token.isEmpty())
-        return {false, "", "", "", obj.value("error_description").toString("Token exchange failed"), ""};
+        return {.success = false, .error = obj.value("error_description").toString("Token exchange failed")};
 
     // Fetch AccountKey from /port/v1/clients/me
     QString base = use_sim ? BASE_SIM : BASE_LIVE;
@@ -163,8 +189,66 @@ TokenExchangeResponse SaxoBankBroker::exchange_token(const QString& api_key, con
         }
     }
 
-    // Pack refresh_token into additional field
-    return {true, access_token, refresh_token, account_key, "", ""};
+    // Record which gateway minted the token (REST calls must follow it — see saxo_base_url) and
+    // the access token's real lifetime (`expires_in`, ~20 min) so the session sweep can refresh
+    // it before it lapses.
+    double expires_in = obj.value("expires_in").toVariant().toDouble();
+    if (expires_in <= 0.0)
+        expires_in = 1200.0;
+    const QString extra = with_token_expiry(
+        QString::fromUtf8(QJsonDocument(QJsonObject{{"environment", use_sim ? "sim" : "live"}})
+                              .toJson(QJsonDocument::Compact)),
+        rolling_expiry_epoch(expires_in / 3600.0));
+
+    return {.success = true,
+            .access_token = access_token,
+            .refresh_token = refresh_token,
+            .user_id = account_key,
+            .additional_data = extra};
+}
+
+// Saxo access tokens live ~20 minutes and the user cannot re-run the OAuth code flow that often.
+// The (rolling) refresh token minted alongside re-issues one with no interaction:
+// POST {token endpoint} grant_type=refresh_token + client_id/client_secret.
+TokenExchangeResponse SaxoBankBroker::refresh_session(const BrokerCredentials& creds) {
+    if (creds.refresh_token.isEmpty() || creds.api_key.isEmpty() || creds.api_secret.isEmpty())
+        return {.success = false, .error = "Saxo silent refresh requires a stored refresh token and app key/secret"};
+
+    bool use_sim = false;
+    if (!creds.additional_data.isEmpty())
+        use_sim = QJsonDocument::fromJson(creds.additional_data.toUtf8()).object().value("environment").toString() ==
+                  QLatin1String("sim");
+
+    QUrlQuery form;
+    form.addQueryItem("grant_type", "refresh_token");
+    form.addQueryItem("refresh_token", creds.refresh_token);
+    form.addQueryItem("client_id", creds.api_key);
+    form.addQueryItem("client_secret", creds.api_secret);
+
+    auto resp = BrokerHttp::instance().post_raw(
+        use_sim ? TOKEN_URL_SIM : TOKEN_URL_LIVE, form.toString(QUrl::FullyEncoded).toUtf8(),
+        {{"Content-Type", "application/x-www-form-urlencoded"}, {"Accept", "application/json"}});
+
+    const QString access_token = resp.json.value("access_token").toString();
+    if (!resp.success || access_token.isEmpty())
+        return {.success = false,
+                .error = resp.json.value("error_description").toString(resp.error.isEmpty() ? "Token refresh failed"
+                                                                                           : resp.error)};
+
+    double expires_in = resp.json.value("expires_in").toVariant().toDouble();
+    if (expires_in <= 0.0)
+        expires_in = 1200.0;
+    // Saxo rotates the refresh token on every use; keep the old one only if the reply omits it.
+    const QString new_refresh = resp.json.value("refresh_token").toString();
+    const QString extra = with_token_expiry(
+        QString::fromUtf8(QJsonDocument(QJsonObject{{"environment", use_sim ? "sim" : "live"}})
+                              .toJson(QJsonDocument::Compact)),
+        rolling_expiry_epoch(expires_in / 3600.0));
+    return {.success = true,
+            .access_token = access_token,
+            .refresh_token = new_refresh.isEmpty() ? creds.refresh_token : new_refresh,
+            .user_id = creds.user_id,
+            .additional_data = extra};
 }
 
 // ---------- place_order ----------
@@ -181,11 +265,16 @@ OrderPlaceResponse SaxoBankBroker::place_order(const BrokerCredentials& creds, c
     QJsonObject order_obj;
     order_obj["AccountKey"] = account_key;
     order_obj["Uic"] = uic_str.toLongLong();
-    order_obj["AssetType"] = "Stock";
+    // AssetType from the optional 4th symbol segment (EXCH:SYM:UIC:ASSETTYPE);
+    // defaults to "Stock" so existing 3-part equity symbols are unchanged.
+    order_obj["AssetType"] = extract_asset_type(order.symbol);
     order_obj["BuySell"] = (order.side == OrderSide::Buy) ? "Buy" : "Sell";
     order_obj["Amount"] = order.quantity;
     order_obj["OrderType"] = saxo_enum_map().order_type_or(order.order_type, "Market");
     order_obj["ManualOrder"] = false;
+    // Stable per order intent (UnifiedOrder::client_order_id) so a retry after an 8s
+    // client-side timeout carries the same reference (see BrokerClientOrderId.h).
+    order_obj["ExternalReference"] = client_order_ref_for(order, 50);
 
     if (order.order_type != OrderType::Market)
         order_obj["OrderPrice"] = order.price;
@@ -197,7 +286,7 @@ OrderPlaceResponse SaxoBankBroker::place_order(const BrokerCredentials& creds, c
     order_obj["OrderDuration"] = duration;
 
     auto& http = BrokerHttp::instance();
-    auto resp = http.post_json(QString("%1/trade/v2/orders").arg(BASE_LIVE), order_obj, auth_headers(creds));
+    auto resp = http.post_json(QString("%1/trade/v2/orders").arg(saxo_base_url(creds)), order_obj, auth_headers(creds));
 
     if (!resp.success)
         return {false, "", checked_error(resp, "place_order failed")};
@@ -223,7 +312,9 @@ ApiResponse<QJsonObject> SaxoBankBroker::modify_order(const BrokerCredentials& c
     QJsonObject body;
     body["AccountKey"] = creds.user_id;
     body["OrderId"] = order_id;
-    body["AssetType"] = "Stock";
+    // modify_order has no symbol; let the caller pass "assetType" in mods for
+    // FX/CFD/futures, defaulting to "Stock" to preserve existing equity behavior.
+    body["AssetType"] = mods.value("assetType").toString("Stock");
     body["ManualOrder"] = false;
 
     if (mods.contains("quantity"))
@@ -240,7 +331,7 @@ ApiResponse<QJsonObject> SaxoBankBroker::modify_order(const BrokerCredentials& c
     }
 
     auto& http = BrokerHttp::instance();
-    auto resp = http.patch_json(QString("%1/trade/v2/orders").arg(BASE_LIVE), body, auth_headers(creds));
+    auto resp = http.patch_json(QString("%1/trade/v2/orders").arg(saxo_base_url(creds)), body, auth_headers(creds));
 
     if (!resp.success)
         return {false, std::nullopt, checked_error(resp, "modify_order failed"), ts};
@@ -258,8 +349,9 @@ ApiResponse<QJsonObject> SaxoBankBroker::cancel_order(const BrokerCredentials& c
     int64_t ts = now_ts();
 
     auto& http = BrokerHttp::instance();
-    auto resp = http.del(QString("%1/trade/v2/orders/%2?AccountKey=%3").arg(BASE_LIVE, order_id, creds.user_id),
-                         auth_headers(creds));
+    auto resp = http.del(
+        QString("%1/trade/v2/orders/%2?AccountKey=%3").arg(saxo_base_url(creds), order_id, creds.user_id),
+        auth_headers(creds));
 
     if (!resp.success)
         return {false, std::nullopt, checked_error(resp, "cancel_order failed"), ts};
@@ -277,8 +369,8 @@ ApiResponse<QVector<BrokerOrderInfo>> SaxoBankBroker::get_orders(const BrokerCre
     int64_t ts = now_ts();
 
     auto& http = BrokerHttp::instance();
-    auto resp =
-        http.get(QString("%1/port/v1/orders/me?FieldGroups=DisplayAndFormat").arg(BASE_LIVE), auth_headers(creds));
+    auto resp = http.get(QString("%1/port/v1/orders/me?FieldGroups=DisplayAndFormat").arg(saxo_base_url(creds)),
+                         auth_headers(creds));
 
     if (!resp.success)
         return {false, std::nullopt, checked_error(resp, "get_orders failed"), ts};
@@ -328,7 +420,7 @@ ApiResponse<QJsonObject> SaxoBankBroker::get_trade_book(const BrokerCredentials&
     int64_t ts = now_ts();
 
     auto& http = BrokerHttp::instance();
-    auto resp = http.get(QString("%1/port/v1/orders/me").arg(BASE_LIVE), auth_headers(creds));
+    auto resp = http.get(QString("%1/port/v1/orders/me").arg(saxo_base_url(creds)), auth_headers(creds));
 
     if (!resp.success)
         return {false, std::nullopt, checked_error(resp, "get_trade_book failed"), ts};
@@ -346,9 +438,9 @@ ApiResponse<QVector<BrokerPosition>> SaxoBankBroker::get_positions(const BrokerC
     int64_t ts = now_ts();
 
     auto& http = BrokerHttp::instance();
-    auto resp = http.get(
-        QString("%1/port/v1/positions/me?FieldGroups=DisplayAndFormat,PositionBase,PositionView").arg(BASE_LIVE),
-        auth_headers(creds));
+    auto resp = http.get(QString("%1/port/v1/positions/me?FieldGroups=DisplayAndFormat,PositionBase,PositionView")
+                             .arg(saxo_base_url(creds)),
+                         auth_headers(creds));
 
     if (!resp.success)
         return {false, std::nullopt, checked_error(resp, "get_positions failed"), ts};
@@ -394,7 +486,7 @@ ApiResponse<QVector<BrokerHolding>> SaxoBankBroker::get_holdings(const BrokerCre
     auto& http = BrokerHttp::instance();
     auto resp =
         http.get(QString("%1/port/v1/netpositions/me?FieldGroups=DisplayAndFormat,NetPositionBase,NetPositionView")
-                     .arg(BASE_LIVE),
+                     .arg(saxo_base_url(creds)),
                  auth_headers(creds));
 
     if (!resp.success)
@@ -440,7 +532,7 @@ ApiResponse<BrokerFunds> SaxoBankBroker::get_funds(const BrokerCredentials& cred
     int64_t ts = now_ts();
 
     auto& http = BrokerHttp::instance();
-    auto resp = http.get(QString("%1/port/v1/balances/me").arg(BASE_LIVE), auth_headers(creds));
+    auto resp = http.get(QString("%1/port/v1/balances/me").arg(saxo_base_url(creds)), auth_headers(creds));
 
     if (!resp.success)
         return {false, std::nullopt, checked_error(resp, "get_funds failed"), ts};
@@ -486,9 +578,12 @@ ApiResponse<QVector<BrokerQuote>> SaxoBankBroker::get_quotes(const BrokerCredent
     if (uics.isEmpty())
         return {false, std::nullopt, "get_quotes: Uic required (symbol format EXCHANGE:SYMBOL:UIC)", ts};
 
-    QString url = QString("%1/trade/v1/infoprices/list?Uics=%2&AssetType=Stock"
+    // infoprices/list takes a single AssetType per call — derive it from the first
+    // symbol's optional 4th segment (EXCH:SYM:UIC:ASSETTYPE); defaults to "Stock".
+    const QString asset_type = extract_asset_type(symbols.first());
+    QString url = QString("%1/trade/v1/infoprices/list?Uics=%2&AssetType=%3"
                           "&FieldGroups=DisplayAndFormat,PriceInfo,PriceInfoDetails,Quote")
-                      .arg(BASE_LIVE, uics.join(","));
+                      .arg(saxo_base_url(creds), uics.join(","), asset_type);
 
     auto& http = BrokerHttp::instance();
     auto resp = http.get(url, auth_headers(creds));
@@ -541,7 +636,10 @@ ApiResponse<QVector<BrokerCandle>> SaxoBankBroker::get_history(const BrokerCrede
 
     QString uic = extract_uic(symbol);
     if (uic.isEmpty())
-        return {false, std::nullopt, "get_history: Uic required (symbol format EXCHANGE:SYMBOL:UIC)", ts};
+        return {false, std::nullopt, "get_history: Uic required (symbol format EXCHANGE:SYMBOL:UIC[:ASSETTYPE])", ts};
+
+    // Optional 4th symbol segment carries AssetType (e.g. FxSpot/CfdOnFutures); defaults to "Stock".
+    QString asset_type = extract_asset_type(symbol);
 
     int horizon = saxo_horizon(resolution);
 
@@ -555,62 +653,148 @@ ApiResponse<QVector<BrokerCandle>> SaxoBankBroker::get_history(const BrokerCrede
         to = QDate::currentDate();
 
     int days = from.daysTo(to);
-    int count = 500; // default
+    int desired_count = 500; // default
     if (horizon >= 1440) {
-        count = days + 1;
+        desired_count = days + 1;
     } else if (horizon >= 60) {
-        count = qMin(days * 8, 500); // ~8 bars/day for 1h
+        desired_count = qMin(days * 8, 500); // ~8 bars/day for 1h
     } else {
-        count = qMin(days * (390 / qMax(horizon, 1)), 1200);
+        desired_count = days * (390 / qMax(horizon, 1));
     }
-    count = qMax(1, qMin(count, 1200)); // Saxo max is typically 1200
+    desired_count = qMax(1, desired_count);
 
-    QString time_str = QDateTime(to, QTime(23, 59, 59), QTimeZone::UTC).toString(Qt::ISODate);
+    // Saxo returns at most SAXO_MAX_COUNT samples per request (Mode=UpTo ends at Time, going
+    // backward). The first-page count preserves the historical single-request behavior.
+    static constexpr int SAXO_MAX_COUNT = 1200;
+    static constexpr int SAXO_MAX_PAGES = 30; // safety cap on backward paging iterations
 
-    QString url = QString("%1/chart/v1/charts?Uic=%2&AssetType=Stock&Horizon=%3&Count=%4"
-                          "&Mode=UpTo&Time=%5")
-                      .arg(BASE_LIVE, uic, QString::number(horizon), QString::number(count),
-                           QString(QUrl::toPercentEncoding(time_str)));
+    // Fx*/Cfd* instruments report Ask/Bid OHLC (use mid); Stock/Etf/Bond/Future report plain
+    // OHLC + Volume. Decide off the AssetType, falling back to the open==0.0 heuristic for "Stock".
+    const bool ask_bid_asset =
+        asset_type.startsWith("Fx", Qt::CaseInsensitive) || asset_type.startsWith("Cfd", Qt::CaseInsensitive);
 
     auto& http = BrokerHttp::instance();
-    auto resp = http.get(url, auth_headers(creds));
 
-    if (!resp.success)
-        return {false, std::nullopt, checked_error(resp, "get_history failed"), ts};
+    // Single-request fetch+parse parameterized by Time (Mode=UpTo) and Count. Reuses the existing
+    // URL build and the asset-type-aware OHLC parser. ok=false signals a transport/parse failure.
+    struct PageResult {
+        bool ok = false;
+        QString error;
+        QVector<BrokerCandle> candles;
+    };
+    auto fetch_page = [&](const QString& time_str, int page_count) -> PageResult {
+        PageResult page;
 
-    QJsonDocument doc = QJsonDocument::fromJson(resp.raw_body.toUtf8());
-    if (!doc.isObject())
-        return {false, std::nullopt, "get_history: invalid response", ts};
+        QString url = QString("%1/chart/v1/charts?Uic=%2&AssetType=%3&Horizon=%4&Count=%5"
+                              "&Mode=UpTo&Time=%6")
+                          .arg(saxo_base_url(creds), uic, QString(QUrl::toPercentEncoding(asset_type)),
+                               QString::number(horizon), QString::number(page_count),
+                               QString(QUrl::toPercentEncoding(time_str)));
 
-    QJsonArray arr = doc.object().value("Data").toArray();
-    QVector<BrokerCandle> candles;
-    candles.reserve(arr.size());
-
-    for (const QJsonValue& v : arr) {
-        QJsonObject o = v.toObject();
-        // Time is ISO8601 string: "2024-01-15T00:00:00.000000Z"
-        QDateTime dt = QDateTime::fromString(o.value("Time").toString(), Qt::ISODate);
-
-        BrokerCandle c;
-        c.timestamp = dt.isValid() ? dt.toMSecsSinceEpoch() : 0LL;
-        // Stocks use Open/High/Low/Close/Volume directly
-        c.open = o.value("Open").toDouble();
-        c.high = o.value("High").toDouble();
-        c.low = o.value("Low").toDouble();
-        c.close = o.value("Close").toDouble();
-        c.volume = static_cast<int64_t>(o.value("Volume").toDouble());
-
-        // Fallback for FX (ask/bid split) — use mid
-        if (c.open == 0.0) {
-            c.open = (o.value("OpenAsk").toDouble() + o.value("OpenBid").toDouble()) / 2.0;
-            c.high = (o.value("HighAsk").toDouble() + o.value("HighBid").toDouble()) / 2.0;
-            c.low = (o.value("LowAsk").toDouble() + o.value("LowBid").toDouble()) / 2.0;
-            c.close = (o.value("CloseAsk").toDouble() + o.value("CloseBid").toDouble()) / 2.0;
+        auto resp = http.get(url, auth_headers(creds));
+        if (!resp.success) {
+            page.error = checked_error(resp, "get_history failed");
+            return page;
         }
-        candles.append(c);
+
+        QJsonDocument doc = QJsonDocument::fromJson(resp.raw_body.toUtf8());
+        if (!doc.isObject()) {
+            page.error = "get_history: invalid response";
+            return page;
+        }
+
+        QJsonArray arr = doc.object().value("Data").toArray();
+        page.candles.reserve(arr.size());
+        for (const QJsonValue& v : arr) {
+            QJsonObject o = v.toObject();
+            // Time is ISO8601 string: "2024-01-15T00:00:00.000000Z"
+            QDateTime dt = QDateTime::fromString(o.value("Time").toString(), Qt::ISODate);
+
+            BrokerCandle c;
+            c.timestamp = dt.isValid() ? dt.toMSecsSinceEpoch() : 0LL;
+            // Stocks/Etf/Bond/Future use Open/High/Low/Close/Volume directly
+            c.open = o.value("Open").toDouble();
+            c.high = o.value("High").toDouble();
+            c.low = o.value("Low").toDouble();
+            c.close = o.value("Close").toDouble();
+            c.volume = static_cast<int64_t>(o.value("Volume").toDouble());
+
+            // Fx*/Cfd* (ask/bid split) — use mid. Fallback heuristic: plain Open absent (==0.0).
+            if (ask_bid_asset || c.open == 0.0) {
+                c.open = (o.value("OpenAsk").toDouble() + o.value("OpenBid").toDouble()) / 2.0;
+                c.high = (o.value("HighAsk").toDouble() + o.value("HighBid").toDouble()) / 2.0;
+                c.low = (o.value("LowAsk").toDouble() + o.value("LowBid").toDouble()) / 2.0;
+                c.close = (o.value("CloseAsk").toDouble() + o.value("CloseBid").toDouble()) / 2.0;
+            }
+            page.candles.append(c);
+        }
+
+        page.ok = true;
+        return page;
+    };
+
+    const QString to_time_str = QDateTime(to, QTime(23, 59, 59), QTimeZone::UTC).toString(Qt::ISODate);
+
+    // Single-request path (count fits in one page): identical to the historical behavior.
+    if (desired_count <= SAXO_MAX_COUNT) {
+        PageResult page = fetch_page(to_time_str, desired_count);
+        if (!page.ok)
+            return {false, std::nullopt, page.error, ts};
+        return {true, page.candles, "", ts};
     }
 
-    return {true, candles, "", ts};
+    // Backward paging: repeatedly request SAXO_MAX_COUNT samples ending at Time, walking Time back
+    // to (oldest returned sample - 1s) until we reach from_date, get a short/empty page, or hit
+    // the safety cap. First-page failure returns an error; later-page failure stops and returns
+    // what was collected so far.
+    const int64_t from_ms = QDateTime(from, QTime(0, 0, 0), QTimeZone::UTC).toMSecsSinceEpoch();
+    QVector<BrokerCandle> candles;
+    QString time_str = to_time_str;
+
+    for (int iter = 0; iter < SAXO_MAX_PAGES; ++iter) {
+        PageResult page = fetch_page(time_str, SAXO_MAX_COUNT);
+        if (!page.ok) {
+            if (iter == 0)
+                return {false, std::nullopt, page.error, ts};
+            break; // later-page failure: stop and return collected
+        }
+        if (page.candles.isEmpty())
+            break;
+
+        candles += page.candles;
+
+        // Determine the oldest sample time in this page (Saxo returns ascending, but don't assume).
+        int64_t oldest_ms = page.candles.first().timestamp;
+        for (const BrokerCandle& c : page.candles)
+            if (c.timestamp > 0 && c.timestamp < oldest_ms)
+                oldest_ms = c.timestamp;
+
+        // Reached or passed the start of the requested range, or got a short page (no more data).
+        if (oldest_ms <= from_ms || page.candles.size() < SAXO_MAX_COUNT)
+            break;
+
+        // Next page ends just before the oldest sample we already have.
+        QDateTime next = QDateTime::fromMSecsSinceEpoch(oldest_ms - 1000, QTimeZone::UTC);
+        time_str = next.toString(Qt::ISODate);
+    }
+
+    // Merge: sort ascending by time, dedupe by timestamp, drop samples older than from_date.
+    std::sort(candles.begin(), candles.end(),
+              [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp < b.timestamp; });
+
+    QVector<BrokerCandle> merged;
+    merged.reserve(candles.size());
+    int64_t last_ts = std::numeric_limits<int64_t>::min();
+    for (const BrokerCandle& c : candles) {
+        if (c.timestamp < from_ms)
+            continue;
+        if (c.timestamp == last_ts)
+            continue; // dedupe overlapping page boundaries
+        merged.append(c);
+        last_ts = c.timestamp;
+    }
+
+    return {true, merged, "", ts};
 }
 
 } // namespace fincept::trading

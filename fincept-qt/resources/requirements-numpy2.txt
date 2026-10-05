@@ -2,14 +2,22 @@
 # All libraries compatible with NumPy 2.x
 
 # Core dependencies
+# numpy + pandas also power the prebuilt Fincept Notebook library
+# (Intermediate/Hard notebooks under resources/notebooks/). Beginner notebooks
+# use the Python standard library only and need no packages.
 numpy>=2.2.3,<3.0
 pandas>=2.3.3,<3.0
 
 # Trading platform (requires NumPy 2.2+)
-vnpy==4.3.0
+# Excluded on Linux ARM64: vnpy pulls pyside6==6.8.2.1, which publishes no
+# aarch64 Linux wheel. Without the marker the ENTIRE numpy2 set is unresolvable
+# there and setup dies at "Install Analytics Libraries", taking every other
+# analytics library with it. Linux ARM64 is a source-build target only — CI
+# ships Linux x64, macOS arm64 and Windows x64.
+vnpy==4.3.0; platform_machine != "aarch64" or sys_platform != "linux"
 
 # Data fetching
-ccxt>=4.5.44
+ccxt>=4.5.44,<5.0
 requests==2.32.5
 aiohttp==3.13.2
 websockets==15.0.1
@@ -21,6 +29,10 @@ databento==0.66.0
 databento-dbn==0.44.0
 feedparser==6.0.12
 gnews==0.4.2
+# Offline, finance-tuned headline sentiment for the Equity Research → Sentiment
+# tab (news_nlp.py). Pure-python, no model download; news_nlp falls back to a
+# keyword scorer if this is absent.
+vaderSentiment==3.3.2
 geopy>=2.4.0
 akshare>=1.14.0
 aiohappyeyeballs==2.6.1
@@ -68,7 +80,15 @@ tiktoken>=0.5.0
 # Note: litellm removed - model data extracted to llm_models_data.json (240KB static file)
 
 # Agno AI Framework
-agno>=1.0.0
+# Upper bound: agno 1.x → 2.x rewrote the Agent/Team API. `>=1.0.0` alone
+# already silently resolved to 2.x (venv has 2.6.7), i.e. the lower bound is
+# stale and a 3.0 would break the same way. Cap it.
+agno>=1.0.0,<3.0
+
+# Ollama client — required by agno.models.ollama.Ollama and the Ollama embedder.
+# Without it, selecting the Ollama provider for an agent raises
+# ImportError("`ollama` not installed") at model-init time.
+ollama>=0.4.0
 
 # Agno Tool Dependencies (free tools - no API keys required)
 ddgs>=6.0.0
@@ -95,10 +115,13 @@ river>=0.21.0
 
 # Technical analysis
 ta==0.11.0
-talipp==2.7.0
 
 # Portfolio optimization
-finquant-enhanced
+# finquant-enhanced was the ONLY requirement in either file with no version
+# specifier at all — `uv` would install whatever the index served, which makes
+# it the single best target for a compromised/typosquatted release. Pinned to
+# the version currently resolved in venv-numpy2.
+finquant-enhanced==0.7.1
 cvxpy>=1.0.0
 cvxopt==1.3.2
 
@@ -109,7 +132,11 @@ fortitudo.tech==1.2
 quantstats>=0.0.62
 
 # Quant libraries
-pyqlib==0.9.7
+# Excluded on Linux ARM64 for the same reason as vnpy above: pyqlib 0.9.7 ships
+# wheels for manylinux_2_17_x86_64 / manylinux2014_x86_64 / macosx_10_9_universal2
+# / win_amd64 only, and has no sdist to fall back to. Costs the qlib features
+# (scripts/ai_quant_lab/qlib_*.py, scripts/agents/rdagents/cli.py) on that arch.
+pyqlib==0.9.7; platform_machine != "aarch64" or sys_platform != "linux"
 rdagent==0.8.0
 deepagents==0.4.12
 gs-quant==1.4.67
@@ -145,16 +172,27 @@ ruamel.yaml>=0.17.38,<0.18.0
 python-redis-lock>=4.0.0
 setuptools-scm>=8.0.0
 tables>=3.8.0
-selenium>=4.0.0
+selenium>=4.0.0,<5.0
 pyarrow>=16.0.0
 pandarallel>=1.6.0
 gymnasium>=1.0.0
 
 # RL libraries
-stable-baselines3>=2.7.0
+# Excluded on macOS Intel: no SB3 release can satisfy this file there. PyTorch
+# dropped x86_64 macOS wheels after 2.2.2 (see the torch pin above), and SB3
+# splits cleanly either side of that line — >=2.6.0 requires torch>=2.3, while
+# <=2.5.0 requires numpy<2.0 or gymnasium<0.30, both of which this file rules
+# out. Without the marker the ENTIRE numpy2 set is unresolvable on
+# x86_64-apple-darwin and setup dies at "Install Analytics Libraries", taking
+# every other analytics library down with it. RL trading is therefore
+# unavailable on Intel Macs; the shipped DMG is arm64-only, so this only
+# affects x86_64 source builds.
+stable-baselines3>=2.7.0; platform_machine != "x86_64" or sys_platform != "darwin"
 
 # MLflow
-mlflow>=2.0.0
+# `>=2.0.0` already resolved to 3.x (venv has 3.12.0) across MLflow's breaking
+# 2→3 model/tracing API change. Cap below 4.0.
+mlflow>=2.0.0,<4.0
 
 # VisionQuant Pattern Intelligence
 faiss-cpu>=1.7.0
@@ -162,10 +200,9 @@ mplfinance>=0.12.0
 
 # Voice recognition (speech-to-text via Google API).
 # sounddevice ships PortAudio inside its wheel for every platform we support
-# (Windows x64, macOS x86_64 + arm64, Linux x86_64 + aarch64), removing the
-# old PyAudio install failure on Apple Silicon machines without Homebrew
-# portaudio. scripts/voice/* implements a thin SpeechRecognition AudioSource
-# shim on top of sd.RawInputStream so the SR API stays unchanged.
+# (Windows x64, macOS x86_64 + arm64, Linux x86_64 + aarch64).
+# scripts/voice/* implements a thin SpeechRecognition AudioSource shim on top
+# of sd.RawInputStream so the SR API stays unchanged.
 SpeechRecognition>=3.10.0
 sounddevice>=0.4.6
 

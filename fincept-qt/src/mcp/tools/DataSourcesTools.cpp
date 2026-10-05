@@ -6,7 +6,9 @@
 #include "core/logging/Logger.h"
 #include "screens/data_sources/ConnectorRegistry.h"
 #include "screens/data_sources/DataSourceTypes.h"
+#include "screens/data_sources/DataSourcesHelpers.h"
 #include "storage/repositories/DataSourceRepository.h"
+#include "trading/brokers/BrokerLogRedact.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -20,6 +22,69 @@ using namespace fincept::screens::datasources;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// `config` is the connector's saved field values — which for most connectors
+// means the password / api_key / token the user typed in. Returning it verbatim
+// made ds_get_connection a credential read, and ds_list_connections (which
+// takes no arguments at all) a one-call bulk dump of every stored connector
+// credential. Redact by key name, reusing redact_detail::is_secret_key from the
+// broker log redactor so there is exactly one list of "what counts as a secret"
+// in the tree. Shape is preserved (still a JSON string) so existing consumers
+// keep parsing it; only secret-named values become "<redacted:N>".
+static QString redact_config_json(const QString& raw) {
+    if (raw.trimmed().isEmpty())
+        return raw;
+    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
+    if (!doc.isObject()) // unparseable — we cannot tell which bytes are secret
+        return QStringLiteral("<unparseable config, %1 bytes>").arg(raw.size());
+    return QString::fromUtf8(
+        QJsonDocument(trading::redact_detail::redact_object(doc.object())).toJson(QJsonDocument::Compact));
+}
+
+// Bring a model-supplied connector `config` to the shape the Add/Edit Connection
+// dialog saves, so a connection created through the tools behaves like one created in
+// the UI:
+//   - Number fields are stored as JSON integers (the dialog does `text.toInt()`); a
+//     model naturally sends "5432", which then failed every `toInt()` reader (the
+//     connectivity test probed port 80 instead of 5432).
+//   - Fields the model left out get the connector's default, as the dialog pre-fills.
+// Returns the labels of REQUIRED fields that are still empty afterwards — the dialog
+// refuses to save in that case; the tool used to save a half-empty connection.
+static QStringList ds_normalize_config(const ConnectorConfig& cfg, QJsonObject& config, bool apply_defaults) {
+    QStringList missing;
+    for (const auto& f : cfg.fields) {
+        QJsonValue v = config.value(f.name);
+        const bool absent = v.isUndefined() || v.isNull() || (v.isString() && v.toString().trimmed().isEmpty());
+        if (absent && apply_defaults) {
+            if (!f.default_value.isEmpty())
+                config[f.name] = f.default_value;
+            else if (f.type == FieldType::Select && !f.options.isEmpty())
+                config[f.name] = f.options.first().value; // the dialog's combo starts on its first entry
+            v = config.value(f.name);
+        }
+        if (f.type == FieldType::Number && v.isString()) {
+            bool ok = false;
+            const int n = v.toString().trimmed().toInt(&ok);
+            if (ok)
+                config[f.name] = n;
+        }
+        const bool still_absent = config.value(f.name).isUndefined() || config.value(f.name).isNull() ||
+                                  (config.value(f.name).isString() && config.value(f.name).toString().trimmed().isEmpty());
+        if (apply_defaults && f.required && f.type != FieldType::Checkbox && still_absent)
+            missing.append(f.label.isEmpty() ? f.name : f.label);
+    }
+    return missing;
+}
+
+// A port stored by the UI is an integer, but a hand-written config may hold "5432".
+static int ds_json_port(const QJsonValue& v, int fallback) {
+    if (v.isString()) {
+        bool ok = false;
+        const int n = v.toString().trimmed().toInt(&ok);
+        return ok && n > 0 ? n : fallback;
+    }
+    return v.toInt(fallback);
+}
+
 static QJsonObject ds_to_json(const DataSource& ds) {
     return QJsonObject{
         {"id", ds.id},
@@ -29,7 +94,7 @@ static QJsonObject ds_to_json(const DataSource& ds) {
         {"type", ds.type},
         {"provider", ds.provider},
         {"category", ds.category},
-        {"config", ds.config},
+        {"config", redact_config_json(ds.config)},
         {"enabled", ds.enabled},
         {"tags", ds.tags},
         {"created_at", ds.created_at},
@@ -125,7 +190,8 @@ std::vector<ToolDef> get_data_sources_tools() {
     {
         ToolDef t;
         t.name = "ds_get_connection";
-        t.description = "Get full details (including config JSON) for a saved connection by ID.";
+        t.description = "Get full details for a saved connection by ID. Secret config fields "
+                        "(passwords, API keys, tokens) are redacted.";
         t.category = "data-sources";
         t.input_schema.properties = QJsonObject{
             {"id", QJsonObject{{"type", "string"}, {"description", "Connection ID (UUID)"}}},
@@ -151,6 +217,7 @@ std::vector<ToolDef> get_data_sources_tools() {
                         "'provider' must be a valid connector ID from ds_list_connectors. "
                         "'config' is a JSON object with the connector's required fields.";
         t.category = "data-sources";
+        t.is_destructive = true; // persists connector credentials / endpoints
         t.input_schema.properties = QJsonObject{
             {"display_name", QJsonObject{{"type", "string"}, {"description", "Human-readable connection name"}}},
             {"provider",
@@ -179,8 +246,13 @@ std::vector<ToolDef> get_data_sources_tools() {
             QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
             QString alias = provider + "_" + uuid.left(8);
 
-            // Serialize config
+            // Same rules as the Add Connection dialog: defaults, integer ports, and no
+            // saving while a required field is empty.
             QJsonObject config_obj = args["config"].toObject();
+            const QStringList missing = ds_normalize_config(*cfg, config_obj, /*apply_defaults=*/true);
+            if (!missing.isEmpty())
+                return ToolResult::fail("Missing required config field(s) for '" + provider +
+                                        "': " + missing.join(", ") + ". Use ds_get_connector to see its fields.");
             QString config_json = QString::fromUtf8(QJsonDocument(config_obj).toJson(QJsonDocument::Compact));
 
             DataSource ds;
@@ -188,7 +260,11 @@ std::vector<ToolDef> get_data_sources_tools() {
             ds.alias = alias;
             ds.display_name = name;
             ds.description = args["description"].toString();
-            ds.type = "rest_api"; // default; user can update via ds_update_connection
+            // Same rule the Add Connection dialog applies: "websocket" for streaming
+            // connectors, "rest_api" for the rest. (Hard-coding "rest_api" mis-typed
+            // every streaming connection created through this tool, and there is no
+            // way to change `type` afterwards.)
+            ds.type = persistence_type(*cfg);
             ds.provider = provider;
             ds.category = category_str(cfg->category);
             ds.config = config_json;
@@ -209,8 +285,10 @@ std::vector<ToolDef> get_data_sources_tools() {
     {
         ToolDef t;
         t.name = "ds_update_connection";
-        t.description = "Update an existing saved connection. Only supplied fields are changed.";
+        t.description = "Update an existing saved connection. Only supplied fields are changed; inside 'config' "
+                        "only the supplied keys are changed (others, e.g. saved passwords, are kept).";
         t.category = "data-sources";
+        t.is_destructive = true; // rewrites persisted connector credentials / endpoints
         t.input_schema.properties = QJsonObject{
             {"id", QJsonObject{{"type", "string"}, {"description", "Connection ID to update"}}},
             {"display_name", QJsonObject{{"type", "string"}, {"description", "New display name"}}},
@@ -239,7 +317,22 @@ std::vector<ToolDef> get_data_sources_tools() {
             if (args.contains("enabled"))
                 ds.enabled = args["enabled"].toBool();
             if (args.contains("config") && args["config"].isObject()) {
-                ds.config = QString::fromUtf8(QJsonDocument(args["config"].toObject()).toJson(QJsonDocument::Compact));
+                // MERGE into the saved config. The old code replaced it wholesale, so
+                // supplying {"host": "new"} silently erased the stored password / api_key
+                // (the saved values are redacted in ds_get_connection, so the model could
+                // not even re-send them) while the tool still reported success.
+                QJsonObject merged;
+                {
+                    const QJsonDocument old_doc = QJsonDocument::fromJson(ds.config.toUtf8());
+                    if (old_doc.isObject())
+                        merged = old_doc.object();
+                }
+                const QJsonObject incoming = args["config"].toObject();
+                for (auto it = incoming.constBegin(); it != incoming.constEnd(); ++it)
+                    merged[it.key()] = it.value();
+                if (const auto* cfg = ConnectorRegistry::instance().get(ds.provider))
+                    ds_normalize_config(*cfg, merged, /*apply_defaults=*/false);
+                ds.config = QString::fromUtf8(QJsonDocument(merged).toJson(QJsonDocument::Compact));
             }
 
             auto sr = DataSourceRepository::instance().save(ds);
@@ -257,7 +350,7 @@ std::vector<ToolDef> get_data_sources_tools() {
         t.name = "ds_delete_connection";
         t.description = "Delete a saved data source connection by ID.";
         t.category = "data-sources";
-        t.is_destructive = true;  // mutation tool — penalise on read-style queries
+        t.is_destructive = true; // mutation tool — penalise on read-style queries
         t.input_schema.properties = QJsonObject{
             {"id", QJsonObject{{"type", "string"}, {"description", "Connection ID to delete"}}},
         };
@@ -280,6 +373,7 @@ std::vector<ToolDef> get_data_sources_tools() {
         t.name = "ds_set_enabled";
         t.description = "Enable or disable a saved data source connection.";
         t.category = "data-sources";
+        t.is_destructive = true; // changes which saved connectors the terminal polls
         t.input_schema.properties = QJsonObject{
             {"id", QJsonObject{{"type", "string"}, {"description", "Connection ID"}}},
             {"enabled", QJsonObject{{"type", "boolean"}, {"description", "true to enable, false to disable"}}},
@@ -515,7 +609,7 @@ std::vector<ToolDef> get_data_sources_tools() {
                 QString h = config_obj["host"].toString().trimmed();
                 if (!h.isEmpty()) {
                     host = h;
-                    port = config_obj["port"].toInt(80);
+                    port = ds_json_port(config_obj["port"], 80);
                 }
             }
 
@@ -543,7 +637,7 @@ std::vector<ToolDef> get_data_sources_tools() {
                             port = first.mid(colon + 1).toInt();
                         } else {
                             host = first;
-                            port = config_obj["port"].toInt(80);
+                            port = ds_json_port(config_obj["port"], 80);
                         }
                         break;
                     }

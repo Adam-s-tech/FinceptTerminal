@@ -2,18 +2,23 @@
 
 #include "auth/AuthApi.h"
 #include "auth/AuthManager.h"
+#include "core/currency/Currency.h"
+#include "core/logging/Logger.h"
 #include "ui/theme/Theme.h"
+#include "ui/widgets/EnterprisePromo.h"
 
 #include <QApplication>
 #include <QDesktopServices>
 #include <QEvent>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QJsonArray>
 #include <QScrollArea>
 #include <QUrl>
 
 #include <algorithm>
+#include <memory>
 
 namespace fincept::screens {
 
@@ -83,6 +88,9 @@ void PricingScreen::build_ui() {
 
     subtitle_label_ = new QLabel;
     subtitle_label_->setAlignment(Qt::AlignCenter);
+    // Wraps — the subtitle now carries the "Enterprise is separate" caveat and
+    // would otherwise force a wide minimum width on the scroll content.
+    subtitle_label_->setWordWrap(true);
     subtitle_label_->setStyleSheet(
         QString("color: %1; font-size: 13px; background: transparent; %2").arg(ui::colors::TEXT_TERTIARY()).arg(MF));
     vl->addWidget(subtitle_label_);
@@ -92,6 +100,15 @@ void PricingScreen::build_ui() {
     user_info_label_->setStyleSheet(
         QString("color: %1; font-size: 12px; background: transparent; %2").arg(ui::colors::TEXT_SECONDARY()).arg(MF));
     vl->addWidget(user_info_label_);
+
+    // ── Enterprise banner ────────────────────────────────────────────────────
+    // The cards below are the open-source build's own credit tiers. Enterprise
+    // is a separate product on a separate backend, so it never appears in the
+    // fetched plan list — surface it here rather than leave the pricing screen
+    // as the one place that omits it.
+    vl->addSpacing(4);
+    vl->addWidget(ui::make_enterprise_banner(content));
+    vl->addSpacing(4);
 
     // ── Loading ──────────────────────────────────────────────────────────────
     loading_label_ = new QLabel;
@@ -154,11 +171,16 @@ void PricingScreen::changeEvent(QEvent* event) {
 }
 
 void PricingScreen::retranslateUi() {
-    if (title_label_)    title_label_->setText(tr("PLANS & PRICING"));
-    if (subtitle_label_) subtitle_label_->setText(tr("Unlock the full power of Fincept Terminal"));
+    // Scope the heading explicitly. These are the open-source terminal's own
+    // credit tiers; Fincept Terminal Enterprise is a separate product on a
+    // separate backend, and a subscription bought here unlocks nothing there.
+    if (title_label_)
+        title_label_->setText(tr("PLANS & PRICING — OPEN-SOURCE EDITION"));
+    if (subtitle_label_)
+        subtitle_label_->setText(tr("Credits and limits for this open-source terminal. "
+                                    "Fincept Terminal Enterprise is a separate product, billed separately."));
     if (loading_label_)
-        loading_label_->setText(loading_is_refresh_ ? tr("Updating plan status...")
-                                                    : tr("Loading plans..."));
+        loading_label_->setText(loading_is_refresh_ ? tr("Updating plan status...") : tr("Loading plans..."));
 }
 
 void PricingScreen::showEvent(QShowEvent* event) {
@@ -173,11 +195,9 @@ void PricingScreen::showEvent(QShowEvent* event) {
         user_info_label_->hide();
 
         // Fetch fresh user data from API, then render once with accurate data
-        auth.refresh_user_data();
-        auto* conn = new QMetaObject::Connection;
+        auto conn = std::make_shared<QMetaObject::Connection>();
         *conn = connect(&auth, &auth::AuthManager::auth_state_changed, this, [this, conn]() {
             disconnect(*conn);
-            delete conn;
 
             loading_label_->hide();
 
@@ -195,6 +215,10 @@ void PricingScreen::showEvent(QShowEvent* event) {
             fetch_plans();
             update_footer();
         });
+        // Connect first, then fire — a cached/synchronous reply would otherwise
+        // emit auth_state_changed before we were listening and leave the screen
+        // stuck on "Updating plan status...".
+        auth.refresh_user_data();
     } else {
         user_info_label_->hide();
         fetched_ = false;
@@ -247,7 +271,7 @@ void PricingScreen::fetch_plans() {
         });
 
         render_plan_cards();
-    });
+    }, this); // context: the reply handler is dropped if the screen is destroyed first
 }
 
 void PricingScreen::refresh_plans() {
@@ -353,8 +377,9 @@ QWidget* PricingScreen::create_plan_card(const auth::SubscriptionPlan& plan, int
         auto* desc = new QLabel(plan.description);
         desc->setWordWrap(true);
         desc->setAlignment(Qt::AlignCenter);
-        desc->setStyleSheet(
-            QString("color: %1; font-size: 12px; background: transparent; %2").arg(ui::colors::TEXT_TERTIARY()).arg(MF));
+        desc->setStyleSheet(QString("color: %1; font-size: 12px; background: transparent; %2")
+                                .arg(ui::colors::TEXT_TERTIARY())
+                                .arg(MF));
         vl->addWidget(desc);
     }
 
@@ -370,7 +395,10 @@ QWidget* PricingScreen::create_plan_card(const auth::SubscriptionPlan& plan, int
                                  .arg(MF));
         vl->addWidget(price);
     } else {
-        auto* price = new QLabel(QString("$%1").arg(plan.price_usd, 0, 'f', 0));
+        // Plan prices are intrinsically USD (not FX-converted), so pin the symbol
+        // to USD rather than following the global currency preference. Preserve the
+        // whole-number format used for plan prices.
+        auto* price = new QLabel(cur::symbol_for("USD") + QString::number(plan.price_usd, 'f', 0));
         price->setAlignment(Qt::AlignCenter);
         price->setStyleSheet(QString("color: %1; font-size: 28px; font-weight: 700; "
                                      "background: transparent; %2")
@@ -416,8 +444,9 @@ QWidget* PricingScreen::create_plan_card(const auth::SubscriptionPlan& plan, int
     for (const auto& feature : plan.features) {
         auto* feat = new QLabel(QString("  %1").arg(feature));
         feat->setWordWrap(true);
-        feat->setStyleSheet(
-            QString("color: %1; font-size: 12px; background: transparent; %2").arg(ui::colors::TEXT_SECONDARY()).arg(MF));
+        feat->setStyleSheet(QString("color: %1; font-size: 12px; background: transparent; %2")
+                                .arg(ui::colors::TEXT_SECONDARY())
+                                .arg(MF));
         vl->addWidget(feat);
     }
 
@@ -487,70 +516,105 @@ void PricingScreen::on_select_plan(const QString& plan_id) {
     }
     error_label_->hide();
 
-    auth::AuthApi::instance().generate_checkout_token(plan_id, [this, plan_id, processing_text, select_text](auth::ApiResponse r) {
-        for (auto* btn : cards_container_->findChildren<QPushButton*>()) {
-            if (btn->text() == processing_text) {
-                btn->setEnabled(true);
-                btn->setText(select_text);
+    auth::AuthApi::instance().generate_checkout_token(
+        plan_id, [this, plan_id, processing_text, select_text](auth::ApiResponse r) {
+            for (auto* btn : cards_container_->findChildren<QPushButton*>()) {
+                if (btn->text() == processing_text) {
+                    btn->setEnabled(true);
+                    btn->setText(select_text);
+                }
             }
-        }
 
-        if (!r.success) {
-            error_label_->setText(r.error.isEmpty() ? tr("Failed to generate checkout token") : r.error);
-            error_label_->show();
-            return;
-        }
+            if (!r.success) {
+                error_label_->setText(r.error.isEmpty() ? tr("Failed to generate checkout token") : r.error);
+                error_label_->show();
+                return;
+            }
 
-        QJsonObject payload = r.data;
-        if (payload.contains("data") && payload["data"].isObject())
-            payload = payload["data"].toObject();
+            QJsonObject payload = r.data;
+            if (payload.contains("data") && payload["data"].isObject())
+                payload = payload["data"].toObject();
 
-        QString token = payload["token"].toString();
-        if (token.isEmpty()) {
-            error_label_->setText(tr("No checkout token received from server"));
-            error_label_->show();
-            return;
-        }
+            QString token = payload["token"].toString();
+            if (token.isEmpty()) {
+                error_label_->setText(tr("No checkout token received from server"));
+                error_label_->show();
+                return;
+            }
 
-        QString url = QString("https://fincept.in/checkout?token=%1&plan=%2")
-                          .arg(QUrl::toPercentEncoding(token), QUrl::toPercentEncoding(plan_id));
-        QDesktopServices::openUrl(QUrl(url));
+            QString url = QString("https://fincept.in/checkout?token=%1&plan=%2")
+                              .arg(QUrl::toPercentEncoding(token), QUrl::toPercentEncoding(plan_id));
+            QDesktopServices::openUrl(QUrl(url));
 
-        // Store plan before payment so we can detect changes
-        awaiting_payment_ = true;
-        awaiting_plan_id_ = plan_id;
-        pre_payment_plan_ = auth::AuthManager::instance().session().account_type().toLower();
+            // Store plan before payment so we can detect changes
+            awaiting_payment_ = true;
+            awaiting_plan_id_ = plan_id;
+            pre_payment_plan_ = auth::AuthManager::instance().session().account_type().toLower();
 
-        // Start polling every 5 seconds to detect plan change
-        if (!payment_poll_timer_) {
-            payment_poll_timer_ = new QTimer(this);
-            payment_poll_timer_->setInterval(1000);
-            connect(payment_poll_timer_, &QTimer::timeout, this, &PricingScreen::poll_payment_status);
-        }
-        payment_poll_timer_->start();
+            // Poll for the plan change. The interval used to be 1000ms despite
+            // the "every 5 seconds" intent, and each tick issued a fresh
+            // refresh_user_data() regardless of whether the previous one had
+            // come back — a request storm against the account endpoint.
+            payment_poll_ticks_ = 0;
+            payment_poll_in_flight_ = false;
+            if (!payment_poll_timer_) {
+                payment_poll_timer_ = new QTimer(this);
+                payment_poll_timer_->setInterval(kPaymentPollIntervalMs);
+                connect(payment_poll_timer_, &QTimer::timeout, this, &PricingScreen::poll_payment_status);
+            }
+            payment_poll_timer_->setInterval(kPaymentPollIntervalMs);
+            payment_poll_timer_->start();
 
-        // Also check on focus return for faster detection
-        if (focus_connection_)
-            disconnect(focus_connection_);
-        focus_connection_ =
-            connect(qApp, &QApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
-                if (state == Qt::ApplicationActive && awaiting_payment_)
-                    poll_payment_status();
-            });
-    });
+            // Also check on focus return for faster detection
+            if (focus_connection_)
+                disconnect(focus_connection_);
+            focus_connection_ =
+                connect(qApp, &QApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
+                    if (state == Qt::ApplicationActive && awaiting_payment_)
+                        poll_payment_status();
+                });
+        },
+        this); // context: this call spans a payment-provider round trip — see AuthApi::request()
+}
+
+void PricingScreen::stop_payment_polling() {
+    awaiting_payment_ = false;
+    payment_poll_in_flight_ = false;
+    payment_poll_ticks_ = 0;
+    if (payment_poll_timer_)
+        payment_poll_timer_->stop();
+    if (focus_connection_) {
+        disconnect(focus_connection_);
+        focus_connection_ = {};
+    }
 }
 
 void PricingScreen::poll_payment_status() {
     if (!awaiting_payment_)
         return;
+    // One request at a time — see payment_poll_in_flight_ in the header.
+    if (payment_poll_in_flight_)
+        return;
+    if (++payment_poll_ticks_ > kMaxPaymentPolls) {
+        LOG_INFO("Pricing", "Payment polling gave up after the maximum window");
+        stop_payment_polling();
+        return;
+    }
 
     auto& auth = auth::AuthManager::instance();
-    auth.refresh_user_data();
+    // refresh_user_data() is a silent no-op for a logged-out session, so no
+    // auth_state_changed would ever clear payment_poll_in_flight_ and the poll
+    // would wedge. A logged-out user has nothing to poll for anyway.
+    if (!auth.is_authenticated()) {
+        stop_payment_polling();
+        return;
+    }
+    payment_poll_in_flight_ = true;
 
-    auto* conn = new QMetaObject::Connection;
+    auto conn = std::make_shared<QMetaObject::Connection>();
     *conn = connect(&auth, &auth::AuthManager::auth_state_changed, this, [this, conn]() {
         disconnect(*conn);
-        delete conn;
+        payment_poll_in_flight_ = false;
 
         auto& mgr = auth::AuthManager::instance();
 
@@ -566,11 +630,7 @@ void PricingScreen::poll_payment_status() {
 
         if (new_plan != pre_payment_plan_) {
             // Plan changed — stop polling, re-render, show confetti
-            awaiting_payment_ = false;
-            if (payment_poll_timer_)
-                payment_poll_timer_->stop();
-            if (focus_connection_)
-                disconnect(focus_connection_);
+            stop_payment_polling();
 
             fetched_ = false;
             fetch_plans();
@@ -580,10 +640,25 @@ void PricingScreen::poll_payment_status() {
             confetti_->show_confetti();
         }
     });
+
+    auth.refresh_user_data();
 }
 
 void PricingScreen::on_app_focus_returned() {
     poll_payment_status();
+}
+
+void PricingScreen::hideEvent(QHideEvent* event) {
+    QWidget::hideEvent(event);
+    // P3: the poll timer must not survive the screen leaving the stack. It used
+    // to keep firing a network request every second for the rest of the session
+    // if the user navigated away from an abandoned checkout.
+    if (event && event->spontaneous())
+        return;
+    if (awaiting_payment_) {
+        LOG_INFO("Pricing", "Pricing screen hidden — stopping payment polling");
+        stop_payment_polling();
+    }
 }
 
 // ── Footer ───────────────────────────────────────────────────────────────────

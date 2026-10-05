@@ -2,6 +2,7 @@
 #include "screens/common/IStatefulScreen.h"
 
 #include <QComboBox>
+#include <QEvent>
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -42,6 +43,9 @@ class AkShareScreen : public QWidget, public IStatefulScreen {
     void restore_state(const QVariantMap& state) override;
     QString state_key() const override { return "akshare"; }
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private slots:
     void on_source_clicked(int index);
     void on_endpoint_clicked(QListWidgetItem* item);
@@ -59,13 +63,21 @@ class AkShareScreen : public QWidget, public IStatefulScreen {
     QWidget* create_data_panel();
     QWidget* create_status_bar();
 
+    /// Re-apply tr() lookups to every widget whose text we keep a handle to.
+    /// Called from changeEvent() on QEvent::LanguageChange.
+    void retranslateUi();
+
     void load_endpoints(const AkShareSource& source);
     void populate_endpoint_list(const QJsonObject& result);
-    void execute_query(const QString& script, const QString& endpoint, const QStringList& args);
-    void display_table_data(const QJsonArray& data);
+    /// `force` skips (and evicts) the 2-minute result cache — used by REFRESH.
+    void execute_query(const QString& script, const QString& endpoint, const QStringList& args, bool force = false);
+    void display_table_data(const QJsonArray& data, const QStringList& columns = {});
     void display_json_data(const QJsonArray& data);
     void display_error(const QString& error);
     void set_loading(bool loading);
+    void run_query(bool force = false);
+    /// Select (without executing) the endpoint remembered by restore_state(), once the list exists.
+    void apply_pending_endpoint();
 
     // Data sources
     QList<AkShareSource> sources_;
@@ -81,11 +93,23 @@ class AkShareScreen : public QWidget, public IStatefulScreen {
     QLineEdit* search_input_ = nullptr;
     QLabel* endpoint_count_ = nullptr;
 
+    // Header (cached for retranslateUi)
+    QLabel* header_title_ = nullptr;
+    QLabel* header_sub_ = nullptr;
+    QLabel* header_badge_ = nullptr;
+    QLabel* empty_state_ = nullptr;
+
     // Parameters
     QLineEdit* param_symbol_ = nullptr;
     QLineEdit* param_start_ = nullptr;
     QLineEdit* param_end_ = nullptr;
     QComboBox* param_period_ = nullptr;
+
+    // Parameter labels (cached for retranslateUi)
+    QLabel* sym_label_ = nullptr;
+    QLabel* start_label_ = nullptr;
+    QLabel* end_label_ = nullptr;
+    QLabel* period_label_ = nullptr;
 
     // Data display
     QStackedWidget* view_stack_ = nullptr;
@@ -98,11 +122,18 @@ class AkShareScreen : public QWidget, public IStatefulScreen {
     QLabel* record_count_ = nullptr;
 
     // Status bar
+    QLabel* status_left_ = nullptr;
     QLabel* status_source_ = nullptr;
     QLabel* status_endpoint_ = nullptr;
 
     bool is_table_view_ = true;
     bool loading_ = false;
+
+    // Bumped whenever the source or the query changes; an async callback that finds a different
+    // value is stale (e.g. the endpoint list of source A arriving after the user moved on to B)
+    // and must not touch the UI.
+    int request_seq_ = 0;
+    QString pending_endpoint_; // endpoint to re-select once the list is populated (restore_state)
 };
 
 } // namespace fincept::screens

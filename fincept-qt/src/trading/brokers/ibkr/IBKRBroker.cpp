@@ -1,15 +1,54 @@
 #include "trading/brokers/ibkr/IBKRBroker.h"
 
+#include "trading/brokers/BrokerClientOrderId.h"
 #include "trading/brokers/BrokerHttp.h"
 
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QTimeZone>
+
+#include <algorithm>
+#include <limits>
 
 namespace fincept::trading {
 
 static int64_t now_ts() {
     return QDateTime::currentSecsSinceEpoch();
+}
+
+// Market-data snapshot fields arrive as strings that may carry a one-letter status prefix
+// ('C' = previous close while the market is shut, 'H' = trading halted): "C189.50".
+// toDouble() on that is 0, which published a 0 last price outside market hours.
+static double ibkr_snapshot_num(const QJsonValue& v) {
+    if (v.isDouble())
+        return v.toDouble();
+    QString s = v.toString().trimmed();
+    while (!s.isEmpty() && s.at(0).isLetter())
+        s.remove(0, 1);
+    s.remove(',');
+    return s.toDouble();
+}
+
+// Field 87 (volume) is abbreviated by the gateway: "435K", "12.5M", "1.2B".
+static double ibkr_snapshot_volume(const QJsonValue& v) {
+    if (v.isDouble())
+        return v.toDouble();
+    QString s = v.toString().trimmed();
+    s.remove(',');
+    if (s.isEmpty())
+        return 0.0;
+    double scale = 1.0;
+    const QChar suffix = s.at(s.size() - 1).toUpper();
+    if (suffix == QLatin1Char('K'))
+        scale = 1e3;
+    else if (suffix == QLatin1Char('M'))
+        scale = 1e6;
+    else if (suffix == QLatin1Char('B'))
+        scale = 1e9;
+    if (scale != 1.0)
+        s.chop(1);
+    return s.toDouble() * scale;
 }
 
 // ---------- Static helpers ----------
@@ -88,7 +127,18 @@ IBKRBroker::HistoryParams IBKRBroker::ibkr_history_params(const QString& resolut
             period = "5y";
     }
 
-    return {bar, period};
+    // Derive startTime from to_date. IBKR anchors the END of the returned window
+    // at startTime (UTC, "YYYYMMDD-HH:mm:ss") and extends backward over `period`.
+    // Use end-of-day UTC so the requested to_date is fully included.
+    // If to_date is empty/invalid, leave start_time empty to preserve the
+    // default "most recent" behavior.
+    QString start_time;
+    if (to.isValid()) {
+        QDateTime end_of_day(to, QTime(23, 59, 59), QTimeZone::UTC);
+        start_time = end_of_day.toString("yyyyMMdd-HH:mm:ss");
+    }
+
+    return {bar, period, start_time};
 }
 
 bool IBKRBroker::is_token_expired(const BrokerHttpResponse& resp) {
@@ -149,22 +199,22 @@ TokenExchangeResponse IBKRBroker::exchange_token(const QString& api_key, const Q
                          {{"Content-Type", "application/json"}, {"Accept", "application/json"}});
 
     if (!resp.success)
-        return {false, "", "", "", "Gateway not reachable at " + gw + ": " + resp.error, ""};
+        return {.success = false, .error = "Gateway not reachable at " + gw + ": " + resp.error};
 
     QJsonDocument doc = QJsonDocument::fromJson(resp.raw_body.toUtf8());
     if (!doc.isObject())
-        return {false, "", "", "", "Gateway: invalid auth status response", ""};
+        return {.success = false, .error = "Gateway: invalid auth status response"};
 
     QJsonObject obj = doc.object();
     bool authenticated = obj.value("authenticated").toBool();
     if (!authenticated) {
-        return {false, "", "", "",
-                "Gateway is running but not authenticated. "
-                "Please log in via the gateway browser interface first.", ""};
+        return {.success = false,
+                .error = "Gateway is running but not authenticated. "
+                         "Please log in via the gateway browser interface first."};
     }
 
     // Store gateway URL as "access_token" — it's the only credential we need at runtime
-    return {true, gw, "", api_key, "", ""};
+    return {.success = true, .access_token = gw, .user_id = api_key};
 }
 
 // ---------- place_order ----------
@@ -193,6 +243,10 @@ OrderPlaceResponse IBKRBroker::place_order(const BrokerCredentials& creds, const
     if (order.stop_price > 0)
         order_obj["auxPrice"] = order.stop_price;
     order_obj["acctId"] = acct;
+    // Customer order id: stable per order intent (UnifiedOrder::client_order_id), so a retry
+    // after an 8s client-side timeout is rejected by IBKR as a duplicate rather than creating a
+    // second live order (see BrokerClientOrderId.h).
+    order_obj["cOID"] = client_order_ref_for(order, 40);
 
     QJsonObject body;
     body["orders"] = QJsonArray{order_obj};
@@ -219,10 +273,41 @@ OrderPlaceResponse IBKRBroker::place_order(const BrokerCredentials& creds, const
     if (arr.isEmpty())
         return {false, "", "place_order: empty response"};
 
-    QJsonObject result = arr[0].toObject();
-    QString order_id = result.value("order_id").toString();
-    if (order_id.isEmpty())
-        order_id = QString::number(result.value("order_id").toVariant().toLongLong());
+    // The array branch above used to skip every check the object branch did, so
+    // an error payload or a confirmation prompt was reported as a placed order,
+    // and a missing order_id degraded to the string "0" — a phantom id the algo
+    // engine then tracked as a real position. Validate the element itself.
+    const QJsonObject result = arr[0].toObject();
+
+    const QString elem_err = result.value("error").toString();
+    if (!elem_err.isEmpty())
+        return {false, "", elem_err};
+
+    // A `message` element is IBKR's pre-submit confirmation dialog (order value
+    // warning, missing market data subscription, ...). The order has NOT been
+    // transmitted — it only goes live after POSTing to /iserver/reply/{id}.
+    if (result.contains("message")) {
+        QStringList msgs;
+        for (const QJsonValue& m : result.value("message").toArray())
+            msgs << m.toString();
+        if (msgs.isEmpty() && result.value("message").isString())
+            msgs << result.value("message").toString();
+        return {false, "",
+                QString("place_order requires confirmation and was NOT transmitted: %1")
+                    .arg(msgs.isEmpty() ? QStringLiteral("(no detail)") : msgs.join(" | "))};
+    }
+
+    // order_id may arrive as a string or a JSON number; large ids must not go
+    // through a double->'g'-format round trip, so convert integrally.
+    const QJsonValue oid_val = result.value("order_id");
+    QString order_id;
+    if (oid_val.isString())
+        order_id = oid_val.toString().trimmed();
+    else if (oid_val.isDouble())
+        order_id = QString::number(static_cast<qint64>(oid_val.toDouble()));
+
+    if (order_id.isEmpty() || order_id == QLatin1String("0"))
+        return {false, "", "place_order: broker returned no order id — order not confirmed placed"};
 
     return {true, order_id, ""};
 }
@@ -391,8 +476,13 @@ ApiResponse<QVector<BrokerPosition>> IBKRBroker::get_positions(const BrokerCrede
         pos.pnl = o.value("unrealizedPnl").toDouble();
         pos.day_pnl = o.value("realizedPnl").toDouble();
         pos.side = qty > 0 ? "LONG" : "SHORT";
-        if (pos.avg_price > 0)
-            pos.pnl_pct = (pos.ltp - pos.avg_price) / pos.avg_price * 100.0;
+        // avgCost is per-contract cost INCLUDING the contract multiplier (e.g. ×100
+        // for options) while mktPrice is the raw unit price — a price-based % mixes
+        // scales. Compute the % from values instead: invested = qty*avgCost (correctly
+        // scaled), current = API mktValue (already correctly scaled).
+        const double invested_value = qty * pos.avg_price;
+        const double current_value = o.value("mktValue").toDouble();
+        pos.pnl_pct = (invested_value > 0.0) ? ((current_value - invested_value) / invested_value) * 100.0 : 0.0;
         positions.append(pos);
     }
 
@@ -433,8 +523,10 @@ ApiResponse<QVector<BrokerHolding>> IBKRBroker::get_holdings(const BrokerCredent
         h.pnl = o.value("unrealizedPnl").toDouble();
         h.invested_value = qty * h.avg_price;
         h.current_value = o.value("mktValue").toDouble();
-        if (h.invested_value > 0)
-            h.pnl_pct = h.pnl / h.invested_value * 100.0;
+        // avgCost bakes in the contract multiplier while mktPrice is the raw unit
+        // price, so a price-based % mixes scales. Derive the % from the (correctly
+        // scaled) values: invested = qty*avgCost, current = API mktValue.
+        h.pnl_pct = (h.invested_value > 0.0) ? ((h.current_value - h.invested_value) / h.invested_value) * 100.0 : 0.0;
         holdings.append(h);
     }
 
@@ -523,12 +615,16 @@ ApiResponse<QVector<BrokerQuote>> IBKRBroker::get_quotes(const BrokerCredentials
         BrokerQuote quote;
         quote.symbol = conid_to_name.value(conid, conid);
         // Field codes returned as string keys "31", "70" etc.
-        quote.ltp = o.value("31").toString().toDouble();
-        quote.high = o.value("70").toString().toDouble();
-        quote.low = o.value("71").toString().toDouble();
-        quote.open = o.value("7295").toString().toDouble();
-        quote.close = o.value("7296").toString().toDouble();
-        quote.volume = o.value("87").toString().toLongLong();
+        quote.ltp = ibkr_snapshot_num(o.value("31"));
+        quote.high = ibkr_snapshot_num(o.value("70"));
+        quote.low = ibkr_snapshot_num(o.value("71"));
+        quote.open = ibkr_snapshot_num(o.value("7295"));
+        quote.close = ibkr_snapshot_num(o.value("7296"));
+        quote.volume = ibkr_snapshot_volume(o.value("87"));
+        // The gateway's FIRST snapshot call for a conid only opens the stream and carries no
+        // fields. Don't publish that as a 0.00 quote; the next poll returns the data.
+        if (quote.ltp <= 0.0 && quote.open <= 0.0 && quote.close <= 0.0)
+            continue;
         if (quote.close > 0)
             quote.change_pct = (quote.ltp - quote.close) / quote.close * 100.0;
         quote.change = quote.ltp - quote.close;
@@ -555,39 +651,114 @@ ApiResponse<QVector<BrokerCandle>> IBKRBroker::get_history(const BrokerCredentia
 
     auto params = ibkr_history_params(resolution, from_date, to_date);
 
-    QString url = gw + "/v1/api/iserver/marketdata/history?conid=" + conid + "&period=" + params.period +
-                  "&bar=" + params.bar + "&outsideRth=false";
-
     auto& http = BrokerHttp::instance();
-    auto resp = http.get(url, auth_headers(creds));
+    auto headers = auth_headers(creds);
 
-    if (!resp.success)
-        return {false, std::nullopt, checked_error(resp, "get_history failed"), ts};
+    // Single fetch+parse for one window ending at `start_time` (UTC "YYYYMMDD-HH:mm:ss").
+    // An empty `start_time` preserves the gateway's default "most recent" window.
+    // `ok` distinguishes a transport/gateway failure from a successful empty page.
+    struct PageResult {
+        bool ok = false;
+        QString error;
+        QVector<BrokerCandle> candles;
+    };
+    auto fetch_page = [&](const QString& start_time) -> PageResult {
+        QString url = gw + "/v1/api/iserver/marketdata/history?conid=" + conid + "&period=" + params.period +
+                      "&bar=" + params.bar + "&outsideRth=false";
 
-    QJsonDocument doc = QJsonDocument::fromJson(resp.raw_body.toUtf8());
-    if (!doc.isObject())
-        return {false, std::nullopt, "get_history: invalid response", ts};
+        // Anchor the END of the returned window at this page's start_time when provided.
+        if (!start_time.isEmpty())
+            url += "&startTime=" + start_time;
 
-    QJsonObject obj = doc.object();
-    if (!obj.value("error").toString().isEmpty())
-        return {false, std::nullopt, obj.value("error").toString(), ts};
+        auto resp = http.get(url, headers);
+        if (!resp.success)
+            return {false, checked_error(resp, "get_history failed"), {}};
 
-    // Response: {data: [{t, o, h, l, c, v}, ...]}
-    QJsonArray arr = obj.value("data").toArray();
-    QVector<BrokerCandle> candles;
-    candles.reserve(arr.size());
+        QJsonDocument doc = QJsonDocument::fromJson(resp.raw_body.toUtf8());
+        if (!doc.isObject())
+            return {false, "get_history: invalid response", {}};
 
-    for (const QJsonValue& v : arr) {
-        QJsonObject o = v.toObject();
-        BrokerCandle c;
-        // t is epoch milliseconds
-        c.timestamp = static_cast<int64_t>(o.value("t").toDouble());
-        c.open = o.value("o").toDouble();
-        c.high = o.value("h").toDouble();
-        c.low = o.value("l").toDouble();
-        c.close = o.value("c").toDouble();
-        c.volume = static_cast<int64_t>(o.value("v").toDouble());
-        candles.append(c);
+        QJsonObject obj = doc.object();
+        if (!obj.value("error").toString().isEmpty())
+            return {false, obj.value("error").toString(), {}};
+
+        // Response: {data: [{t, o, h, l, c, v}, ...]}
+        QJsonArray arr = obj.value("data").toArray();
+        QVector<BrokerCandle> page;
+        page.reserve(arr.size());
+        for (const QJsonValue& v : arr) {
+            QJsonObject o = v.toObject();
+            BrokerCandle c;
+            // t is epoch milliseconds
+            c.timestamp = static_cast<int64_t>(o.value("t").toDouble());
+            c.open = o.value("o").toDouble();
+            c.high = o.value("h").toDouble();
+            c.low = o.value("l").toDouble();
+            c.close = o.value("c").toDouble();
+            c.volume = static_cast<int64_t>(o.value("v").toDouble());
+            page.append(c);
+        }
+        return {true, "", page};
+    };
+
+    // ---- First request: ends at startTime=to_date, covers `period` (unchanged single-call). ----
+    PageResult first = fetch_page(params.start_time);
+    if (!first.ok)
+        return {false, std::nullopt, first.error, ts};
+
+    QVector<BrokerCandle> candles = first.candles;
+
+    // ---- Backward paging for long fine-grained ranges ----
+    // IBKR returns at most ~1000 bars per request. If the first page is full AND its
+    // oldest bar is still newer than from_date, walk backward by re-anchoring startTime
+    // just before the oldest bar until we reach from_date / run out of data / hit the cap.
+    // Only engage when both dates are valid (otherwise keep single-request behavior).
+    constexpr int kFullPage = 1000;    // page size at/above which more data may exist
+    constexpr int kMaxIterations = 30; // safety cap on extra requests
+
+    QDate from_d = QDate::fromString(from_date, "yyyy-MM-dd");
+    QDate to_d = QDate::fromString(to_date, "yyyy-MM-dd");
+    if (from_d.isValid() && to_d.isValid()) {
+        // from_date lower bound in epoch milliseconds (start-of-day UTC) to match bar timestamps.
+        const int64_t from_ms = QDateTime(from_d, QTime(0, 0, 0), QTimeZone::UTC).toMSecsSinceEpoch();
+
+        auto oldest_ms = [](const QVector<BrokerCandle>& page) -> int64_t {
+            int64_t m = std::numeric_limits<int64_t>::max();
+            for (const auto& c : page)
+                m = std::min(m, c.timestamp);
+            return m;
+        };
+
+        QVector<BrokerCandle> page = first.candles;
+        int iterations = 0;
+        while (!page.isEmpty() && page.size() >= kFullPage && iterations < kMaxIterations) {
+            int64_t oldest = oldest_ms(page);
+            if (oldest <= from_ms)
+                break; // reached the requested start of the range
+
+            // Re-anchor: end the next window one second before the oldest bar (UTC).
+            QDateTime anchor = QDateTime::fromMSecsSinceEpoch(oldest, QTimeZone::UTC).addSecs(-1);
+            PageResult next = fetch_page(anchor.toString("yyyyMMdd-HH:mm:ss"));
+            if (!next.ok)
+                break; // later-page failure: stop and keep what we collected
+            if (next.candles.isEmpty())
+                break; // no more data
+
+            candles += next.candles;
+            page = next.candles;
+            ++iterations;
+        }
+
+        // Merge: sort ascending, dedupe identical timestamps, drop bars older than from_date.
+        std::sort(candles.begin(), candles.end(),
+                  [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp < b.timestamp; });
+        candles.erase(
+            std::unique(candles.begin(), candles.end(),
+                        [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp == b.timestamp; }),
+            candles.end());
+        candles.erase(std::remove_if(candles.begin(), candles.end(),
+                                     [from_ms](const BrokerCandle& c) { return c.timestamp < from_ms; }),
+                      candles.end());
     }
 
     return {true, candles, "", ts};

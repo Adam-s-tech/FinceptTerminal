@@ -1,8 +1,10 @@
 #pragma once
 
+#include <QEvent>
 #include <QTimer>
 #include <QWidget>
 
+class QLineEdit;
 class QTableWidget;
 
 namespace fincept::screens::devtools {
@@ -18,10 +20,13 @@ class DataHubInspector : public QWidget {
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     void refresh();
+    void retranslateUi();
 
+    QLineEdit* filter_edit_ = nullptr; // substring filter over the topic column
     QTableWidget* table_ = nullptr;
     QTimer refresh_timer_;
     bool initial_sized_ = false;

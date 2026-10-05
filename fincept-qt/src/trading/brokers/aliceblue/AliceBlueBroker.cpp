@@ -1,13 +1,17 @@
 #include "trading/brokers/aliceblue/AliceBlueBroker.h"
 
 #include "trading/adapter/BrokerEnumMap.h"
+#include "trading/brokers/BrokerClientOrderId.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
+#include "trading/instruments/InstrumentService.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QTimeZone>
 
 namespace fincept::trading {
 
@@ -17,6 +21,13 @@ static const char* API_BASE = "https://a3.aliceblueonline.com";
 
 static int64_t now_ts() {
     return QDateTime::currentSecsSinceEpoch();
+}
+
+// The vendor API is not consistent about JSON number vs numeric-string between endpoints.
+// toInt()/toDouble() on the wrong one silently read 0 (a position skipped as flat, a 0 price);
+// toVariant().toDouble() accepts both.
+static double ab_num(const QJsonValue& v) {
+    return v.toVariant().toDouble();
 }
 
 // ============================================================================
@@ -127,19 +138,26 @@ TokenExchangeResponse AliceBlueBroker::exchange_token(const QString& api_key, co
     auto resp = BrokerHttp::instance().post_json(AUTH_URL, body, headers);
 
     if (!resp.success)
-        return {false, "", "", "", checked_error(resp, "Network error"), ""};
+        return {.success = false, .error = checked_error(resp, "Network error")};
 
     QString stat = resp.json["stat"].toString();
     if (stat != "Ok")
-        return {false, "", "", "", checked_error(resp, "Authentication failed"), ""};
+        return {.success = false, .error = checked_error(resp, "Authentication failed")};
 
     QString session = resp.json["userSession"].toString();
     QString client_id = resp.json["clientId"].toString();
 
     if (session.isEmpty())
-        return {false, "", "", "", "No userSession in response", ""};
+        return {.success = false, .error = "No userSession in response"};
 
-    return {true, session, client_id, "", "", ""};
+    // AliceBlue session tokens are flushed at the daily reset; the live sweep is
+    // authoritative — this is only a startup hint. No silent refresh (re-auth
+    // needs a fresh web-login auth code).
+    const QString extra = with_token_expiry({}, next_ist_flush_epoch(6, 0));
+    // clientId is the account identifier, not a refresh token — it used to be
+    // passed positionally into the refresh_token slot, which left user_id empty
+    // everywhere the account is displayed or reconciled.
+    return {.success = true, .access_token = session, .user_id = client_id, .additional_data = extra};
 }
 
 // ============================================================================
@@ -149,9 +167,23 @@ TokenExchangeResponse AliceBlueBroker::exchange_token(const QString& api_key, co
 OrderPlaceResponse AliceBlueBroker::place_order(const BrokerCredentials& creds, const UnifiedOrder& order) {
     auto hdrs = auth_headers(creds);
 
-    // instrumentId must be the numeric exchange token (string)
-    // InstrumentService lookup would go here in production; use "0" as fallback
-    QString instrument_id = order.instrument_token.isEmpty() ? "0" : order.instrument_token;
+    // instrumentId must be the numeric exchange token (string) — it is the ONLY symbol
+    // identifier in the vendor placeorder payload. The equity ticket does not carry one
+    // (only the F&O chain fills UnifiedOrder::instrument_token), so resolve it from the
+    // instrument master exactly as get_history() does. Sending the old "0" placeholder
+    // could never match a contract; refuse instead of transmitting it.
+    QString instrument_id = order.instrument_token;
+    if (instrument_id.isEmpty() || instrument_id == QLatin1String("0")) {
+        instrument_id.clear();
+        const QString bid = creds.broker_id.isEmpty() ? QStringLiteral("aliceblue") : creds.broker_id;
+        const auto tok = InstrumentService::instance().instrument_token(order.symbol, order.exchange, bid);
+        if (tok.has_value() && tok.value() > 0)
+            instrument_id = QString::number(static_cast<qlonglong>(tok.value()));
+    }
+    if (instrument_id.isEmpty())
+        return {false, "",
+                "AliceBlue place_order: instrument token not found for " + order.exchange + ":" + order.symbol +
+                    " (instrument master not loaded yet?)"};
 
     QJsonObject item;
     item["exchange"] = order.exchange;
@@ -174,7 +206,9 @@ OrderPlaceResponse AliceBlueBroker::place_order(const BrokerCredentials& creds, 
     item["trailingSlAmount"] = "";
     item["apiOrderSource"] = "";
     item["algoId"] = "";
-    item["orderTag"] = "fincept";
+    // Stable per order intent (UnifiedOrder::client_order_id) so a retry after an 8s
+    // client-side timeout carries the same reference (see BrokerClientOrderId.h).
+    item["orderTag"] = client_order_ref_for(order, 20);
 
     // API expects an array of one item
     QJsonArray payload;
@@ -309,10 +343,10 @@ ApiResponse<QVector<BrokerOrderInfo>> AliceBlueBroker::get_orders(const BrokerCr
         info.symbol = o["formattedInstrumentName"].toString().isEmpty() ? o["tradingSymbol"].toString()
                                                                         : o["formattedInstrumentName"].toString();
         info.exchange = o["exchange"].toString();
-        info.quantity = o["quantity"].toInt();
-        info.filled_qty = o["filledQuantity"].toInt();
-        info.price = o["price"].toDouble();
-        info.trigger_price = o["slTriggerPrice"].toDouble();
+        info.quantity = ab_num(o["quantity"]);
+        info.filled_qty = ab_num(o["filledQuantity"]);
+        info.price = ab_num(o["price"]);
+        info.trigger_price = ab_num(o["slTriggerPrice"]);
         info.status = parse_status(o["orderStatus"].toString());
         info.side = (o["transactionType"].toString() == "BUY") ? "buy" : "sell";
         info.order_type = o["orderType"].toString();
@@ -362,8 +396,8 @@ ApiResponse<QVector<BrokerPosition>> AliceBlueBroker::get_positions(const Broker
 
     for (const auto& item : results) {
         QJsonObject p = item.toObject();
-        int net_qty = p["netQuantity"].toInt();
-        if (net_qty == 0)
+        const double net_qty = ab_num(p["netQuantity"]);
+        if (net_qty == 0.0)
             continue;
 
         BrokerPosition pos;
@@ -371,10 +405,15 @@ ApiResponse<QVector<BrokerPosition>> AliceBlueBroker::get_positions(const Broker
                                                              : p["tradingSymbol"].toString();
         pos.exchange = p["exchange"].toString();
         pos.quantity = net_qty;
-        pos.avg_price = p["dayBuyPrice"].toDouble() > 0 ? p["dayBuyPrice"].toDouble() : p["netAveragePrice"].toDouble();
-        pos.ltp = p["ltp"].toDouble();
-        pos.pnl = p["unrealisedPnl"].toDouble();
+        pos.avg_price = ab_num(p["dayBuyPrice"]) > 0 ? ab_num(p["dayBuyPrice"]) : ab_num(p["netAveragePrice"]);
+        pos.ltp = ab_num(p["ltp"]);
+        pos.pnl = ab_num(p["unrealisedPnl"]);
+        pos.pnl_pct = (pos.avg_price > 0.0) ? ((pos.ltp - pos.avg_price) / pos.avg_price) * 100.0 : 0.0;
         pos.product_type = p["product"].toString();
+        // netQuantity carries the sign, but PortfolioReplicationService takes
+        // fabs() of quantity and reads direction from `side` alone — leaving it
+        // empty replicated every short as a long and inverted its P&L.
+        pos.side = net_qty > 0 ? "LONG" : "SHORT";
         positions.append(pos);
     }
 
@@ -389,8 +428,7 @@ ApiResponse<QVector<BrokerHolding>> AliceBlueBroker::get_holdings(const BrokerCr
     // /open-api/od/v1/holdings/{productType} only returns one product at a time.
     // Call both CNC (delivery) and MTF (margin trading facility) and merge.
     auto fetch = [&](const QString& product_type) -> std::optional<QString> {
-        auto resp = BrokerHttp::instance().get(
-            QString(API_BASE) + "/open-api/od/v1/holdings/" + product_type, hdrs);
+        auto resp = BrokerHttp::instance().get(QString(API_BASE) + "/open-api/od/v1/holdings/" + product_type, hdrs);
 
         if (!resp.success)
             return checked_error(resp, "Network error");
@@ -415,13 +453,15 @@ ApiResponse<QVector<BrokerHolding>> AliceBlueBroker::get_holdings(const BrokerCr
                 continue;
             QString exchange = nse_sym.isEmpty() ? "BSE" : "NSE";
 
-            int qty = h["dpQuantity"].toInt();
-            if (qty == 0)
-                qty = h["totalQuantity"].toInt();
-            double avg_price = h["averageTradedPrice"].toDouble();
+            // totalQuantity is the true total holding (settled + T1); dpQuantity is
+            // settled-only and would drop unsettled T1 quantity.
+            double qty = ab_num(h["totalQuantity"]);
+            if (qty == 0.0)
+                qty = ab_num(h["dpQuantity"]);
+            double avg_price = ab_num(h["averageTradedPrice"]);
             if (avg_price == 0.0)
-                avg_price = h["investedPrice"].toDouble();
-            double ltp = h["ltp"].toDouble();
+                avg_price = ab_num(h["investedPrice"]);
+            double ltp = ab_num(h["ltp"]);
 
             BrokerHolding holding;
             holding.symbol = symbol;
@@ -466,9 +506,9 @@ ApiResponse<BrokerFunds> AliceBlueBroker::get_funds(const BrokerCredentials& cre
         return {false, std::nullopt, "Empty limits response", ts};
 
     QJsonObject item = results[0].toObject();
-    double trading_limit = item["tradingLimit"].toDouble();
-    double collateral = item["collateralMargin"].toDouble();
-    double utilized = item["utilizedMargin"].toDouble();
+    double trading_limit = ab_num(item["tradingLimit"]);
+    double collateral = ab_num(item["collateralMargin"]);
+    double utilized = ab_num(item["utilizedMargin"]);
 
     BrokerFunds funds;
     funds.available_balance = trading_limit + collateral;
@@ -496,28 +536,43 @@ ApiResponse<QVector<BrokerCandle>> AliceBlueBroker::get_history(const BrokerCred
     int64_t ts = now_ts();
     auto hdrs = auth_headers(creds);
 
-    // BSE historical data not supported by AliceBlue
+    // Parse "EXCHANGE:SYMBOL[:TOKEN]". Exchange defaults to NSE when omitted; an
+    // explicit third part is taken as the numeric instrument token.
     QString exchange = "NSE";
     QString trading_symbol = symbol;
-    int colon = symbol.indexOf(':');
-    if (colon != -1) {
-        exchange = symbol.left(colon);
-        trading_symbol = symbol.mid(colon + 1);
-    }
-    if (exchange == "BSE" || exchange == "BCD")
-        return {false, std::nullopt, "AliceBlue does not support BSE historical data", ts};
-
-    // instrument_token should be passed in from the caller via symbol "NSE:RELIANCE:3045"
-    // For now accept "EXCHANGE:SYMBOL:TOKEN" format if colon count == 2
     QString instrument_token;
-    QStringList parts = symbol.split(':');
-    if (parts.size() == 3) {
+    const QStringList parts = symbol.split(':');
+    if (parts.size() == 1) {
+        trading_symbol = parts[0];
+    } else if (parts.size() == 2) {
         exchange = parts[0];
         trading_symbol = parts[1];
-        instrument_token = parts[2];
+    } else if (parts.size() >= 3) {
+        exchange = parts[0];
+        trading_symbol = parts[1];
+        instrument_token = parts[2]; // explicit token overrides lookup
+    }
+
+    // AliceBlue's chart endpoint serves NSE/NFO/CDS/MCX only. BSE, BCD and BFO
+    // candle data are "added later" per the official ANT docs — reject early with
+    // a clear message rather than letting the server return stat:"Not_Ok".
+    if (exchange != "NSE" && exchange != "NFO" && exchange != "CDS" && exchange != "MCX")
+        return {false, std::nullopt,
+                "AliceBlue historical data is available only for NSE/NFO/CDS/MCX (got " + exchange + ")", ts};
+
+    // Resolve the numeric instrument token from InstrumentService when the caller
+    // didn't pass an explicit "EXCHANGE:SYMBOL:TOKEN" — parity with Zerodha so a
+    // plain "NSE:RELIANCE" works once instruments are loaded.
+    if (instrument_token.isEmpty()) {
+        auto tok = InstrumentService::instance().instrument_token(trading_symbol, exchange, creds.broker_id);
+        if (tok.has_value() && tok.value() > 0)
+            instrument_token = QString::number(static_cast<qlonglong>(tok.value()));
     }
     if (instrument_token.isEmpty())
-        return {false, std::nullopt, "AliceBlue requires instrument token for historical data", ts};
+        return {false, std::nullopt,
+                "AliceBlue get_history: instrument token not found for " + symbol +
+                    " (load instruments first, or pass EXCHANGE:SYMBOL:TOKEN)",
+                ts};
 
     // Convert YYYY-MM-DD to Unix milliseconds (IST 09:15 start, 23:59 end)
     auto to_epoch_ms = [](const QString& date_str, bool is_end) -> QString {
@@ -528,9 +583,8 @@ ApiResponse<QVector<BrokerCandle>> AliceBlueBroker::get_history(const BrokerCred
             dt.setTime(QTime(23, 59, 59));
         else
             dt.setTime(QTime(9, 15, 0));
-        // IST = UTC+5:30 → subtract 5h30m to get UTC, then ms
-        qint64 epoch_ms = dt.toMSecsSinceEpoch() - (5 * 3600 + 30 * 60) * 1000LL;
-        return QString::number(epoch_ms);
+        dt.setTimeZone(QTimeZone(19800)); // interpret wall-clock as IST (+5:30)
+        return QString::number(dt.toMSecsSinceEpoch());
     };
 
     QString res = ab_resolution(resolution);
@@ -564,12 +618,14 @@ ApiResponse<QVector<BrokerCandle>> AliceBlueBroker::get_history(const BrokerCred
         QJsonObject c = item.toObject();
         BrokerCandle candle;
         // Response fields: time (YYYY-MM-DD HH:MM:SS), open, high, low, close, volume
-        candle.timestamp = QDateTime::fromString(c["time"].toString(), "yyyy-MM-dd HH:mm:ss").toMSecsSinceEpoch();
-        candle.open = c["open"].toDouble();
-        candle.high = c["high"].toDouble();
-        candle.low = c["low"].toDouble();
-        candle.close = c["close"].toDouble();
-        candle.volume = c["volume"].toDouble();
+        QDateTime dt = QDateTime::fromString(c["time"].toString(), "yyyy-MM-dd HH:mm:ss");
+        dt.setTimeZone(QTimeZone(19800)); // interpret wall-clock as IST (+5:30)
+        candle.timestamp = dt.toMSecsSinceEpoch();
+        candle.open = ab_num(c["open"]);
+        candle.high = ab_num(c["high"]);
+        candle.low = ab_num(c["low"]);
+        candle.close = ab_num(c["close"]);
+        candle.volume = ab_num(c["volume"]);
         result.append(candle);
     }
 

@@ -4,11 +4,13 @@
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 
 #include <cmath>
 
@@ -30,12 +32,12 @@ static QString rel_time(const QString& iso) {
     if (sec < 0)
         sec = 0;
     if (sec < 60)
-        return QString("%1s ago").arg(sec);
+        return QCoreApplication::translate("ForumFeedPanel", "%1s ago").arg(sec);
     if (sec < 3600)
-        return QString("%1m ago").arg(sec / 60);
+        return QCoreApplication::translate("ForumFeedPanel", "%1m ago").arg(sec / 60);
     if (sec < 86400)
-        return QString("%1h ago").arg(sec / 3600);
-    return QString("%1d ago").arg(sec / 86400);
+        return QCoreApplication::translate("ForumFeedPanel", "%1h ago").arg(sec / 3600);
+    return QCoreApplication::translate("ForumFeedPanel", "%1d ago").arg(sec / 86400);
 }
 
 static QString det_color(const QString& s) {
@@ -88,7 +90,18 @@ void ForumFeedPanel::build_ui() {
 
     // Posts container
     posts_container_ = new QWidget(this);
-    posts_container_->setStyleSheet("background:transparent;");
+    // One sheet for the container and the load-error state (see set_error()), so
+    // the error widgets need no inline styling of their own.
+    posts_container_->setStyleSheet(QString("QWidget{background:transparent;}"
+                                            "QLabel#forumFeedErrorIcon{color:%1;font-size:32px;}"
+                                            "QLabel#forumFeedErrorMsg{color:%2;font-weight:700;%3}"
+                                            "QPushButton#forumFeedErrorRetry{background:rgba(217,119,6,0.1);"
+                                            "color:%4;border:1px solid rgba(217,119,6,0.25);padding:0 20px;"
+                                            "font-weight:700;%5}"
+                                            "QPushButton#forumFeedErrorRetry:hover{"
+                                            "background:rgba(217,119,6,0.2);color:%6;}")
+                                        .arg(ui::colors::NEGATIVE(), ui::colors::TEXT_TERTIARY(), M(13),
+                                             ui::colors::TEXT_SECONDARY(), M(11), ui::colors::AMBER()));
     posts_vl_ = new QVBoxLayout(posts_container_);
     posts_vl_->setContentsMargins(0, 0, 0, 0);
     posts_vl_->setSpacing(0);
@@ -128,7 +141,8 @@ void ForumFeedPanel::build_toolbar() {
     hash->setStyleSheet(
         QString("color:%1;font-size:22px;font-weight:700;background:transparent;%2").arg(ui::colors::AMBER(), M(22)));
 
-    header_lbl_ = new QLabel("DISCUSSIONS");
+    header_lbl_ = new QLabel(tr("DISCUSSIONS"));
+    header_lbl_->setTextFormat(Qt::PlainText); // category names / search text are not markup
     header_lbl_->setStyleSheet(QString("color:%1;font-size:15px;font-weight:700;letter-spacing:1px;"
                                        "background:transparent;%2")
                                    .arg(ui::colors::TEXT_PRIMARY(), M(15)));
@@ -138,22 +152,22 @@ void ForumFeedPanel::build_toolbar() {
         QString("color:%1;font-size:11px;background:transparent;%2").arg(ui::colors::TEXT_TERTIARY(), M(11)));
 
     // New post button
-    auto* new_btn = new QPushButton("+ NEW POST");
-    new_btn->setFixedHeight(30);
-    new_btn->setCursor(Qt::PointingHandCursor);
-    new_btn->setStyleSheet(QString("QPushButton{background:rgba(217,119,6,0.1);color:%1;"
-                                   "border:1px solid rgba(217,119,6,0.25);padding:0 16px;"
-                                   "font-size:11px;font-weight:700;letter-spacing:0.5px;%2}"
-                                   "QPushButton:hover{background:rgba(217,119,6,0.2);color:%3;"
-                                   "border-color:rgba(217,119,6,0.5);}")
-                               .arg(ui::colors::TEXT_SECONDARY(), M(11), ui::colors::AMBER()));
-    connect(new_btn, &QPushButton::clicked, this, [this]() { emit new_post_clicked(); });
+    new_post_btn_ = new QPushButton(tr("+ NEW POST"));
+    new_post_btn_->setFixedHeight(30);
+    new_post_btn_->setCursor(Qt::PointingHandCursor);
+    new_post_btn_->setStyleSheet(QString("QPushButton{background:rgba(217,119,6,0.1);color:%1;"
+                                         "border:1px solid rgba(217,119,6,0.25);padding:0 16px;"
+                                         "font-size:11px;font-weight:700;letter-spacing:0.5px;%2}"
+                                         "QPushButton:hover{background:rgba(217,119,6,0.2);color:%3;"
+                                         "border-color:rgba(217,119,6,0.5);}")
+                                     .arg(ui::colors::TEXT_SECONDARY(), M(11), ui::colors::AMBER()));
+    connect(new_post_btn_, &QPushButton::clicked, this, [this]() { emit new_post_clicked(); });
 
     top_hl->addWidget(hash);
     top_hl->addWidget(header_lbl_);
     top_hl->addWidget(header_count_lbl_);
     top_hl->addStretch();
-    top_hl->addWidget(new_btn);
+    top_hl->addWidget(new_post_btn_);
     tb_vl->addWidget(top_row);
 
     // ── Bottom row: scrollable category chips ─────────────────────────────────
@@ -213,6 +227,21 @@ void ForumFeedPanel::set_loading(bool on) {
     }
 }
 
+// P3: a request that never returns used to leave the 350 ms skeleton animation
+// (a setStyleSheet storm across ~18 widgets per tick) running forever behind a
+// hidden screen.
+void ForumFeedPanel::showEvent(QShowEvent* e) {
+    QWidget::showEvent(e);
+    if (skeleton_w_ && skeleton_timer_)
+        skeleton_timer_->start();
+}
+
+void ForumFeedPanel::hideEvent(QHideEvent* e) {
+    QWidget::hideEvent(e);
+    if (skeleton_timer_)
+        skeleton_timer_->stop();
+}
+
 void ForumFeedPanel::clear_active() {
     active_uuid_.clear();
 }
@@ -222,6 +251,14 @@ void ForumFeedPanel::set_active_post(const QString& uuid) {
 }
 
 void ForumFeedPanel::set_posts(const services::ForumPostsPage& pg, const QString& cc) {
+    // A reload of the SAME list (after a vote) keeps the reading position; a
+    // different list (category / page / search) starts at the top — the scroll
+    // value used to carry over unchanged between unrelated lists.
+    const bool same_list = !page_.posts.isEmpty() && !pg.posts.isEmpty() && page_.page == pg.page &&
+                           page_.posts.first().post_uuid == pg.posts.first().post_uuid;
+    QScrollBar* bar = scroll_ ? scroll_->verticalScrollBar() : nullptr;
+    const int keep = (same_list && bar) ? bar->value() : 0;
+
     page_ = pg;
     cat_color_ = cc;
     skeleton_timer_->stop();
@@ -230,6 +267,54 @@ void ForumFeedPanel::set_posts(const services::ForumPostsPage& pg, const QString
         skeleton_w_ = nullptr;
     }
     rebuild_posts();
+    if (bar)
+        QTimer::singleShot(0, bar, [bar, keep]() { bar->setValue(keep); }); // after the new layout settles
+}
+
+void ForumFeedPanel::set_error(const QString& message) {
+    skeleton_timer_->stop();
+    if (skeleton_w_) {
+        skeleton_w_->deleteLater();
+        skeleton_w_ = nullptr;
+    }
+    page_ = {};
+    posts_container_->setUpdatesEnabled(false);
+    while (posts_vl_->count() > 0) {
+        auto* item = posts_vl_->takeAt(0);
+        if (item->widget())
+            item->widget()->deleteLater();
+        delete item;
+    }
+    header_count_lbl_->clear();
+
+    // Styled by the posts container's sheet via these object names.
+    auto* box = new QWidget(this);
+    box->setMinimumHeight(200);
+    auto* vl = new QVBoxLayout(box);
+    vl->setAlignment(Qt::AlignCenter);
+    vl->setSpacing(10);
+
+    auto* icon = new QLabel(QStringLiteral("!"));
+    icon->setObjectName("forumFeedErrorIcon");
+    icon->setAlignment(Qt::AlignCenter);
+
+    auto* msg = new QLabel(message);
+    msg->setObjectName("forumFeedErrorMsg");
+    msg->setTextFormat(Qt::PlainText);
+    msg->setWordWrap(true);
+    msg->setAlignment(Qt::AlignCenter);
+
+    auto* retry = new QPushButton(tr("RETRY"));
+    retry->setObjectName("forumFeedErrorRetry");
+    retry->setFixedHeight(30);
+    retry->setCursor(Qt::PointingHandCursor);
+    connect(retry, &QPushButton::clicked, this, [this]() { emit retry_requested(); });
+
+    vl->addWidget(icon);
+    vl->addWidget(msg);
+    vl->addWidget(retry, 0, Qt::AlignHCenter);
+    posts_vl_->addWidget(box);
+    posts_container_->setUpdatesEnabled(true);
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -245,9 +330,10 @@ void ForumFeedPanel::rebuild_category_chips() {
 
     for (const auto& cat : categories_) {
         const bool active = (cat.id == active_cat_id_);
-        QString cc = cat.color.isEmpty() ? ui::colors::AMBER() : cat.color;
+        QString cc = services::forum_safe_color(cat.color, ui::colors::AMBER());
 
-        auto* chip = new QPushButton(cat.name.toUpper());
+        // '&' in a button label is a mnemonic marker ("R&D" would lose the '&').
+        auto* chip = new QPushButton(cat.name.toUpper().replace('&', "&&"));
         chip->setFixedHeight(24);
         chip->setCursor(Qt::PointingHandCursor);
         chip->setStyleSheet(active ? QString("QPushButton{background:%1;color:%2;"
@@ -284,7 +370,7 @@ void ForumFeedPanel::rebuild_posts() {
         delete item;
     }
 
-    header_count_lbl_->setText(page_.total > 0 ? QString("%1 posts").arg(page_.total) : "");
+    header_count_lbl_->setText(page_.total > 0 ? tr("%1 posts").arg(page_.total) : QString());
 
     if (page_.posts.isEmpty()) {
         auto* empty = new QWidget(this);
@@ -298,13 +384,13 @@ void ForumFeedPanel::rebuild_posts() {
         icon->setAlignment(Qt::AlignCenter);
         icon->setStyleSheet(QString("color:%1;font-size:32px;background:transparent;").arg(ui::colors::BORDER_DIM()));
 
-        auto* msg = new QLabel("NO DISCUSSIONS YET");
+        auto* msg = new QLabel(tr("NO DISCUSSIONS YET"));
         msg->setAlignment(Qt::AlignCenter);
         msg->setStyleSheet(QString("color:%1;font-size:14px;font-weight:700;letter-spacing:1.5px;"
                                    "background:transparent;%2")
                                .arg(ui::colors::TEXT_TERTIARY(), M(14)));
 
-        auto* sub = new QLabel("Be the first to start a conversation");
+        auto* sub = new QLabel(tr("Be the first to start a conversation"));
         sub->setAlignment(Qt::AlignCenter);
         sub->setStyleSheet(
             QString("color:%1;font-size:11px;background:transparent;%2").arg(ui::colors::TEXT_DIM(), M(11)));
@@ -327,7 +413,7 @@ void ForumFeedPanel::rebuild_posts() {
     for (int i = 0; i < page_.posts.size(); ++i) {
         const auto& p = page_.posts[i];
         const bool active = (p.post_uuid == active_uuid_);
-        QString cc = p.category_color.isEmpty() ? det_color(p.category_name) : p.category_color;
+        QString cc = services::forum_safe_color(p.category_color, det_color(p.category_name));
         bool voted_up = (p.user_vote == "up");
 
         auto* card = new QWidget(this);
@@ -354,7 +440,11 @@ void ForumFeedPanel::rebuild_posts() {
         r1h->setSpacing(8);
 
         // Circular avatar
+        // Forum text is user-authored: QLabel's default AutoText would render
+        // anything that looks like markup, so every label that carries it is
+        // pinned to PlainText.
         auto* av = new QLabel(p.author_display_name.left(2).toUpper());
+        av->setTextFormat(Qt::PlainText);
         av->setFixedSize(28, 28);
         av->setAlignment(Qt::AlignCenter);
         QString avc = det_color(p.author_display_name);
@@ -368,6 +458,7 @@ void ForumFeedPanel::rebuild_posts() {
         author_col->setContentsMargins(0, 0, 0, 0);
 
         auto* au = new QLabel(p.author_display_name);
+        au->setTextFormat(Qt::PlainText);
         au->setStyleSheet(QString("color:%1;font-size:12px;font-weight:600;"
                                   "background:transparent;%2")
                               .arg(ui::colors::TEXT_PRIMARY(), M(12)));
@@ -381,6 +472,7 @@ void ForumFeedPanel::rebuild_posts() {
 
         // Category chip (pill style)
         auto* chip = new QLabel(p.category_name.toUpper());
+        chip->setTextFormat(Qt::PlainText);
         chip->setStyleSheet(QString("color:%1;font-size:9px;font-weight:700;background:transparent;"
                                     "border:1px solid %1;padding:2px 8px;letter-spacing:0.5px;"
                                     "border-radius:10px;%2")
@@ -394,6 +486,7 @@ void ForumFeedPanel::rebuild_posts() {
 
         // ── Row 2: title ──────────────────────────────────────────────────────
         auto* title = new QLabel(p.title);
+        title->setTextFormat(Qt::PlainText);
         title->setWordWrap(true);
         title->setStyleSheet(active ? QString("color:%1;font-size:15px;font-weight:700;"
                                               "background:transparent;line-height:1.3;%2")
@@ -409,6 +502,7 @@ void ForumFeedPanel::rebuild_posts() {
             if (p.content.length() > 180)
                 preview += "...";
             auto* body = new QLabel(preview);
+            body->setTextFormat(Qt::PlainText);
             body->setWordWrap(true);
             body->setMaximumHeight(40);
             body->setStyleSheet(QString("color:%1;font-size:12px;background:transparent;"
@@ -444,8 +538,14 @@ void ForumFeedPanel::rebuild_posts() {
                                                  "border-color:rgba(217,119,6,0.2);}")
                                              .arg(like_col, M(10), ui::colors::AMBER()));
         auto post_uuid = p.post_uuid;
-        connect(up_btn, &QPushButton::clicked, this,
-                [this, post_uuid]() { emit vote_post_requested(post_uuid, "up"); });
+        connect(up_btn, &QPushButton::clicked, this, [this, post_uuid, up_btn]() {
+            // One vote per click: the button stays off until the feed reloads
+            // (which rebuilds it). The timer only matters when the vote fails and
+            // no reload follows; it is parented to the button so it dies with it.
+            up_btn->setEnabled(false);
+            QTimer::singleShot(4000, up_btn, [up_btn]() { up_btn->setEnabled(true); });
+            emit vote_post_requested(post_uuid, "up");
+        });
 
         auto mk_eng = [&](const QString& icon, const QString& val, const QString& col) {
             auto* lbl = new QLabel(icon + " " + val);
@@ -456,13 +556,13 @@ void ForumFeedPanel::rebuild_posts() {
         QString rep_col = p.reply_count > 0 ? ui::colors::CYAN() : QString(ui::colors::BORDER_DIM());
 
         eng_hl->addWidget(up_btn);
-        eng_hl->addWidget(mk_eng("◆", QString("%1 replies").arg(p.reply_count), rep_col));
-        eng_hl->addWidget(mk_eng("◉", fmt_n(p.views) + " views", QString(ui::colors::BORDER_DIM())));
+        eng_hl->addWidget(mk_eng("◆", tr("%1 replies").arg(p.reply_count), rep_col));
+        eng_hl->addWidget(mk_eng("◉", tr("%1 views").arg(fmt_n(p.views)), QString(ui::colors::BORDER_DIM())));
         eng_hl->addStretch();
 
         // Badges
         if (voted_up) {
-            auto* voted = new QLabel("✓ VOTED");
+            auto* voted = new QLabel(tr("✓ VOTED"));
             voted->setStyleSheet(QString("color:%1;font-size:9px;font-weight:700;"
                                          "background:rgba(217,119,6,0.08);padding:2px 6px;"
                                          "border-radius:8px;%2")
@@ -470,14 +570,14 @@ void ForumFeedPanel::rebuild_posts() {
             eng_hl->addWidget(voted);
         }
         if (p.reply_count > 5) {
-            auto* hot = new QLabel("● HOT");
+            auto* hot = new QLabel(tr("● HOT"));
             hot->setStyleSheet(QString("color:%1;font-size:9px;font-weight:700;"
                                        "background:rgba(220,38,38,0.08);padding:2px 6px;"
                                        "border-radius:8px;%2")
                                    .arg(ui::colors::NEGATIVE(), M(9)));
             eng_hl->addWidget(hot);
         } else if (p.reply_count > 2) {
-            auto* active_badge = new QLabel("● ACTIVE");
+            auto* active_badge = new QLabel(tr("● ACTIVE"));
             active_badge->setStyleSheet(QString("color:%1;font-size:9px;font-weight:700;"
                                                 "background:rgba(16,185,129,0.08);padding:2px 6px;"
                                                 "border-radius:8px;%2")
@@ -504,10 +604,12 @@ void ForumFeedPanel::rebuild_posts() {
 
     posts_vl_->addWidget(grid);
 
-    // ── Load more button ──────────────────────────────────────────────────────
+    // ── Next-page button ──────────────────────────────────────────────────────
+    // This is pagination, not infinite scroll: load_more_requested() re-fetches
+    // and REPLACES the feed with the next page. The old "Load N more posts"
+    // label promised appending and reported a bogus N (total minus one page).
     if (page_.page < page_.pages) {
-        int remaining = page_.total - page_.posts.size();
-        auto* more = new QPushButton(QString("Load %1 more posts").arg(remaining));
+        auto* more = new QPushButton(tr("Next page  (%1 of %2)").arg(page_.page + 1).arg(page_.pages));
         more->setFixedHeight(36);
         more->setCursor(Qt::PointingHandCursor);
         more->setStyleSheet(QString("QPushButton{background:%1;color:%2;"
@@ -619,6 +721,19 @@ void ForumFeedPanel::pulse_skeleton() {
                 bi->widget()->setStyleSheet(bg);
         }
     }
+}
+
+void ForumFeedPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void ForumFeedPanel::retranslateUi() {
+    if (new_post_btn_)
+        new_post_btn_->setText(tr("+ NEW POST"));
+    // header_lbl_ / header_count_lbl_ and the post cards reflect live data and
+    // are re-rendered (in the active language) on the next category/feed load.
 }
 
 } // namespace fincept::screens

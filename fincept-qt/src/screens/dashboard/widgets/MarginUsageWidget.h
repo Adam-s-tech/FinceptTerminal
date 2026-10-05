@@ -9,6 +9,7 @@
 #include "trading/TradingTypes.h"
 
 #include <QString>
+#include <QVector>
 
 class QLabel;
 class QProgressBar;
@@ -27,6 +28,7 @@ class MarginUsageWidget : public BaseWidget {
     void on_theme_changed() override;
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void retranslateUi() override;
     QDialog* make_config_dialog(QWidget* parent) override;
 
   private:
@@ -47,6 +49,12 @@ class MarginUsageWidget : public BaseWidget {
     QLabel* collateral_val_ = nullptr;
     QLabel* usage_pct_label_ = nullptr;
     QProgressBar* usage_bar_ = nullptr;
+    /// Left-hand row captions, kept so retranslateUi() can re-run tr() on them.
+    QVector<QLabel*> row_labels_;
+    /// Last usage % rendered — retranslateUi() needs it to rebuild the caption.
+    int last_usage_pct_ = -1;
+    /// Re-applies the account name / "no account" hint in the current language.
+    void refresh_header_hint();
 
     bool hub_active_ = false;
 };

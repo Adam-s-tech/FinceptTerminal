@@ -9,7 +9,10 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHideEvent>
+#include <QIcon>
 #include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QStackedWidget>
 #include <QVBoxLayout>
 
@@ -44,8 +47,62 @@ static QString btn_primary() {
                    "}"
                    "QPushButton:hover { background: %1; color: %3; }"
                    "QPushButton:disabled { color: %4; background: %5; border-color: %6; }")
-        .arg(ui::colors::AMBER(), ui::colors::AMBER_DIM(), ui::colors::BG_BASE(), ui::colors::TEXT_DIM(), ui::colors::BG_RAISED(),
-             ui::colors::BORDER_DIM());
+        .arg(ui::colors::AMBER(), ui::colors::AMBER_DIM(), ui::colors::BG_BASE(), ui::colors::TEXT_DIM(),
+             ui::colors::BG_RAISED(), ui::colors::BORDER_DIM());
+}
+
+// White "Continue with Google" button — high contrast against the dark theme,
+// matching Google's own button styling (white surface, dark text, hairline border).
+static QString btn_google() {
+    return QString("QPushButton {"
+                   "  background: #ffffff; color: #3c4043;"
+                   "  border: 1px solid #dadce0; border-radius: 2px;"
+                   "  padding: 0 16px; font-size: 14px; font-weight: 700;"
+                   "  font-family: 'Consolas','Courier New',monospace;"
+                   "}"
+                   "QPushButton:hover { background: #f5f6f7; border-color: #c6c8ca; }"
+                   "QPushButton:disabled { background: %1; color: %2; border-color: %3; }")
+        .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_DIM(), ui::colors::BORDER_DIM());
+}
+
+// Render the multi-colour Google "G" with QPainter (no QtSvg / asset dependency).
+// Super-sampled 2× for crisp edges on both retina and non-retina displays.
+static QPixmap google_g_pixmap(int logical_px) {
+    constexpr qreal dpr = 2.0;
+    const qreal s = logical_px * dpr;
+    QPixmap pm(static_cast<int>(s), static_cast<int>(s));
+    pm.fill(Qt::transparent);
+
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    const QColor blue(0x42, 0x85, 0xF4), red(0xEA, 0x43, 0x35), yellow(0xFB, 0xBC, 0x05), green(0x34, 0xA8, 0x53);
+    const qreal w = s * 0.22; // ring thickness
+    const qreal margin = w / 2.0 + s * 0.04;
+    const QRectF ring(margin, margin, s - 2 * margin, s - 2 * margin);
+
+    QPen pen;
+    pen.setWidthF(w);
+    pen.setCapStyle(Qt::FlatCap);
+    auto arc = [&](const QColor& c, int start_deg, int span_deg) {
+        pen.setColor(c);
+        p.setPen(pen);
+        p.drawArc(ring, start_deg * 16, span_deg * 16); // Qt angles: 0°=east, CCW positive
+    };
+    arc(blue, -20, 110);  // right → top
+    arc(red, 90, 60);     // top → upper-left
+    arc(yellow, 150, 70); // upper-left → lower-left
+    arc(green, 220, 90);  // lower-left → bottom (gap 310°–340° = the G's mouth)
+
+    // Blue crossbar (the "tongue") — from centre to the right inner edge at mid-height.
+    p.setPen(Qt::NoPen);
+    p.setBrush(blue);
+    const qreal cy = s / 2.0;
+    p.drawRect(QRectF(s / 2.0, cy - w / 2.0, ring.right() - s / 2.0, w));
+
+    p.end();
+    pm.setDevicePixelRatio(dpr);
+    return pm;
 }
 
 static QString btn_standard() {
@@ -56,8 +113,8 @@ static QString btn_standard() {
                    "  font-family: 'Consolas','Courier New',monospace;"
                    "}"
                    "QPushButton:hover { color: %4; background: %5; }")
-        .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY(),
-             ui::colors::BG_HOVER());
+        .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(),
+             ui::colors::TEXT_PRIMARY(), ui::colors::BG_HOVER());
 }
 
 static QString btn_danger() {
@@ -142,23 +199,70 @@ LoginScreen::LoginScreen(QWidget* parent) : QWidget(parent) {
     connect(&auth, &auth::AuthManager::login_active_session, this, &LoginScreen::on_active_session);
     connect(&auth, &auth::AuthManager::mfa_verified, this, &LoginScreen::on_mfa_verified);
     connect(&auth, &auth::AuthManager::mfa_failed, this, &LoginScreen::on_mfa_failed);
+    // AuthManager can end a login attempt without emitting login_succeeded /
+    // login_failed: when the post-login profile fetch is rejected (401/403) it
+    // clears the session and only announces auth_state_changed. Without this
+    // the form would sit on "SIGNING IN..." with every control disabled.
+    connect(&auth, &auth::AuthManager::auth_state_changed, this, [this]() {
+        if (!login_btn_ || login_btn_->isEnabled())
+            return; // no sign-in in flight
+        if (auth::AuthManager::instance().is_authenticated())
+            return; // success path — on_login_succeeded() resets the form
+        set_loading(false);
+        for (auto* b : conflict_page_->findChildren<QPushButton*>())
+            b->setEnabled(true);
+        const QString msg = tr("Sign-in could not be completed. Please try again.");
+        if (pages_->currentIndex() == 2)
+            conflict_msg_->setText(msg);
+        else
+            show_error(msg);
+    });
+    connect(&auth, &auth::AuthManager::logged_out, this, [this]() {
+        if (email_input_)
+            email_input_->clear();
+        if (password_input_) {
+            password_input_->clear();
+            password_input_->setEchoMode(QLineEdit::Password);
+        }
+        if (mfa_input_)
+            mfa_input_->clear();
+        clear_error();
+        if (mfa_error_)
+            mfa_error_->hide();
+        if (pages_)
+            pages_->setCurrentIndex(0);
+    });
 }
 
 // ── Background Paint ─────────────────────────────────────────────────────────
 
 void LoginScreen::hideEvent(QHideEvent* event) {
-    // Wipe credential + MFA inputs whenever this screen leaves the stack so
-    // they can't be recovered or pre-filled after a logout/navigation.
-    if (email_input_) email_input_->clear();
+    QWidget::hideEvent(event);
+
+    // Spontaneous hides come from the window manager (minimise, workspace
+    // switch, lock). The user has not left the form — wiping their half-typed
+    // password there would be hostile. Only wipe on a real in-app navigation.
+    if (event && event->spontaneous())
+        return;
+
+    // The screen lives in a QStackedWidget for the whole session, so without
+    // this the email/password/MFA code stay resident in the line edits (and
+    // are re-shown verbatim on the next logout → login cycle).
+    if (email_input_)
+        email_input_->clear();
     if (password_input_) {
         password_input_->clear();
         password_input_->setEchoMode(QLineEdit::Password);
     }
-    if (mfa_input_) mfa_input_->clear();
+    if (mfa_input_)
+        mfa_input_->clear();
+    if (show_pw_btn_)
+        show_pw_btn_->setText(tr("SHOW"));
     clear_error();
-    if (mfa_error_) mfa_error_->hide();
-    if (pages_) pages_->setCurrentIndex(0);
-    QWidget::hideEvent(event);
+    if (mfa_error_)
+        mfa_error_->hide();
+    if (pages_)
+        pages_->setCurrentIndex(0);
 }
 
 void LoginScreen::changeEvent(QEvent* event) {
@@ -294,6 +398,25 @@ void LoginScreen::build_login_page() {
     brl->addWidget(login_btn_);
     vl->addWidget(btn_row);
 
+    // ── "or" divider + Google sign-in ───────────────────────────────────────
+    or_lbl_ = new QLabel;
+    or_lbl_->setAlignment(Qt::AlignCenter);
+    or_lbl_->setStyleSheet(muted_style());
+    vl->addWidget(or_lbl_);
+
+    google_btn_ = new QPushButton;
+    google_btn_->setFixedHeight(38);
+    google_btn_->setStyleSheet(btn_google());
+    google_btn_->setIcon(QIcon(google_g_pixmap(18)));
+    google_btn_->setIconSize(QSize(18, 18));
+    google_btn_->setCursor(Qt::PointingHandCursor);
+    connect(google_btn_, &QPushButton::clicked, this, [this]() {
+        clear_error();
+        set_loading(true);
+        auth::AuthManager::instance().login_with_google();
+    });
+    vl->addWidget(google_btn_);
+
     vl->addWidget(make_separator());
 
     // Register link
@@ -319,6 +442,28 @@ void LoginScreen::build_login_page() {
 
     connect(password_input_, &QLineEdit::returnPressed, this, &LoginScreen::on_login);
     connect(email_input_, &QLineEdit::returnPressed, this, [this]() { password_input_->setFocus(); });
+
+    // ── Accessibility + keyboard order ───────────────────────────────────────
+    // Screen readers announce the accessible name; without it every field here
+    // is read as an anonymous "text edit". Tab order is set explicitly because
+    // the show/hide button sits inside a nested row widget, which otherwise
+    // puts it before the password field in the focus chain.
+    email_input_->setAccessibleName(tr("Email address"));
+    email_input_->setAccessibleDescription(tr("The email address of your Fincept account"));
+    password_input_->setAccessibleName(tr("Password"));
+    show_pw_btn_->setAccessibleName(tr("Show or hide password"));
+    login_btn_->setAccessibleName(tr("Sign in"));
+    forgot_btn_->setAccessibleName(tr("Forgot password"));
+    google_btn_->setAccessibleName(tr("Continue with Google"));
+    signup_btn_->setAccessibleName(tr("Create an account"));
+    error_label_->setAccessibleName(tr("Sign-in error"));
+
+    setTabOrder(email_input_, password_input_);
+    setTabOrder(password_input_, show_pw_btn_);
+    setTabOrder(show_pw_btn_, login_btn_);
+    setTabOrder(login_btn_, forgot_btn_);
+    setTabOrder(forgot_btn_, google_btn_);
+    setTabOrder(google_btn_, signup_btn_);
 
     pages_->addWidget(page);
 }
@@ -406,6 +551,18 @@ void LoginScreen::build_mfa_page() {
 
     vl->addStretch();
     connect(mfa_input_, &QLineEdit::returnPressed, this, &LoginScreen::on_mfa_verify);
+
+    // Deliberately no digits-only validator: some accounts use alphanumeric
+    // recovery codes on this same field. The hint helps soft keyboards without
+    // rejecting those.
+    mfa_input_->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase);
+    mfa_input_->setAccessibleName(tr("Two-factor verification code"));
+    mfa_verify_btn_->setAccessibleName(tr("Verify code"));
+    mfa_back_btn_->setAccessibleName(tr("Back to sign in"));
+    mfa_error_->setAccessibleName(tr("Verification error"));
+    setTabOrder(mfa_input_, mfa_verify_btn_);
+    setTabOrder(mfa_verify_btn_, mfa_back_btn_);
+
     pages_->addWidget(mfa_page_);
 }
 
@@ -463,50 +620,87 @@ void LoginScreen::build_conflict_page() {
     vl->addWidget(cancel_btn_);
 
     vl->addStretch();
+
+    force_login_btn_->setAccessibleName(tr("Log out the other session and continue"));
+    cancel_btn_->setAccessibleName(tr("Cancel sign in"));
+    conflict_msg_->setAccessibleName(tr("Session conflict details"));
+    setTabOrder(cancel_btn_, force_login_btn_);
+
     pages_->addWidget(conflict_page_);
 }
 
 // ── Re-translation ───────────────────────────────────────────────────────────
 
 void LoginScreen::retranslateUi() {
-    if (login_title_)    login_title_->setText(tr("SIGN IN"));
-    if (login_subtitle_) login_subtitle_->setText(tr("Access your terminal account"));
-    if (email_lbl_)      email_lbl_->setText(tr("EMAIL"));
-    if (pw_lbl_)         pw_lbl_->setText(tr("PASSWORD"));
-    if (email_input_)    email_input_->setPlaceholderText(tr("user@domain.com"));
-    if (password_input_) password_input_->setPlaceholderText(tr("enter password"));
+    if (login_title_)
+        login_title_->setText(tr("SIGN IN"));
+    if (login_subtitle_)
+        login_subtitle_->setText(tr("Access your terminal account"));
+    if (email_lbl_)
+        email_lbl_->setText(tr("EMAIL"));
+    if (pw_lbl_)
+        pw_lbl_->setText(tr("PASSWORD"));
+    if (email_input_)
+        email_input_->setPlaceholderText(tr("user@domain.com"));
+    if (password_input_)
+        password_input_->setPlaceholderText(tr("enter password"));
     if (show_pw_btn_) {
         // Preserve current visibility state when re-translating.
         const bool showing = password_input_ && password_input_->echoMode() != QLineEdit::Password;
         show_pw_btn_->setText(showing ? tr("HIDE") : tr("SHOW"));
     }
-    if (forgot_btn_)      forgot_btn_->setText(tr("FORGOT PASSWORD?"));
-    if (login_btn_)       login_btn_->setText(tr("  SIGN IN  "));
-    if (no_account_lbl_)  no_account_lbl_->setText(tr("No account?"));
-    if (signup_btn_)      signup_btn_->setText(tr("SIGN UP"));
+    if (forgot_btn_)
+        forgot_btn_->setText(tr("FORGOT PASSWORD?"));
+    if (login_btn_)
+        login_btn_->setText(tr("  SIGN IN  "));
+    if (or_lbl_)
+        or_lbl_->setText(tr("or"));
+    if (google_btn_)
+        google_btn_->setText(tr("CONTINUE WITH GOOGLE"));
+    if (no_account_lbl_)
+        no_account_lbl_->setText(tr("No account?"));
+    if (signup_btn_)
+        signup_btn_->setText(tr("SIGN UP"));
 
-    if (mfa_title_)     mfa_title_->setText(tr("TWO-FACTOR AUTH"));
-    if (mfa_indicator_) mfa_indicator_->setText(tr("SECURE"));
-    if (mfa_sub_)       mfa_sub_->setText(tr("Enter the 6-digit code from your authenticator"));
-    if (mfa_code_lbl_)  mfa_code_lbl_->setText(tr("VERIFICATION CODE"));
-    if (mfa_verify_btn_) mfa_verify_btn_->setText(tr("  VERIFY  "));
-    if (mfa_back_btn_)   mfa_back_btn_->setText(tr("BACK TO LOGIN"));
+    if (mfa_title_)
+        mfa_title_->setText(tr("TWO-FACTOR AUTH"));
+    if (mfa_indicator_)
+        mfa_indicator_->setText(tr("SECURE"));
+    if (mfa_sub_)
+        mfa_sub_->setText(tr("Enter the 6-digit code from your authenticator"));
+    if (mfa_code_lbl_)
+        mfa_code_lbl_->setText(tr("VERIFICATION CODE"));
+    if (mfa_verify_btn_)
+        mfa_verify_btn_->setText(tr("  VERIFY  "));
+    if (mfa_back_btn_)
+        mfa_back_btn_->setText(tr("BACK TO LOGIN"));
 
-    if (conflict_title_)       conflict_title_->setText(tr("SESSION CONFLICT"));
-    if (conflict_warning_lbl_) conflict_warning_lbl_->setText(tr("WARNING"));
-    if (force_login_btn_)      force_login_btn_->setText(tr("  LOG OUT OTHER SESSION & CONTINUE  "));
-    if (cancel_btn_)           cancel_btn_->setText(tr("  CANCEL  "));
+    if (conflict_title_)
+        conflict_title_->setText(tr("SESSION CONFLICT"));
+    if (conflict_warning_lbl_)
+        conflict_warning_lbl_->setText(tr("WARNING"));
+    if (force_login_btn_)
+        force_login_btn_->setText(tr("  LOG OUT OTHER SESSION & CONTINUE  "));
+    if (cancel_btn_)
+        cancel_btn_->setText(tr("  CANCEL  "));
 }
 
 // ── Actions ──────────────────────────────────────────────────────────────────
 
 void LoginScreen::on_login() {
+    // Enter on the email/password fields and the button all land here; ignore a
+    // second submit while the first request is still in flight.
+    if (!login_btn_->isEnabled())
+        return;
+
     QString email = email_input_->text().trimmed();
     QString password = password_input_->text();
 
+    // validate_email() returns untranslated English text, so map its two
+    // outcomes onto tr() strings here instead of showing v.error verbatim.
     auto v = auth::validate_email(email);
     if (!v.valid) {
-        show_error(v.error);
+        show_error(email.isEmpty() ? tr("Email is required") : tr("Invalid email format"));
         return;
     }
     if (password.isEmpty()) {
@@ -520,6 +714,11 @@ void LoginScreen::on_login() {
 }
 
 void LoginScreen::on_mfa_verify() {
+    // Enter on the code field fires this even while the button is disabled for
+    // an in-flight verification — don't submit the same code twice.
+    if (!mfa_verify_btn_->isEnabled())
+        return;
+
     QString code = mfa_input_->text().trimmed();
     if (code.isEmpty()) {
         mfa_error_->setText(tr("Please enter the code"));
@@ -534,6 +733,9 @@ void LoginScreen::on_mfa_verify() {
 void LoginScreen::on_force_login() {
     for (auto* b : conflict_page_->findChildren<QPushButton*>())
         b->setEnabled(false);
+    // Marks a sign-in as in flight so the auth_state_changed fallback above can
+    // release the conflict page if the attempt dies without a login_* signal.
+    set_loading(true);
     auth::AuthManager::instance().login(email_input_->text().trimmed(), password_input_->text(), true);
 }
 
@@ -541,6 +743,17 @@ void LoginScreen::on_force_login() {
 
 void LoginScreen::on_login_succeeded() {
     set_loading(false);
+    if (email_input_)
+        email_input_->clear();
+    if (password_input_) {
+        password_input_->clear();
+        password_input_->setEchoMode(QLineEdit::Password);
+    }
+    if (mfa_input_)
+        mfa_input_->clear();
+    clear_error();
+    if (mfa_error_)
+        mfa_error_->hide();
     pages_->setCurrentIndex(0);
     for (auto* b : conflict_page_->findChildren<QPushButton*>())
         b->setEnabled(true);
@@ -550,10 +763,18 @@ void LoginScreen::on_login_failed(const QString& error) {
     set_loading(false);
     for (auto* b : conflict_page_->findChildren<QPushButton*>())
         b->setEnabled(true);
-    if (pages_->currentIndex() == 2)
+    if (pages_->currentIndex() == 2) {
+        // Keep the password: the conflict page re-submits it for a retry.
         conflict_msg_->setText(error);
-    else
+    } else {
         show_error(error);
+        // Don't leave a rejected password sitting in the field.
+        password_input_->clear();
+        password_input_->setEchoMode(QLineEdit::Password);
+        if (show_pw_btn_)
+            show_pw_btn_->setText(tr("SHOW"));
+        password_input_->setFocus();
+    }
 }
 
 void LoginScreen::on_mfa_required() {
@@ -580,6 +801,9 @@ void LoginScreen::on_mfa_failed(const QString& error) {
     mfa_verify_btn_->setEnabled(true);
     mfa_error_->setText(error);
     mfa_error_->show();
+    // A rejected one-time code is useless for a retry — clear it and refocus.
+    mfa_input_->clear();
+    mfa_input_->setFocus();
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -597,7 +821,17 @@ void LoginScreen::set_loading(bool loading) {
     login_btn_->setEnabled(!loading);
     email_input_->setEnabled(!loading);
     password_input_->setEnabled(!loading);
+    // Navigating away mid-request hides this screen, which wipes the fields
+    // (hideEvent) while the reply is still in flight — lock the exits too.
+    if (forgot_btn_)
+        forgot_btn_->setEnabled(!loading);
+    if (signup_btn_)
+        signup_btn_->setEnabled(!loading);
     login_btn_->setText(loading ? tr("  SIGNING IN...  ") : tr("  SIGN IN  "));
+    if (google_btn_) {
+        google_btn_->setEnabled(!loading);
+        google_btn_->setText(loading ? tr("WAITING FOR BROWSER…") : tr("CONTINUE WITH GOOGLE"));
+    }
 }
 
 } // namespace fincept::screens

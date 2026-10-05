@@ -5,6 +5,7 @@
 #include "screens/crypto_center/panels/HoldingsTable.h"
 #include "services/wallet/WalletService.h"
 #include "services/wallet/WalletTypes.h"
+#include "storage/secure/SecureStorage.h"
 #include "ui/theme/Theme.h"
 
 #include <QApplication>
@@ -26,23 +27,55 @@ namespace fincept::screens {
 namespace {
 
 QString home_font_stack() {
-    return QStringLiteral(
-        "'Consolas','Cascadia Mono','JetBrains Mono','SF Mono',monospace");
+    return QStringLiteral("'Consolas','Cascadia Mono','JetBrains Mono','SF Mono',monospace");
 }
 
 QString shorten_pubkey(const QString& pk) {
-    if (pk.size() < 16) return pk;
+    if (pk.size() < 16)
+        return pk;
     return pk.left(8) + QStringLiteral("…") + pk.right(8);
 }
 
+/// Which Solana cluster the configured RPC actually points at.
+///
+/// This chip used to be the literal string "MAINNET" regardless of the RPC
+/// override, so a user pointed at devnet saw balances and swap tickets
+/// labelled MAINNET — exactly the testnet/mainnet confusion that turns a
+/// "harmless" test into a real transfer (or the reverse). Derive it.
+QString cluster_label() {
+    auto r = SecureStorage::instance().retrieve(QStringLiteral("solana.rpc_url"));
+    if (r.is_ok()) {
+        const QString url = r.value().toLower();
+        if (!url.isEmpty()) {
+            if (url.contains(QStringLiteral("devnet")))
+                return QStringLiteral("DEVNET");
+            if (url.contains(QStringLiteral("testnet")))
+                return QStringLiteral("TESTNET");
+            if (url.contains(QStringLiteral("localhost")) || url.contains(QStringLiteral("127.0.0.1")))
+                return QStringLiteral("LOCALNET");
+            if (url.contains(QStringLiteral("mainnet")))
+                return QStringLiteral("MAINNET");
+            return QStringLiteral("CUSTOM RPC");
+        }
+    }
+    // No override — SolanaRpcClient falls back to Helius mainnet or the public
+    // mainnet-beta endpoint, both of which are mainnet.
+    return QStringLiteral("MAINNET");
+}
+
 QString relative_time(qint64 ts_ms) {
-    if (ts_ms == 0) return QStringLiteral("never");
+    if (ts_ms == 0)
+        return QStringLiteral("never");
     const auto delta = QDateTime::currentMSecsSinceEpoch() - ts_ms;
-    if (delta < 0) return QStringLiteral("just now");
+    if (delta < 0)
+        return QStringLiteral("just now");
     const auto seconds = delta / 1000;
-    if (seconds < 60) return QStringLiteral("%1s ago").arg(seconds);
-    if (seconds < 3600) return QStringLiteral("%1m ago").arg(seconds / 60);
-    if (seconds < 86400) return QStringLiteral("%1h ago").arg(seconds / 3600);
+    if (seconds < 60)
+        return QStringLiteral("%1s ago").arg(seconds);
+    if (seconds < 3600)
+        return QStringLiteral("%1m ago").arg(seconds / 60);
+    if (seconds < 86400)
+        return QStringLiteral("%1h ago").arg(seconds / 3600);
     return QStringLiteral("%1d ago").arg(seconds / 86400);
 }
 
@@ -54,16 +87,21 @@ HomeTab::HomeTab(QWidget* parent) : QWidget(parent) {
     apply_theme();
 
     auto& svc = fincept::wallet::WalletService::instance();
-    connect(&svc, &fincept::wallet::WalletService::wallet_connected, this,
-            &HomeTab::on_wallet_connected);
-    connect(&svc, &fincept::wallet::WalletService::wallet_disconnected, this,
-            &HomeTab::on_wallet_disconnected);
-    connect(&svc, &fincept::wallet::WalletService::balance_mode_changed, this,
-            &HomeTab::on_mode_changed);
+    connect(&svc, &fincept::wallet::WalletService::wallet_connected, this, &HomeTab::on_wallet_connected);
+    connect(&svc, &fincept::wallet::WalletService::wallet_disconnected, this, &HomeTab::on_wallet_disconnected);
+    connect(&svc, &fincept::wallet::WalletService::balance_mode_changed, this, &HomeTab::on_mode_changed);
 
     auto& hub = fincept::datahub::DataHub::instance();
-    connect(&hub, &fincept::datahub::DataHub::topic_error, this,
-            &HomeTab::on_topic_error);
+    connect(&hub, &fincept::datahub::DataHub::topic_error, this, &HomeTab::on_topic_error);
+    // The strip used to stay up until REFRESH / a mode change even after the
+    // next poll succeeded, so a one-off RPC blip read as a standing failure.
+    connect(&hub, &fincept::datahub::DataHub::topic_updated, this, [this](const QString& topic, const QVariant&) {
+        const QLatin1String prefix("wallet:balance:");
+        if (current_pubkey_.isEmpty() || error_is_stream_notice_ || !topic.startsWith(prefix))
+            return;
+        if (QStringView(topic).mid(prefix.size()) == QStringView(current_pubkey_))
+            clear_error_strip();
+    });
 
     apply_mode_to_buttons(svc.balance_mode_is_stream());
     if (svc.is_connected()) {
@@ -95,13 +133,13 @@ void HomeTab::build_ui() {
         auto* head_l = new QHBoxLayout(head);
         head_l->setContentsMargins(12, 0, 12, 0);
         head_l->setSpacing(0);
-        auto* title = new QLabel(QStringLiteral("WALLET"), head);
-        title->setObjectName(QStringLiteral("homeTabPanelTitle"));
-        auto* status = new QLabel(QStringLiteral("● CONNECTED"), head);
-        status->setObjectName(QStringLiteral("homeTabPanelStatusOk"));
-        head_l->addWidget(title);
+        wallet_title_ = new QLabel(tr("WALLET"), head);
+        wallet_title_->setObjectName(QStringLiteral("homeTabPanelTitle"));
+        wallet_status_ = new QLabel(tr("● CONNECTED"), head);
+        wallet_status_->setObjectName(QStringLiteral("homeTabPanelStatusOk"));
+        head_l->addWidget(wallet_title_);
         head_l->addStretch();
-        head_l->addWidget(status);
+        head_l->addWidget(wallet_status_);
         outer->addWidget(head);
 
         auto* body = new QWidget(wallet_panel_);
@@ -109,8 +147,7 @@ void HomeTab::build_ui() {
         body_l->setContentsMargins(0, 0, 0, 0);
         body_l->setSpacing(0);
 
-        auto add_row = [body_l, body](const QString& caption, QLabel*& val_out,
-                                      bool last) {
+        auto add_row = [body_l, body](const QString& caption, QLabel*& cap_out, QLabel*& val_out, bool last) {
             auto* row = new QWidget(body);
             row->setObjectName(QStringLiteral("homeTabRow"));
             row->setProperty("isLast", last);
@@ -118,19 +155,19 @@ void HomeTab::build_ui() {
             auto* rl = new QHBoxLayout(row);
             rl->setContentsMargins(12, 0, 12, 0);
             rl->setSpacing(8);
-            auto* cap = new QLabel(caption, row);
-            cap->setObjectName(QStringLiteral("homeTabCaption"));
+            cap_out = new QLabel(caption, row);
+            cap_out->setObjectName(QStringLiteral("homeTabCaption"));
             val_out = new QLabel(QStringLiteral("—"), row);
             val_out->setObjectName(QStringLiteral("homeTabRowValue"));
             val_out->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            rl->addWidget(cap);
+            rl->addWidget(cap_out);
             rl->addStretch(1);
             rl->addWidget(val_out);
             body_l->addWidget(row);
         };
-        add_row(QStringLiteral("PROVIDER"), row_label_value_, false);
-        add_row(QStringLiteral("ADDRESS"), row_pubkey_value_, false);
-        add_row(QStringLiteral("CONNECTED"), row_connected_value_, true);
+        add_row(tr("PROVIDER"), provider_caption_, row_label_value_, false);
+        add_row(tr("ADDRESS"), address_caption_, row_pubkey_value_, false);
+        add_row(tr("CONNECTED"), connected_caption_, row_connected_value_, true);
         outer->addWidget(body);
 
         auto* btn_row = new QWidget(wallet_panel_);
@@ -169,16 +206,16 @@ void HomeTab::build_ui() {
         auto* head_l = new QHBoxLayout(head);
         head_l->setContentsMargins(12, 0, 12, 0);
         head_l->setSpacing(8);
-        auto* title = new QLabel(QStringLiteral("HOLDINGS"), head);
-        title->setObjectName(QStringLiteral("homeTabPanelTitle"));
+        holdings_title_ = new QLabel(tr("HOLDINGS"), head);
+        holdings_title_->setObjectName(QStringLiteral("homeTabPanelTitle"));
 
         // Mode toggle — mirrored from Settings.
-        mode_poll_button_ = new QPushButton(QStringLiteral("POLL"), head);
+        mode_poll_button_ = new QPushButton(tr("POLL"), head);
         mode_poll_button_->setObjectName(QStringLiteral("homeTabToggle"));
         mode_poll_button_->setCheckable(true);
         mode_poll_button_->setFixedHeight(22);
         mode_poll_button_->setCursor(Qt::PointingHandCursor);
-        mode_stream_button_ = new QPushButton(QStringLiteral("STREAM"), head);
+        mode_stream_button_ = new QPushButton(tr("STREAM"), head);
         mode_stream_button_->setObjectName(QStringLiteral("homeTabToggle"));
         mode_stream_button_->setCheckable(true);
         mode_stream_button_->setFixedHeight(22);
@@ -188,15 +225,17 @@ void HomeTab::build_ui() {
         mode_group_->addButton(mode_poll_button_);
         mode_group_->addButton(mode_stream_button_);
 
-        auto* mode_label = new QLabel(QStringLiteral("MAINNET"), head);
-        mode_label->setObjectName(QStringLiteral("homeTabPanelStatus"));
+        mode_label_ = new QLabel(cluster_label(), head);
+        mode_label_->setObjectName(QStringLiteral("homeTabPanelStatus"));
+        mode_label_->setToolTip(tr("Solana cluster derived from the configured RPC endpoint "
+                                   "(Settings → Helius / solana.rpc_url)."));
 
-        head_l->addWidget(title);
+        head_l->addWidget(holdings_title_);
         head_l->addStretch();
         head_l->addWidget(mode_poll_button_);
         head_l->addWidget(mode_stream_button_);
         head_l->addSpacing(6);
-        head_l->addWidget(mode_label);
+        head_l->addWidget(mode_label_);
         outer->addWidget(head);
 
         // Body wraps the embedded HoldingsTable + an error strip.
@@ -217,12 +256,12 @@ void HomeTab::build_ui() {
         auto* es_l = new QHBoxLayout(error_strip_);
         es_l->setContentsMargins(10, 6, 10, 6);
         es_l->setSpacing(8);
-        auto* es_icon = new QLabel(QStringLiteral("!"), error_strip_);
-        es_icon->setObjectName(QStringLiteral("homeTabErrorIcon"));
+        error_icon_ = new QLabel(QStringLiteral("!"), error_strip_);
+        error_icon_->setObjectName(QStringLiteral("homeTabErrorIcon"));
         error_strip_text_ = new QLabel(QString(), error_strip_);
         error_strip_text_->setObjectName(QStringLiteral("homeTabErrorText"));
         error_strip_text_->setWordWrap(true);
-        es_l->addWidget(es_icon);
+        es_l->addWidget(error_icon_);
         es_l->addWidget(error_strip_text_, 1);
         error_strip_->hide();
         body_l->addWidget(error_strip_);
@@ -262,21 +301,21 @@ void HomeTab::build_ui() {
         auto* head_l = new QHBoxLayout(head);
         head_l->setContentsMargins(12, 0, 12, 0);
         head_l->setSpacing(0);
-        auto* title = new QLabel(QStringLiteral("$FNCPT ROADMAP"), head);
-        title->setObjectName(QStringLiteral("homeTabPanelTitle"));
-        auto* phase = new QLabel(QStringLiteral("PHASE 2"), head);
-        phase->setObjectName(QStringLiteral("homeTabPanelStatus"));
-        head_l->addWidget(title);
+        roadmap_title_ = new QLabel(tr("$FNCPT ROADMAP"), head);
+        roadmap_title_->setObjectName(QStringLiteral("homeTabPanelTitle"));
+        roadmap_phase_ = new QLabel(tr("PHASE 2"), head);
+        roadmap_phase_->setObjectName(QStringLiteral("homeTabPanelStatus"));
+        head_l->addWidget(roadmap_title_);
         head_l->addStretch();
-        head_l->addWidget(phase);
+        head_l->addWidget(roadmap_phase_);
         outer->addWidget(head);
 
         roadmap_body_ = new QLabel(
-            QStringLiteral("PHASE 1   WALLET & BALANCE        SHIPPED        connect Solana wallet, view $FNCPT + SOL\n"
-                           "PHASE 2   SWAP & FEE DISCOUNT     IN PROGRESS    buy $FNCPT via PumpPortal, fee discount\n"
-                           "PHASE 3   STAKING & TIERS         UPCOMING       lock $FNCPT for bronze / silver / gold tiers\n"
-                           "PHASE 4   PREDICTION MARKETS      UPCOMING       earnings, fed, weather — settled in $FNCPT\n"
-                           "PHASE 5   BUYBACK & BURN          UPCOMING       terminal revenue auto-buys & burns $FNCPT"),
+            tr("PHASE 1   WALLET & BALANCE        SHIPPED        connect Solana wallet, view $FNCPT + SOL\n"
+               "PHASE 2   SWAP & FEE DISCOUNT     IN PROGRESS    buy $FNCPT via PumpPortal, fee discount\n"
+               "PHASE 3   STAKING & TIERS         UPCOMING       lock $FNCPT for bronze / silver / gold tiers\n"
+               "PHASE 4   PREDICTION MARKETS      UPCOMING       earnings, fed, weather — settled in $FNCPT\n"
+               "PHASE 5   BUYBACK & BURN          UPCOMING       terminal revenue auto-buys & burns $FNCPT"),
             roadmap_panel_);
         roadmap_body_->setObjectName(QStringLiteral("homeTabRoadmapBody"));
         roadmap_body_->setContentsMargins(14, 12, 14, 14);
@@ -285,28 +324,43 @@ void HomeTab::build_ui() {
     root->addWidget(roadmap_panel_);
     root->addStretch(1);
 
+    // ── Accessibility ─────────────────────────────────────────────────────
+    copy_button_->setAccessibleName(tr("Copy wallet address to clipboard"));
+    disconnect_button_->setAccessibleName(tr("Disconnect wallet"));
+    refresh_button_->setAccessibleName(tr("Refresh balances now"));
+    mode_poll_button_->setAccessibleName(tr("Poll balances on a timer"));
+    mode_stream_button_->setAccessibleName(tr("Stream balances over WebSocket"));
+    row_pubkey_value_->setAccessibleName(tr("Connected wallet address"));
+    setTabOrder(copy_button_, disconnect_button_);
+    setTabOrder(disconnect_button_, mode_poll_button_);
+    setTabOrder(mode_poll_button_, mode_stream_button_);
+    setTabOrder(mode_stream_button_, refresh_button_);
+
     // Wiring
     connect(copy_button_, &QPushButton::clicked, this, [this]() {
         QApplication::clipboard()->setText(current_pubkey_);
         copy_button_->setText(tr("COPIED"));
         QTimer::singleShot(1200, this, [this]() {
-            if (copy_button_) copy_button_->setText(tr("COPY ADDRESS"));
+            if (copy_button_)
+                copy_button_->setText(tr("COPY ADDRESS"));
         });
     });
-    connect(disconnect_button_, &QPushButton::clicked, this, []() {
-        fincept::wallet::WalletService::instance().disconnect();
-    });
+    connect(disconnect_button_, &QPushButton::clicked, this,
+            []() { fincept::wallet::WalletService::instance().disconnect(); });
     connect(refresh_button_, &QPushButton::clicked, this, [this]() {
-        if (current_pubkey_.isEmpty()) return;
+        if (current_pubkey_.isEmpty())
+            return;
         clear_error_strip();
         fincept::wallet::WalletService::instance().force_balance_refresh();
     });
     connect(mode_poll_button_, &QPushButton::toggled, this, [](bool checked) {
-        if (!checked) return;
+        if (!checked)
+            return;
         fincept::wallet::WalletService::instance().set_balance_mode(false);
     });
     connect(mode_stream_button_, &QPushButton::toggled, this, [](bool checked) {
-        if (!checked) return;
+        if (!checked)
+            return;
         fincept::wallet::WalletService::instance().set_balance_mode(true);
     });
 }
@@ -315,49 +369,47 @@ void HomeTab::apply_theme() {
     using namespace ui::colors;
     const QString font = home_font_stack();
 
-    const QString ss = QStringLiteral(
-        "QWidget#homeTab { background:%1; }"
-        "QFrame#homeTabPanel { background:%2; border:1px solid %3; }"
-        "QWidget#homeTabPanelHead { background:%10; border-bottom:1px solid %3; }"
-        "QWidget#homeTabPanelFoot { background:%10; border-top:1px solid %3; }"
-        "QLabel#homeTabPanelTitle { color:%4; font-family:%5; font-size:11px;"
-        "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
-        "QLabel#homeTabPanelStatus { color:%6; font-family:%5; font-size:10px;"
-        "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
-        "QLabel#homeTabPanelStatusOk { color:%9; font-family:%5; font-size:10px;"
-        "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
-        "QWidget#homeTabRow { background:transparent; border-bottom:1px solid %3; }"
-        "QWidget#homeTabRow[isLast=\"true\"] { border-bottom:none; }"
-        "QLabel#homeTabCaption { color:%7; font-family:%5; font-size:10px;"
-        "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
-        "QLabel#homeTabRowValue { color:%8; font-family:%5; font-size:12px;"
-        "  background:transparent; }"
-        "QFrame#homeTabErrorStrip { background:rgba(220,38,38,0.10);"
-        "  border:1px solid %11; }"
-        "QLabel#homeTabErrorIcon { color:%11; font-family:%5; font-size:13px;"
-        "  font-weight:700; background:transparent; }"
-        "QLabel#homeTabErrorText { color:%11; font-family:%5; font-size:11px;"
-        "  background:transparent; }"
-        "QPushButton#homeTabButton { background:%10; color:%7; border:1px solid %3;"
-        "  font-family:%5; font-size:11px; font-weight:700; letter-spacing:1px; padding:0 12px; }"
-        "QPushButton#homeTabButton:hover { background:%12; color:%8; border-color:%13; }"
-        "QPushButton#homeTabDangerButton { background:rgba(220,38,38,0.10); color:%11;"
-        "  border:1px solid %14; font-family:%5; font-size:11px; font-weight:700;"
-        "  letter-spacing:1px; padding:0 12px; }"
-        "QPushButton#homeTabDangerButton:hover { background:%11; color:%8; }"
-        "QPushButton#homeTabToggle { background:transparent; color:%6; border:1px solid %3;"
-        "  font-family:%5; font-size:10px; font-weight:700; letter-spacing:1.2px;"
-        "  padding:0 10px; }"
-        "QPushButton#homeTabToggle:hover { color:%8; border-color:%13; }"
-        "QPushButton#homeTabToggle:checked { background:rgba(217,119,6,0.12); color:%4;"
-        "  border-color:%4; }"
-        "QLabel#homeTabRoadmapBody { color:%7; font-family:%5; font-size:11px;"
-        "  background:transparent; }"
-    )
-        .arg(BG_BASE(), BG_SURFACE(), BORDER_DIM(), AMBER(), font,
-             TEXT_TERTIARY(), TEXT_SECONDARY(), TEXT_PRIMARY(), POSITIVE())
-        .arg(BG_RAISED(), NEGATIVE(), BG_HOVER(), BORDER_BRIGHT(),
-             QStringLiteral("#7f1d1d"));
+    const QString ss =
+        QStringLiteral("QWidget#homeTab { background:%1; }"
+                       "QFrame#homeTabPanel { background:%2; border:1px solid %3; }"
+                       "QWidget#homeTabPanelHead { background:%10; border-bottom:1px solid %3; }"
+                       "QWidget#homeTabPanelFoot { background:%10; border-top:1px solid %3; }"
+                       "QLabel#homeTabPanelTitle { color:%4; font-family:%5; font-size:11px;"
+                       "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
+                       "QLabel#homeTabPanelStatus { color:%6; font-family:%5; font-size:10px;"
+                       "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
+                       "QLabel#homeTabPanelStatusOk { color:%9; font-family:%5; font-size:10px;"
+                       "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
+                       "QWidget#homeTabRow { background:transparent; border-bottom:1px solid %3; }"
+                       "QWidget#homeTabRow[isLast=\"true\"] { border-bottom:none; }"
+                       "QLabel#homeTabCaption { color:%7; font-family:%5; font-size:10px;"
+                       "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
+                       "QLabel#homeTabRowValue { color:%8; font-family:%5; font-size:12px;"
+                       "  background:transparent; }"
+                       "QFrame#homeTabErrorStrip { background:rgba(220,38,38,0.10);"
+                       "  border:1px solid %11; }"
+                       "QLabel#homeTabErrorIcon { color:%11; font-family:%5; font-size:13px;"
+                       "  font-weight:700; background:transparent; }"
+                       "QLabel#homeTabErrorText { color:%11; font-family:%5; font-size:11px;"
+                       "  background:transparent; }"
+                       "QPushButton#homeTabButton { background:%10; color:%7; border:1px solid %3;"
+                       "  font-family:%5; font-size:11px; font-weight:700; letter-spacing:1px; padding:0 12px; }"
+                       "QPushButton#homeTabButton:hover { background:%12; color:%8; border-color:%13; }"
+                       "QPushButton#homeTabDangerButton { background:rgba(220,38,38,0.10); color:%11;"
+                       "  border:1px solid %14; font-family:%5; font-size:11px; font-weight:700;"
+                       "  letter-spacing:1px; padding:0 12px; }"
+                       "QPushButton#homeTabDangerButton:hover { background:%11; color:%8; }"
+                       "QPushButton#homeTabToggle { background:transparent; color:%6; border:1px solid %3;"
+                       "  font-family:%5; font-size:10px; font-weight:700; letter-spacing:1.2px;"
+                       "  padding:0 10px; }"
+                       "QPushButton#homeTabToggle:hover { color:%8; border-color:%13; }"
+                       "QPushButton#homeTabToggle:checked { background:rgba(217,119,6,0.12); color:%4;"
+                       "  border-color:%4; }"
+                       "QLabel#homeTabRoadmapBody { color:%7; font-family:%5; font-size:11px;"
+                       "  background:transparent; }")
+            .arg(BG_BASE(), BG_SURFACE(), BORDER_DIM(), AMBER(), font, TEXT_TERTIARY(), TEXT_SECONDARY(),
+                 TEXT_PRIMARY(), POSITIVE())
+            .arg(BG_RAISED(), NEGATIVE(), BG_HOVER(), BORDER_BRIGHT(), QStringLiteral("#7f1d1d"));
 
     setStyleSheet(ss);
 }
@@ -386,17 +438,27 @@ void HomeTab::on_wallet_disconnected() {
 
 void HomeTab::on_mode_changed(bool is_stream) {
     apply_mode_to_buttons(is_stream);
-    if (current_pubkey_.isEmpty()) return;
+    if (current_pubkey_.isEmpty())
+        return;
     clear_error_strip();
 }
 
 void HomeTab::on_topic_error(const QString& topic, const QString& error) {
     if (topic.startsWith(QStringLiteral("wallet:balance:"))) {
+        // The producer's STREAM→poll fallback notice is informational, not a
+        // failed fetch ("Balance fetch failed: STREAM unavailable…" read as an
+        // outage while balances were in fact updating).
+        if (error.startsWith(QLatin1String("STREAM unavailable"))) {
+            show_error_strip(error);
+            error_is_stream_notice_ = true;
+            return;
+        }
         show_error_strip(tr("Balance fetch failed: %1").arg(error));
     }
 }
 
 void HomeTab::clear_error_strip() {
+    error_is_stream_notice_ = false;
     if (error_strip_ && error_strip_->isVisible()) {
         error_strip_->hide();
         error_strip_text_->clear();
@@ -404,7 +466,8 @@ void HomeTab::clear_error_strip() {
 }
 
 void HomeTab::show_error_strip(const QString& msg) {
-    if (!error_strip_) return;
+    if (!error_strip_)
+        return;
     error_strip_text_->setText(msg);
     error_strip_->show();
 }
@@ -418,11 +481,77 @@ void HomeTab::apply_mode_to_buttons(bool is_stream) {
 
 void HomeTab::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
-    // HoldingsTable manages its own subscriptions; nothing else to do here.
+    // HoldingsTable manages its own subscriptions. The cluster chip is
+    // re-derived here because the RPC override can be changed on SETTINGS
+    // while this tab is hidden — a stale "MAINNET" after switching to devnet
+    // is the dangerous direction.
+    if (mode_label_)
+        mode_label_->setText(cluster_label());
+    // "CONNECTED" is a relative timestamp computed once at connect time and
+    // would read "just now" for the rest of the session — refresh on show.
+    if (row_connected_value_ && !current_pubkey_.isEmpty()) {
+        const auto& st = fincept::wallet::WalletService::instance().state();
+        if (st.connected_at_ms > 0)
+            row_connected_value_->setText(relative_time(st.connected_at_ms));
+    }
 }
 
 void HomeTab::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
+}
+
+void HomeTab::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void HomeTab::retranslateUi() {
+    // Wallet panel chrome.
+    if (wallet_title_)
+        wallet_title_->setText(tr("WALLET"));
+    if (wallet_status_)
+        wallet_status_->setText(tr("● CONNECTED"));
+    if (provider_caption_)
+        provider_caption_->setText(tr("PROVIDER"));
+    if (address_caption_)
+        address_caption_->setText(tr("ADDRESS"));
+    if (connected_caption_)
+        connected_caption_->setText(tr("CONNECTED"));
+    if (copy_button_)
+        copy_button_->setText(tr("COPY ADDRESS"));
+    if (disconnect_button_)
+        disconnect_button_->setText(tr("DISCONNECT"));
+
+    // Holdings panel chrome.
+    if (holdings_title_)
+        holdings_title_->setText(tr("HOLDINGS"));
+    if (mode_poll_button_)
+        mode_poll_button_->setText(tr("POLL"));
+    if (mode_stream_button_)
+        mode_stream_button_->setText(tr("STREAM"));
+    if (mode_label_) {
+        // Cluster name is derived data, not a translatable literal; only the
+        // tooltip needs re-rendering.
+        mode_label_->setText(cluster_label());
+        mode_label_->setToolTip(tr("Solana cluster derived from the configured RPC endpoint "
+                                   "(Settings → Helius / solana.rpc_url)."));
+    }
+    if (refresh_button_)
+        refresh_button_->setText(tr("REFRESH"));
+
+    // Roadmap panel.
+    if (roadmap_title_)
+        roadmap_title_->setText(tr("$FNCPT ROADMAP"));
+    if (roadmap_phase_)
+        roadmap_phase_->setText(tr("PHASE 2"));
+    if (roadmap_body_)
+        roadmap_body_->setText(
+            tr("PHASE 1   WALLET & BALANCE        SHIPPED        connect Solana wallet, view $FNCPT + SOL\n"
+               "PHASE 2   SWAP & FEE DISCOUNT     IN PROGRESS    buy $FNCPT via PumpPortal, fee discount\n"
+               "PHASE 3   STAKING & TIERS         UPCOMING       lock $FNCPT for bronze / silver / gold tiers\n"
+               "PHASE 4   PREDICTION MARKETS      UPCOMING       earnings, fed, weather — settled in $FNCPT\n"
+               "PHASE 5   BUYBACK & BURN          UPCOMING       terminal revenue auto-buys & burns $FNCPT"));
 }
 
 } // namespace fincept::screens

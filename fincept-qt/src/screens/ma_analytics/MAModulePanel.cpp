@@ -1,11 +1,13 @@
 // src/screens/ma_analytics/MAModulePanel.cpp
 #include "screens/ma_analytics/MAModulePanel.h"
 
+#include "core/currency/Currency.h"
 #include "core/logging/Logger.h"
 #include "services/ma_analytics/MAAnalyticsService.h"
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
 
+#include <QCoreApplication>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -77,8 +79,17 @@ QWidget* MAModulePanel::build_input_row(const QString& label, QWidget* input, QW
     auto* hl = new QHBoxLayout(row);
     hl->setContentsMargins(0, 2, 0, 2);
     hl->setSpacing(8);
-    auto* lbl = new QLabel(label, row);
+    auto* lbl = new QLabel(row);
     lbl->setFixedWidth(160);
+    // Labels ending in "($)" are a currency-unit hint — bind them so the symbol
+    // tracks the preferred currency live; others are plain text.
+    if (label.endsWith("($)")) {
+        QString base = label;
+        base.chop(3); // strip "($)"
+        cur::bindLabel(lbl, base + "(%1)");
+    } else {
+        lbl->setText(label);
+    }
     lbl->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3;")
                            .arg(ui::colors::TEXT_SECONDARY())
                            .arg(ui::fonts::SMALL)
@@ -191,10 +202,6 @@ void MAModulePanel::build_ui() {
     root->addWidget(scroll, 1);
 }
 
-
-
-
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // RESULT DISPLAY
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -221,30 +228,52 @@ void MAModulePanel::display_error(const QString& msg) {
                            .arg(ui::fonts::DATA_FAMILY())
                            .arg(neg_rgb));
     results_layout_->addWidget(err);
-    status_label_->setText("Error");
+    status_label_->setText(tr("Error"));
 }
 
-static QString format_value(const QJsonValue& val) {
+// Is this metric a rate whose sub-1.0 value is a fraction to show as a percentage (0.099 -> "9.9%")?
+// Previously EVERY value between 0.0001 and 1 was rendered as a percentage, so a beta of 0.8 or an
+// EV/Revenue multiple of 0.5 read "80.0%" / "50.0%". Keyed on the metric name instead.
+static bool is_rate_key(const QString& key) {
+    static const QStringList kHints = {"rate",    "margin",  "growth", "yield",     "irr",  "wacc",
+                                       "premium", "return",  "probabil", "weight", "ownership", "cagr", "discount"};
+    const QString k = key.toLower();
+    for (const QString& hint : kHints)
+        if (k.contains(hint))
+            return true;
+    return false;
+}
+
+// `intrinsic` pins the symbol to a fixed currency (e.g. "USD" for SEC/EDGAR
+// data); empty means follow the user's preferred currency. `key` is the metric name (if known).
+static QString format_value(const QJsonValue& val, const QString& intrinsic = QString(),
+                            const QString& key = QString()) {
     if (val.isDouble()) {
         double v = val.toDouble();
-        if (std::abs(v) >= 1e9)
-            return QString("$%1B").arg(v / 1e9, 0, 'f', 1);
-        if (std::abs(v) >= 1e6)
-            return QString("$%1M").arg(v / 1e6, 0, 'f', 1);
+        // The scripts emit `*_pct` / `*_percent` fields already in percent (23.6, or 0.36 for 0.36%), so they
+        // are labelled, never rescaled.
+        if (key.contains(QLatin1String("pct"), Qt::CaseInsensitive) ||
+            key.contains(QLatin1String("percent"), Qt::CaseInsensitive))
+            return QString("%1%").arg(v, 0, 'f', 2);
         if (std::abs(v) >= 1e3)
-            return QString("$%1K").arg(v / 1e3, 0, 'f', 0);
-        if (std::abs(v) < 1.0 && std::abs(v) > 0.0001)
-            return QString("%1%").arg(v * 100, 0, 'f', 1);
+            return cur::money(v, /*compact=*/true, intrinsic);
+        if (std::abs(v) < 1.0 && std::abs(v) > 0.0001) {
+            if (is_rate_key(key))
+                return QString("%1%").arg(v * 100, 0, 'f', 1);
+            return QString::number(v, 'g', 4);
+        }
         return QString::number(v, 'f', 2);
     }
     if (val.isBool())
-        return val.toBool() ? "YES" : "NO";
+        return val.toBool() ? QCoreApplication::translate("MAModulePanel", "YES")
+                            : QCoreApplication::translate("MAModulePanel", "NO");
     if (val.isString())
         return val.toString();
     return QString::fromUtf8("—");
 }
 
-static QTableWidget* build_json_table(const QJsonArray& arr, const QString& accent, QWidget* parent) {
+static QTableWidget* build_json_table(const QJsonArray& arr, const QString& accent, QWidget* parent,
+                                      const QString& intrinsic = QString()) {
     if (arr.isEmpty())
         return nullptr;
     // Collect all column keys from first object
@@ -282,7 +311,7 @@ static QTableWidget* build_json_table(const QJsonArray& arr, const QString& acce
     for (int r = 0; r < arr.size(); ++r) {
         auto obj = arr[r].toObject();
         for (int c = 0; c < cols.size(); ++c) {
-            auto* item = new QTableWidgetItem(format_value(obj[cols[c]]));
+            auto* item = new QTableWidgetItem(format_value(obj[cols[c]], intrinsic, cols[c]));
             item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
             table->setItem(r, c, item);
         }
@@ -291,7 +320,8 @@ static QTableWidget* build_json_table(const QJsonArray& arr, const QString& acce
     return table;
 }
 
-static QTableWidget* build_kv_table(const QJsonObject& obj, const QString& accent, QWidget* parent) {
+static QTableWidget* build_kv_table(const QJsonObject& obj, const QString& accent, QWidget* parent,
+                                    const QString& intrinsic = QString()) {
     // Collect only scalar key-value pairs
     QStringList keys;
     for (auto it = obj.begin(); it != obj.end(); ++it)
@@ -301,7 +331,8 @@ static QTableWidget* build_kv_table(const QJsonObject& obj, const QString& accen
         return nullptr;
 
     auto* table = new QTableWidget(keys.size(), 2, parent);
-    table->setHorizontalHeaderLabels({"Metric", "Value"});
+    table->setHorizontalHeaderLabels({QCoreApplication::translate("MAModulePanel", "Metric"),
+                                      QCoreApplication::translate("MAModulePanel", "Value")});
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setAlternatingRowColors(true);
@@ -329,7 +360,7 @@ static QTableWidget* build_kv_table(const QJsonObject& obj, const QString& accen
         auto* key_item = new QTableWidgetItem(label.toUpper());
         key_item->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         table->setItem(r, 0, key_item);
-        auto* val_item = new QTableWidgetItem(format_value(obj[keys[r]]));
+        auto* val_item = new QTableWidgetItem(format_value(obj[keys[r]], intrinsic, keys[r]));
         val_item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         table->setItem(r, 1, val_item);
     }
@@ -337,13 +368,41 @@ static QTableWidget* build_kv_table(const QJsonObject& obj, const QString& accen
     return table;
 }
 
-void MAModulePanel::display_result(const QJsonObject& payload) {
+void MAModulePanel::display_result(const QJsonObject& envelope) {
     clear_results();
+
+    // Most scripts answer {"success": true, "data": <result>}: show the result itself, not a "SUCCESS: YES"
+    // card next to it. Other top-level scalars (count, filings_found, ...) are kept; the raw-JSON viewer
+    // below still shows the untouched envelope.
+    QJsonObject payload = envelope;
+    if (envelope.value(QStringLiteral("success")).toBool(false) && envelope.contains(QStringLiteral("data"))) {
+        const QJsonValue data = envelope.value(QStringLiteral("data"));
+        QJsonObject flat;
+        for (auto it = envelope.begin(); it != envelope.end(); ++it)
+            if (it.key() != QLatin1String("success") && it.key() != QLatin1String("data") &&
+                !it.value().isObject() && !it.value().isArray())
+                flat.insert(it.key(), it.value());
+        if (data.isObject()) {
+            const QJsonObject inner = data.toObject();
+            for (auto it = inner.begin(); it != inner.end(); ++it)
+                flat.insert(it.key(), it.value());
+            payload = flat;
+        } else if (data.isArray()) {
+            flat.insert(QStringLiteral("results"), data);
+            payload = flat;
+        }
+    }
 
     QString accent = QString("%1,%2,%3").arg(module_.color.red()).arg(module_.color.green()).arg(module_.color.blue());
 
+    // The Deals module shows SEC/EDGAR filing values, which are USD — pin them
+    // so they don't get repainted with the user's preferred currency symbol.
+    // Every other M&A module is a calculator the user denominates themselves.
+    const QString intrinsic =
+        (module_.id == fincept::services::ma::ModuleId::Deals) ? QStringLiteral("USD") : QString();
+
     // Section header
-    auto* header = new QLabel("RESULTS");
+    auto* header = new QLabel(tr("RESULTS"));
     header->setStyleSheet(QString("color:%1; font-size:9px; font-weight:700; font-family:%2; letter-spacing:1px;"
                                   "padding:4px 0;")
                               .arg(module_.color.name())
@@ -364,7 +423,8 @@ void MAModulePanel::display_result(const QJsonObject& payload) {
         has_scalars = true;
         QString label = it.key();
         label.replace('_', ' ');
-        auto* card = build_metric_card(label.toUpper(), format_value(it.value()), module_.color.name(), grid);
+        auto* card = build_metric_card(label.toUpper(), format_value(it.value(), intrinsic, it.key()),
+                                       module_.color.name(), grid);
         gl->addWidget(card, row, col);
         col++;
         if (col >= 3) {
@@ -394,14 +454,14 @@ void MAModulePanel::display_result(const QJsonObject& payload) {
             results_layout_->addWidget(sec);
 
             if (arr[0].isObject()) {
-                auto* table = build_json_table(arr, accent, this);
+                auto* table = build_json_table(arr, accent, this, intrinsic);
                 if (table)
                     results_layout_->addWidget(table);
             } else {
                 // Simple array — display as comma-separated
                 QStringList items;
                 for (const auto& v : arr)
-                    items.append(format_value(v));
+                    items.append(format_value(v, intrinsic));
                 auto* lbl = new QLabel(items.join(", "));
                 lbl->setWordWrap(true);
                 lbl->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3;"
@@ -427,14 +487,14 @@ void MAModulePanel::display_result(const QJsonObject& payload) {
                                    .arg(ui::fonts::DATA_FAMILY));
             results_layout_->addWidget(sec);
 
-            auto* table = build_kv_table(obj, accent, this);
+            auto* table = build_kv_table(obj, accent, this, intrinsic);
             if (table)
                 results_layout_->addWidget(table);
         }
     }
 
     // 3. Raw JSON viewer (collapsed)
-    auto* raw_btn = new QPushButton("Show Raw JSON", this);
+    auto* raw_btn = new QPushButton(tr("Show Raw JSON"), this);
     raw_btn->setCursor(Qt::PointingHandCursor);
     raw_btn->setStyleSheet(QString("QPushButton { color:%1; font-size:%2px; font-family:%3;"
                                    "background:transparent; border:1px solid %4; padding:4px 12px; }"
@@ -449,7 +509,7 @@ void MAModulePanel::display_result(const QJsonObject& payload) {
     raw_text->setReadOnly(true);
     raw_text->setVisible(false);
     raw_text->setMaximumHeight(300);
-    raw_text->setPlainText(QJsonDocument(payload).toJson(QJsonDocument::Indented));
+    raw_text->setPlainText(QJsonDocument(envelope).toJson(QJsonDocument::Indented));
     raw_text->setStyleSheet(QString("QTextEdit { background:%1; color:%2; border:1px solid %3;"
                                     "font-family:%4; font-size:%5px; padding:8px; }")
                                 .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM())
@@ -459,13 +519,13 @@ void MAModulePanel::display_result(const QJsonObject& payload) {
     connect(raw_btn, &QPushButton::clicked, this, [raw_text, raw_btn]() {
         bool showing = raw_text->isVisible();
         raw_text->setVisible(!showing);
-        raw_btn->setText(showing ? "Show Raw JSON" : "Hide Raw JSON");
+        raw_btn->setText(showing ? tr("Show Raw JSON") : tr("Hide Raw JSON"));
     });
 
     results_layout_->addWidget(raw_btn);
     results_layout_->addWidget(raw_text);
 
-    status_label_->setText("Done");
+    status_label_->setText(tr("Done"));
 }
 
 // ── Service signal handlers ──────────────────────────────────────────────────
@@ -494,7 +554,20 @@ static const QHash<ModuleId, QStringList>& get_context_map() {
 void MAModulePanel::on_result_ready(const QString& context, const QJsonObject& payload) {
     auto it = get_context_map().find(module_.id);
     if (it != get_context_map().end() && it->contains(context)) {
+        // A script that answers {"success": false, ...} (without the "error" key PythonRunner looks for)
+        // used to be rendered as a result card reading "SUCCESS: NO".
+        const QJsonValue ok = payload.value(QStringLiteral("success"));
+        if (ok.isBool() && !ok.toBool()) {
+            QString text = payload.value(QStringLiteral("message")).toString();
+            if (text.isEmpty())
+                text = payload.value(QStringLiteral("error")).toString();
+            display_error(QString("[%1] %2").arg(context, text.isEmpty() ? tr("The analysis failed") : text));
+            return;
+        }
         display_result(payload);
+        // An empty deal database is the normal first-run state — say what to do about it.
+        if (module_.id == fincept::services::ma::ModuleId::Deals && payload.value(QStringLiteral("count")).toInt(-1) == 0)
+            status_label_->setText(tr("No deals stored yet - use SCAN SEC FILINGS, then LOAD ALL DEALS"));
     }
 }
 
@@ -505,10 +578,40 @@ void MAModulePanel::on_error(const QString& context, const QString& message) {
     }
 }
 
+// ── Sub-tab registration (records source label for retranslateUi) ────────────
+void MAModulePanel::add_sub_tab(QWidget* page, const char* source_label) {
+    if (!sub_tabs_ || !page)
+        return;
+    sub_tabs_->addTab(page, tr(source_label));
+    sub_tab_sources_.append({page, QString::fromUtf8(source_label)});
+}
+
+// ── Live language switch ─────────────────────────────────────────────────────
+void MAModulePanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void MAModulePanel::retranslateUi() {
+    // Header label/category come from module_ (data) — not translated here.
+    // Re-apply sub-tab labels from their recorded source strings.
+    if (sub_tabs_) {
+        for (const auto& pair : sub_tab_sources_) {
+            int idx = sub_tabs_->indexOf(pair.first);
+            if (idx >= 0)
+                sub_tabs_->setTabText(idx, tr(pair.second.toUtf8().constData()));
+        }
+    }
+}
+
 // ── Tab stylesheet helper ───────────────────────────────────────────────────
 void MAModulePanel::apply_tab_stylesheet() {
     if (!sub_tabs_)
         return;
+    // Never truncate tab labels to "Accreti…"; show full text and scroll on overflow.
+    sub_tabs_->setElideMode(Qt::ElideNone);
+    sub_tabs_->setUsesScrollButtons(true);
     sub_tabs_->setStyleSheet(QString("QTabWidget::pane { border:1px solid %1; background:%2; }"
                                      "QTabBar::tab { background:%3; color:%4; padding:6px 16px;"
                                      "font-family:%5; font-size:%6px; border:1px solid %1; border-bottom:none; }"

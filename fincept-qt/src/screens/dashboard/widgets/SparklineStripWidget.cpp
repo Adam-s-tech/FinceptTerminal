@@ -15,6 +15,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QWidget>
+
 #include <algorithm>
 
 namespace fincept::screens::widgets {
@@ -22,9 +23,7 @@ namespace fincept::screens::widgets {
 // ── Inline sparkline canvas ──────────────────────────────────────────────────
 class SparklineCanvas : public QWidget {
   public:
-    explicit SparklineCanvas(QWidget* parent = nullptr) : QWidget(parent) {
-        setMinimumHeight(18);
-    }
+    explicit SparklineCanvas(QWidget* parent = nullptr) : QWidget(parent) { setMinimumHeight(18); }
     void set_points(const QVector<double>& pts) {
         pts_ = pts;
         update();
@@ -91,7 +90,7 @@ void SparklineStripWidget::apply_config(const QJsonObject& cfg) {
     const QJsonArray arr = cfg.value("symbols").toArray();
     for (const auto& v : arr) {
         const QString s = v.toString().trimmed().toUpper();
-        if (!s.isEmpty())
+        if (!s.isEmpty() && !next.contains(s)) // rows_ is keyed by symbol
             next.append(s);
     }
     if (next.isEmpty())
@@ -137,6 +136,9 @@ void SparklineStripWidget::build_rows() {
         grid->addWidget(r.symbol, i, 0);
         grid->addWidget(r.spark, i, 1);
         grid->addWidget(r.last, i, 2);
+        link_symbol(r.symbol, sym);
+        link_symbol(r.spark, sym);
+        link_symbol(r.last, sym);
         rows_.insert(sym, r);
     }
     vl->addLayout(grid);
@@ -225,11 +227,9 @@ void SparklineStripWidget::on_theme_changed() {
 
 void SparklineStripWidget::apply_styles() {
     const QString sym_css =
-        QString("color:%1;font-size:11px;font-weight:700;background:transparent;")
-            .arg(ui::colors::TEXT_PRIMARY());
+        QString("color:%1;font-size:11px;font-weight:700;background:transparent;").arg(ui::colors::TEXT_PRIMARY());
     const QString last_css =
-        QString("color:%1;font-size:11px;font-weight:600;background:transparent;")
-            .arg(ui::colors::TEXT_PRIMARY());
+        QString("color:%1;font-size:11px;font-weight:600;background:transparent;").arg(ui::colors::TEXT_PRIMARY());
     for (auto it = rows_.begin(); it != rows_.end(); ++it) {
         if (it->symbol)
             it->symbol->setStyleSheet(sym_css);
@@ -238,6 +238,13 @@ void SparklineStripWidget::apply_styles() {
         if (it->spark)
             it->spark->update();
     }
+}
+
+void SparklineStripWidget::retranslateUi() {
+    BaseWidget::retranslateUi();
+    set_title(tr("SPARKLINES"));
+    // No translatable text in the rows; rebuilding them here blanked every
+    // sparkline until the next hub publish.
 }
 
 } // namespace fincept::screens::widgets

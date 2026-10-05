@@ -1,9 +1,8 @@
 #include "screens/dashboard/widgets/PerformanceWidget.h"
 
+#include "datahub/DataHub.h"
+#include "datahub/DataHubMetaTypes.h"
 #include "ui/theme/Theme.h"
-
-#    include "datahub/DataHub.h"
-#    include "datahub/DataHubMetaTypes.h"
 
 #include <QFrame>
 
@@ -20,8 +19,9 @@ PerformanceWidget::PerformanceWidget(QWidget* parent)
     auto* vl = content_layout();
 
     // We'll show metrics derived from real benchmark ETF data
-    QStringList labels = {tr("S&P 500 Daily"),         tr("NASDAQ Daily"),         tr("DOW Daily"), tr("Russell 2000 Daily"),
-                          tr("S&P 500 vs DOW Spread"), tr("NASDAQ vs S&P Spread"), tr("VIX Level"), tr("Gold Daily")};
+    QStringList labels = {
+        tr("S&P 500 Daily"),         tr("NASDAQ Daily"),         tr("DOW Daily"), tr("Russell 2000 Daily"),
+        tr("S&P 500 vs DOW Spread"), tr("NASDAQ vs S&P Spread"), tr("VIX Level"), tr("Gold Daily")};
 
     for (const auto& label : labels) {
         auto* row = new QWidget(this);
@@ -49,7 +49,6 @@ PerformanceWidget::PerformanceWidget(QWidget* parent)
 
     apply_styles();
     set_loading(true);
-
 }
 
 void PerformanceWidget::apply_styles() {
@@ -86,9 +85,8 @@ void PerformanceWidget::refresh_data() {
     topics.reserve(kPerfSymbols.size());
     for (const auto& sym : kPerfSymbols)
         topics.append(QStringLiteral("market:quote:") + sym);
-    hub.request(topics, /*force=*/true);  // user-triggered: bypass min_interval
+    hub.request(topics, /*force=*/true); // user-triggered: bypass min_interval
 }
-
 
 void PerformanceWidget::hub_subscribe_all() {
     auto& hub = datahub::DataHub::instance();
@@ -100,7 +98,8 @@ void PerformanceWidget::hub_subscribe_all() {
                 return;
             row_cache_.insert(sym, v.value<services::QuoteData>());
             set_loading_progress(row_cache_.size(), kPerfSymbols.size());
-            rebuild_from_cache();
+            // One redraw per delivery burst, not one per symbol.
+            schedule_render([this]() { rebuild_from_cache(); });
         });
     }
     hub_active_ = true;
@@ -122,7 +121,6 @@ void PerformanceWidget::rebuild_from_cache() {
     if (!quotes.isEmpty())
         populate(quotes);
 }
-
 
 void PerformanceWidget::populate(const QVector<services::QuoteData>& quotes) {
     // Build lookup by symbol
@@ -177,6 +175,12 @@ void PerformanceWidget::populate(const QVector<services::QuoteData>& quotes) {
     // Gold daily
     if (map.contains("GC=F"))
         set_row(7, map["GC=F"]->change_pct);
+}
+
+void PerformanceWidget::retranslateUi() {
+    BaseWidget::retranslateUi();
+    set_title(tr("PERFORMANCE TRACKER"));
+    rebuild_from_cache(); // re-derives metric labels from cached quotes
 }
 
 } // namespace fincept::screens::widgets

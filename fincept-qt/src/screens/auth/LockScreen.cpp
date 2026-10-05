@@ -45,8 +45,8 @@ static QString btn_primary() {
                    "}"
                    "QPushButton:hover { background: %1; color: %3; }"
                    "QPushButton:disabled { color: %4; background: %5; border-color: %6; }")
-        .arg(ui::colors::AMBER(), ui::colors::AMBER_DIM(), ui::colors::BG_BASE(), ui::colors::TEXT_DIM(), ui::colors::BG_RAISED(),
-             ui::colors::BORDER_DIM());
+        .arg(ui::colors::AMBER(), ui::colors::AMBER_DIM(), ui::colors::BG_BASE(), ui::colors::TEXT_DIM(),
+             ui::colors::BG_RAISED(), ui::colors::BORDER_DIM());
 }
 
 static QString btn_danger() {
@@ -87,11 +87,11 @@ static QString error_style() {
 // paste-based brute-force scripts. Called on every PIN entry field in this
 // screen.
 static void harden_pin_input(QLineEdit* edit) {
-    if (!edit) return;
+    if (!edit)
+        return;
 
-    edit->setInputMethodHints(Qt::ImhDigitsOnly | Qt::ImhSensitiveData |
-                              Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase |
-                              Qt::ImhHiddenText);
+    edit->setInputMethodHints(Qt::ImhDigitsOnly | Qt::ImhSensitiveData | Qt::ImhNoPredictiveText |
+                              Qt::ImhNoAutoUppercase | Qt::ImhHiddenText);
 
     auto* validator = new QIntValidator(0, 999999, edit);
     edit->setValidator(validator);
@@ -104,7 +104,9 @@ static void harden_pin_input(QLineEdit* edit) {
     QObject::connect(edit, &QLineEdit::textChanged, edit, [edit](const QString& txt) {
         QString cleaned;
         cleaned.reserve(txt.size());
-        for (const QChar& c : txt) if (c.isDigit()) cleaned.append(c);
+        for (const QChar& c : txt)
+            if (c.isDigit())
+                cleaned.append(c);
         if (cleaned != txt) {
             QSignalBlocker b(edit);
             edit->setText(cleaned);
@@ -193,9 +195,12 @@ void LockScreen::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
     if (lockout_timer_)
         lockout_timer_->stop();
-    if (setup_pin_input_) setup_pin_input_->clear();
-    if (setup_confirm_input_) setup_confirm_input_->clear();
-    if (unlock_pin_input_) unlock_pin_input_->clear();
+    if (setup_pin_input_)
+        setup_pin_input_->clear();
+    if (setup_confirm_input_)
+        setup_confirm_input_->clear();
+    if (unlock_pin_input_)
+        unlock_pin_input_->clear();
 }
 
 void LockScreen::changeEvent(QEvent* event) {
@@ -310,6 +315,14 @@ void LockScreen::build_setup_page() {
     connect(setup_pin_input_, &QLineEdit::returnPressed, this, [this]() { setup_confirm_input_->setFocus(); });
     connect(setup_confirm_input_, &QLineEdit::returnPressed, this, &LockScreen::on_setup_submit);
 
+    setup_pin_input_->setAccessibleName(tr("New PIN"));
+    setup_pin_input_->setAccessibleDescription(tr("Six digit PIN used to unlock the terminal"));
+    setup_confirm_input_->setAccessibleName(tr("Confirm new PIN"));
+    setup_btn_->setAccessibleName(tr("Set PIN"));
+    setup_error_->setAccessibleName(tr("PIN setup error"));
+    setTabOrder(setup_pin_input_, setup_confirm_input_);
+    setTabOrder(setup_confirm_input_, setup_btn_);
+
     pages_->addWidget(page); // index 0
 }
 
@@ -397,9 +410,31 @@ void LockScreen::build_unlock_page() {
     connect(unlock_btn_, &QPushButton::clicked, this, &LockScreen::on_unlock_submit);
     vl->addWidget(unlock_btn_);
 
+    // "Forgot PIN?" escape — a forgotten PIN is recoverable by signing in again
+    // (this clears the PIN). Without this link the only path was to fail the unlock
+    // kMaxAttempts times through escalating lockouts, which is minutes of dead-end.
+    unlock_forgot_btn_ = new QPushButton(tr("Forgot PIN?  Sign in again"));
+    unlock_forgot_btn_->setCursor(Qt::PointingHandCursor);
+    unlock_forgot_btn_->setStyleSheet(QString("QPushButton{color:%1; background:transparent; border:none;"
+                                              "font-size:12px; text-decoration:underline;"
+                                              "font-family:'Consolas','Courier New',monospace;}"
+                                              "QPushButton:hover{color:%2;}")
+                                          .arg(ui::colors::TEXT_DIM(), ui::colors::AMBER()));
+    connect(unlock_forgot_btn_, &QPushButton::clicked, this, [this]() { emit reauth_requested(); });
+    vl->addWidget(unlock_forgot_btn_, 0, Qt::AlignHCenter);
+
     vl->addStretch();
 
     connect(unlock_pin_input_, &QLineEdit::returnPressed, this, &LockScreen::on_unlock_submit);
+
+    unlock_pin_input_->setAccessibleName(tr("Unlock PIN"));
+    unlock_pin_input_->setAccessibleDescription(tr("Six digit PIN that unlocks the terminal"));
+    unlock_btn_->setAccessibleName(tr("Unlock terminal"));
+    unlock_forgot_btn_->setAccessibleName(tr("Forgot PIN, sign in again"));
+    unlock_error_->setAccessibleName(tr("Unlock error"));
+    unlock_lockout_label_->setAccessibleName(tr("Lockout status"));
+    setTabOrder(unlock_pin_input_, unlock_btn_);
+    setTabOrder(unlock_btn_, unlock_forgot_btn_);
 
     pages_->addWidget(page); // index 1
 }
@@ -453,39 +488,63 @@ void LockScreen::build_lockout_page() {
 
     vl->addStretch();
 
+    lockout_reauth_btn_->setAccessibleName(tr("Sign in again to reset your PIN"));
+    lockout_msg_->setAccessibleName(tr("Account locked message"));
+
     pages_->addWidget(page); // index 2
 }
 
 // ── Re-translation ───────────────────────────────────────────────────────────
 
 void LockScreen::retranslateUi() {
-    if (setup_title_)     setup_title_->setText(tr("SECURITY SETUP"));
-    if (setup_badge_)     setup_badge_->setText(tr("REQUIRED"));
-    if (setup_subtitle_)  setup_subtitle_->setText(tr("Create a 6-digit PIN to secure your terminal"));
-    if (setup_info_)      setup_info_->setText(tr("This PIN will be required each time you open\nthe terminal or after a period of inactivity."));
-    if (setup_pin_lbl_)   setup_pin_lbl_->setText(tr("ENTER PIN"));
-    if (setup_confirm_lbl_) setup_confirm_lbl_->setText(tr("CONFIRM PIN"));
-    if (setup_btn_)       setup_btn_->setText(tr("  SET PIN  "));
-    if (setup_note_)      setup_note_->setText(tr("PIN is encrypted and stored locally on this device.\nIt cannot be recovered if forgotten."));
+    if (setup_title_)
+        setup_title_->setText(tr("SECURITY SETUP"));
+    if (setup_badge_)
+        setup_badge_->setText(tr("REQUIRED"));
+    if (setup_subtitle_)
+        setup_subtitle_->setText(tr("Create a 6-digit PIN to secure your terminal"));
+    if (setup_info_)
+        setup_info_->setText(
+            tr("This PIN will be required each time you open\nthe terminal or after a period of inactivity."));
+    if (setup_pin_lbl_)
+        setup_pin_lbl_->setText(tr("ENTER PIN"));
+    if (setup_confirm_lbl_)
+        setup_confirm_lbl_->setText(tr("CONFIRM PIN"));
+    if (setup_btn_)
+        setup_btn_->setText(tr("  SET PIN  "));
+    if (setup_note_)
+        setup_note_->setText(
+            tr("PIN is encrypted and stored locally on this device.\nIt cannot be recovered if forgotten."));
 
-    if (unlock_title_)    unlock_title_->setText(tr("TERMINAL LOCKED"));
-    if (unlock_badge_)    unlock_badge_->setText(tr("SECURE"));
-    if (unlock_subtitle_) unlock_subtitle_->setText(tr("Enter your 6-digit PIN to unlock"));
-    if (unlock_pin_lbl_)  unlock_pin_lbl_->setText(tr("PIN"));
-    if (unlock_btn_)      unlock_btn_->setText(tr("  UNLOCK  "));
+    if (unlock_title_)
+        unlock_title_->setText(tr("TERMINAL LOCKED"));
+    if (unlock_badge_)
+        unlock_badge_->setText(tr("SECURE"));
+    if (unlock_subtitle_)
+        unlock_subtitle_->setText(tr("Enter your 6-digit PIN to unlock"));
+    if (unlock_pin_lbl_)
+        unlock_pin_lbl_->setText(tr("PIN"));
+    if (unlock_btn_)
+        unlock_btn_->setText(tr("  UNLOCK  "));
+    if (unlock_forgot_btn_)
+        unlock_forgot_btn_->setText(tr("Forgot PIN?  Sign in again"));
 
-    if (lockout_title_)   lockout_title_->setText(tr("ACCOUNT LOCKED"));
-    if (lockout_badge_)   lockout_badge_->setText(tr("SECURITY"));
+    if (lockout_title_)
+        lockout_title_->setText(tr("ACCOUNT LOCKED"));
+    if (lockout_badge_)
+        lockout_badge_->setText(tr("SECURITY"));
     if (lockout_msg_)
         lockout_msg_->setText(tr("Too many failed PIN attempts.\n\n"
                                  "For your security, the terminal has been locked.\n"
                                  "You must sign in again with your email and password\n"
                                  "to reset your PIN and regain access."));
-    if (lockout_reauth_btn_) lockout_reauth_btn_->setText(tr("  SIGN IN AGAIN  "));
+    if (lockout_reauth_btn_)
+        lockout_reauth_btn_->setText(tr("  SIGN IN AGAIN  "));
 }
 
 void LockScreen::refresh_attempts_label() {
-    if (!unlock_attempts_) return;
+    if (!unlock_attempts_)
+        return;
     auto& pm = auth::PinManager::instance();
     if (pm.failed_attempts() > 0 && pm.failed_attempts() < auth::PinManager::kMaxAttempts) {
         const int remaining = auth::PinManager::kMaxAttempts - pm.failed_attempts();
@@ -542,6 +601,16 @@ void LockScreen::show_lockout() {
 void LockScreen::on_setup_submit() {
     const QString pin = setup_pin_input_->text();
     const QString confirm = setup_confirm_input_->text();
+
+    // Length is checked first so an empty/short entry gets a specific message
+    // instead of falling through to PinManager's generic rejection (an empty
+    // PIN also equals an empty confirmation, so the mismatch check misses it).
+    if (pin.length() != 6) {
+        setup_error_->setText(tr("PIN must be exactly 6 digits"));
+        setup_error_->show();
+        setup_pin_input_->setFocus();
+        return;
+    }
 
     // Clear BOTH fields on mismatch — see header note about masked-text leak.
     if (pin != confirm) {
@@ -636,6 +705,12 @@ void LockScreen::update_lockout_display() {
     unlock_lockout_label_->show();
     unlock_btn_->setEnabled(false);
     unlock_pin_input_->setEnabled(false);
+
+    // showEvent only starts the countdown when the screen is shown while already
+    // locked out. If show_unlock()/activate() runs on a visible screen (no new
+    // showEvent) nothing would tick, leaving the PIN field disabled past expiry.
+    if (isVisible() && lockout_timer_ && !lockout_timer_->isActive())
+        lockout_timer_->start();
 }
 
 } // namespace fincept::screens

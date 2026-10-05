@@ -2,6 +2,7 @@
 
 #include "services/wallet/WalletTypes.h"
 
+#include <QEvent>
 #include <QHash>
 #include <QString>
 #include <QVariant>
@@ -45,10 +46,12 @@ class HoldingsTable : public QWidget {
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     void build_ui();
     void apply_theme();
+    void retranslateUi();
 
     void on_wallet_connected(const QString& pubkey, const QString& label);
     void on_wallet_disconnected();
@@ -70,8 +73,8 @@ class HoldingsTable : public QWidget {
     QString current_pubkey_;
     QString current_balance_topic_;
     fincept::wallet::WalletBalance latest_balance_;
-    QHash<QString, double> price_usd_;     ///< mint → USD price
-    QHash<QString, QString> price_topic_;  ///< mint → topic (so we can unsubscribe)
+    QHash<QString, double> price_usd_;    ///< mint → USD price
+    QHash<QString, QString> price_topic_; ///< mint → topic (so we can unsubscribe)
     bool show_unverified_ = false;
 };
 

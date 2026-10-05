@@ -5,20 +5,17 @@
 //
 // Part of the partial-class split of NewsService.cpp.
 
-#include "services/news/NewsService.h"
-
 #include "core/logging/Logger.h"
+#include "datahub/DataHub.h"
+#include "datahub/DataHubMetaTypes.h"
 #include "network/http/HttpClient.h"
+#include "services/news/NewsService.h"
 #include "storage/cache/CacheManager.h"
 #include "storage/repositories/RssFeedRepository.h"
 
-#include "datahub/DataHub.h"
-#include "datahub/DataHubMetaTypes.h"
-
-#include <QHash>
-
 #include <QAtomicInt>
 #include <QDateTime>
+#include <QHash>
 #include <QJsonDocument>
 #include <QMutex>
 #include <QMutexLocker>
@@ -41,7 +38,9 @@ QVector<RSSFeed> NewsService::default_feeds() {
         // Tier 1 — Wire Services & Regulators
         // Reuters discontinued public RSS in 2020 (feeds.reuters.com is dead).
         // We keep tier-1 coverage via AP, BBC, FT, WSJ and other majors instead.
-        {"ap-top", "AP Top News", "https://rsshub.app/apnews/topics/ap-top-news", "GEOPOLITICS", "GLOBAL", "AP", 1},
+        // (AP Top News via rsshub.app removed — the public RSSHub instance answers
+        //  every client with a 403 Cloudflare HTML page, so the feed never yielded
+        //  an article and only cost a request + a warning per refresh.)
         {"sec-press", "SEC Press Releases", "https://www.sec.gov/news/pressreleases.rss", "REGULATORY", "US", "SEC", 1},
         {"fed-press", "Federal Reserve", "https://www.federalreserve.gov/feeds/press_all.xml", "REGULATORY", "US",
          "FEDERAL RESERVE", 1},
@@ -345,8 +344,7 @@ fincept::RssFeedRow to_row(const fincept::services::RSSFeed& f, bool is_builtin,
     return r;
 }
 
-fincept::services::RSSFeed apply_overlay(const fincept::services::RSSFeed& base,
-                                          const fincept::RssFeedRow& patch) {
+fincept::services::RSSFeed apply_overlay(const fincept::services::RSSFeed& base, const fincept::RssFeedRow& patch) {
     fincept::services::RSSFeed merged = base;
     merged.name = patch.name;
     merged.url = patch.url;
@@ -363,8 +361,9 @@ QVector<RSSFeed> NewsService::list_effective_feeds() const {
     const auto defaults = default_feeds();
     auto repo_res = fincept::RssFeedRepository::instance().list_all();
     if (repo_res.is_err()) {
-        LOG_WARN("NewsService", QString("rss_feeds query failed; using built-ins only: %1")
-                                    .arg(QString::fromStdString(repo_res.error())));
+        LOG_WARN(
+            "NewsService",
+            QString("rss_feeds query failed; using built-ins only: %1").arg(QString::fromStdString(repo_res.error())));
         return defaults;
     }
 
@@ -524,8 +523,7 @@ bool NewsService::set_feed_enabled(const QString& id, bool enabled) {
     if (exists) {
         auto r = repo.set_enabled(id, enabled);
         if (r.is_err()) {
-            LOG_ERROR("NewsService",
-                      QString("set_feed_enabled failed: %1").arg(QString::fromStdString(r.error())));
+            LOG_ERROR("NewsService", QString("set_feed_enabled failed: %1").arg(QString::fromStdString(r.error())));
             return false;
         }
     } else if (default_ptr) {
@@ -546,6 +544,7 @@ bool NewsService::set_feed_enabled(const QString& id, bool enabled) {
 
 void NewsService::reload_feeds() {
     fincept::CacheManager::instance().clear_category("news");
+    latest_articles_.clear(); // belonged to the old feed set
     emit feeds_changed();
 }
 

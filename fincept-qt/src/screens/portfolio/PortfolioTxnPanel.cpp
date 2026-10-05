@@ -2,11 +2,13 @@
 #include "screens/portfolio/PortfolioTxnPanel.h"
 
 #include "screens/portfolio/PortfolioPanelHeader.h"
+#include "ui/tables/NumericTableWidgetItem.h"
 #include "ui/theme/Theme.h"
 
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QScrollBar>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 
@@ -55,8 +57,8 @@ void PortfolioTxnPanel::build_ui() {
     layout->addWidget(header.header);
 
     // Table
-    const QStringList headers = {tr("Date"), tr("Symbol"), tr("Type"), tr("Qty"),
-                                  tr("Price"), tr("Total"), tr("Notes")};
+    const QStringList headers = {tr("Date"),  tr("Symbol"), tr("Type"), tr("Qty"),
+                                 tr("Price"), tr("Total"),  tr("Notes")};
     table_ = new QTableWidget(0, headers.size(), this);
     table_->setHorizontalHeaderLabels(headers);
     table_->verticalHeader()->setVisible(false);
@@ -91,6 +93,15 @@ void PortfolioTxnPanel::build_ui() {
 
     table_->verticalHeader()->setDefaultSectionSize(24);
 
+    // Rows are re-sorted by the header, so read the symbol back from the cell
+    // itself rather than indexing into txns_. The empty-state row has no symbol
+    // item (column 1), which the null check skips.
+    connect(table_, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
+        const auto* sym_item = table_->item(row, 1);
+        if (sym_item && !sym_item->text().isEmpty())
+            emit symbol_activated(sym_item->text());
+    });
+
     layout->addWidget(table_, 1);
 }
 
@@ -101,6 +112,7 @@ void PortfolioTxnPanel::set_transactions(const QVector<portfolio::Transaction>& 
 
 void PortfolioTxnPanel::clear() {
     txns_.clear();
+    table_->clearSpans(); // drop the empty-state span before reuse
     table_->setRowCount(0);
     count_label_->clear();
 }
@@ -114,6 +126,18 @@ void PortfolioTxnPanel::apply_collapsed_state() {
 }
 
 void PortfolioTxnPanel::populate() {
+    // The whole table is rebuilt on every 60 s poll. Remember where the user
+    // was (selected transaction id + scroll offset) and put them back, instead
+    // of yanking the view to the top mid-read.
+    QString prev_key;
+    if (const int prev_row = table_->currentRow(); prev_row >= 0) {
+        const auto* date_item = table_->item(prev_row, 0);
+        const auto* sym_item = table_->item(prev_row, 1);
+        if (date_item && sym_item)
+            prev_key = date_item->text() + '|' + sym_item->text();
+    }
+    const int prev_scroll = table_->verticalScrollBar() ? table_->verticalScrollBar()->value() : 0;
+
     table_->setSortingEnabled(false);
     table_->setRowCount(0);
 
@@ -148,20 +172,20 @@ void PortfolioTxnPanel::populate() {
         type_item->setFont(QFont(ui::fonts::DATA_FAMILY, 11, QFont::Bold));
         table_->setItem(row, 2, type_item);
 
-        // Qty
-        auto* qty_item = new QTableWidgetItem(QString::number(t.quantity, 'f', 4));
+        // Qty — numeric item so header-sort orders by magnitude, not lexically
+        auto* qty_item = new ui::NumericTableWidgetItem(QString::number(t.quantity, 'f', 4), t.quantity);
         qty_item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         qty_item->setForeground(QColor(ui::colors::TEXT_PRIMARY()));
         table_->setItem(row, 3, qty_item);
 
         // Price
-        auto* price_item = new QTableWidgetItem(QString::number(t.price, 'f', 2));
+        auto* price_item = new ui::NumericTableWidgetItem(QString::number(t.price, 'f', 2), t.price);
         price_item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         price_item->setForeground(QColor(ui::colors::TEXT_PRIMARY()));
         table_->setItem(row, 4, price_item);
 
         // Total
-        auto* total_item = new QTableWidgetItem(QString::number(t.total_value, 'f', 2));
+        auto* total_item = new ui::NumericTableWidgetItem(QString::number(t.total_value, 'f', 2), t.total_value);
         total_item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         const char* total_color = (t.transaction_type == "BUY")    ? ui::colors::NEGATIVE
                                   : (t.transaction_type == "SELL") ? ui::colors::POSITIVE
@@ -176,7 +200,35 @@ void PortfolioTxnPanel::populate() {
     }
 
     table_->setSortingEnabled(true);
-    count_label_->setText(tr("%1 transactions").arg(txns_.size()));
+    count_label_->setText(tr("%n transaction(s)", "", static_cast<int>(txns_.size())));
+
+    // Restore selection + scroll position after the rebuild.
+    if (!prev_key.isEmpty()) {
+        for (int r = 0; r < table_->rowCount(); ++r) {
+            const auto* date_item = table_->item(r, 0);
+            const auto* sym_item = table_->item(r, 1);
+            if (date_item && sym_item && (date_item->text() + '|' + sym_item->text()) == prev_key) {
+                table_->selectRow(r);
+                break;
+            }
+        }
+    }
+    if (table_->verticalScrollBar())
+        table_->verticalScrollBar()->setValue(prev_scroll);
+
+    // Empty state — a blank grid reads as "broken", not as "nothing here yet".
+    if (txns_.isEmpty()) {
+        table_->setRowCount(1);
+        auto* msg = new QTableWidgetItem(tr("No transactions recorded for this portfolio yet."));
+        msg->setForeground(QColor(ui::colors::TEXT_TERTIARY()));
+        msg->setTextAlignment(Qt::AlignCenter);
+        msg->setFlags(Qt::ItemIsEnabled); // not selectable — it is not data
+        table_->setItem(0, 0, msg);
+        table_->setSpan(0, 0, 1, table_->columnCount());
+    } else {
+        // Drop a span left over from a previous empty render.
+        table_->clearSpans();
+    }
 }
 
 void PortfolioTxnPanel::refresh_theme() {
@@ -216,16 +268,18 @@ void PortfolioTxnPanel::changeEvent(QEvent* event) {
 }
 
 void PortfolioTxnPanel::retranslateUi() {
-    if (title_label_)   title_label_->setText(tr("TRANSACTION HISTORY"));
-    if (collapse_btn_)  collapse_btn_->setToolTip(tr("Collapse / expand transaction history"));
+    if (title_label_)
+        title_label_->setText(tr("TRANSACTION HISTORY"));
+    if (collapse_btn_)
+        collapse_btn_->setToolTip(tr("Collapse / expand transaction history"));
 
     if (table_) {
-        const QStringList headers = {tr("Date"), tr("Symbol"), tr("Type"), tr("Qty"),
-                                     tr("Price"), tr("Total"), tr("Notes")};
+        const QStringList headers = {tr("Date"),  tr("Symbol"), tr("Type"), tr("Qty"),
+                                     tr("Price"), tr("Total"),  tr("Notes")};
         table_->setHorizontalHeaderLabels(headers);
     }
-    if (count_label_ && !txns_.isEmpty())
-        count_label_->setText(tr("%1 transactions").arg(txns_.size()));
+    // Row content carries a translated empty-state message, so re-render.
+    populate();
 }
 
 } // namespace fincept::screens

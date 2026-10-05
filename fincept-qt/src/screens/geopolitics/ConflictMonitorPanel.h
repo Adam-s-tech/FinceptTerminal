@@ -2,6 +2,8 @@
 #pragma once
 #include "services/geopolitics/GeopoliticsTypes.h"
 
+#include <QComboBox>
+#include <QEvent>
 #include <QLabel>
 #include <QPushButton>
 #include <QTableWidget>
@@ -20,7 +22,12 @@ class ConflictMonitorPanel : public QWidget {
     Q_OBJECT
   public:
     explicit ConflictMonitorPanel(QWidget* parent = nullptr);
-    void set_events(const QVector<fincept::services::geo::NewsEvent>& events);
+    /// `fit_map` re-frames the map around the new pins; pass false for background
+    /// refreshes so the user's pan/zoom survives.
+    void set_events(const QVector<fincept::services::geo::NewsEvent>& events, bool fit_map = true);
+
+  protected:
+    void changeEvent(QEvent* event) override;
 
   private:
     void build_ui();
@@ -32,13 +39,15 @@ class ConflictMonitorPanel : public QWidget {
     QWidget* make_section_header(const QString& text, QWidget* parent);
     QWidget* make_divider(QWidget* parent);
     QWidget* make_stat_tile(const QString& label, QLabel** value_out, QWidget* parent);
+    void retranslateUi();
 
     void update_stats(const QVector<fincept::services::geo::NewsEvent>& events);
     void update_hotspots(const QVector<fincept::services::geo::NewsEvent>& events);
-    void update_map(const QVector<fincept::services::geo::NewsEvent>& events);
+    void update_map(const QVector<fincept::services::geo::NewsEvent>& events, bool fit_map);
 
     // Map
     fincept::ui::WorldMapWidget* map_widget_ = nullptr;
+    QComboBox* map_type_combo_ = nullptr; // basemap selector in the map toolbar
 
     QTableWidget* events_table_ = nullptr;
 
@@ -64,6 +73,19 @@ class ConflictMonitorPanel : public QWidget {
     QWidget* detail_panel_ = nullptr;
     QLabel* empty_state_ = nullptr;
     QString current_url_;
+
+    // Static text widgets (cached for retranslateUi)
+    QLabel* hdr_overview_ = nullptr;
+    QLabel* hdr_top_categories_ = nullptr;
+    QLabel* hdr_hotspots_ = nullptr;
+    QLabel* hdr_event_details_ = nullptr;
+    QLabel* tile_events_lbl_ = nullptr;
+    QLabel* tile_mapped_lbl_ = nullptr;
+    QLabel* tile_nations_lbl_ = nullptr;
+    QLabel* field_country_lbl_ = nullptr;
+    QLabel* field_city_lbl_ = nullptr;
+    QLabel* field_date_lbl_ = nullptr;
+    QLabel* field_source_lbl_ = nullptr;
 };
 
 } // namespace fincept::screens

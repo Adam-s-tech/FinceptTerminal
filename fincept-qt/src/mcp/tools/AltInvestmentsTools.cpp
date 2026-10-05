@@ -27,7 +27,7 @@ static constexpr int kAltTtlSec = 10 * 60; // 10 min — deterministic given sam
 // params   = JSON object with name/type/value/rate/term/fee/current_value/additional
 
 static void run_alt_async(const QString& command, const QJsonObject& params, ToolContext ctx,
-                           std::shared_ptr<QPromise<ToolResult>> promise) {
+                          std::shared_ptr<QPromise<ToolResult>> promise) {
     const QString data_json = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
     const QString cache_key = "alt:" + command + ":" + data_json;
 
@@ -36,16 +36,19 @@ static void run_alt_async(const QString& command, const QJsonObject& params, Too
     if (!cached.isNull()) {
         auto doc = QJsonDocument::fromJson(cached.toString().toUtf8());
         if (!doc.isNull() && doc.isObject()) {
-            promise->addResult(ToolResult::ok_data(doc.object()));
-            promise->finish();
+            // Resolve through the shared single-winner guard (ctx.resolve_guard) like every
+            // other path in this file — a bare addResult()/finish() left that flag unset,
+            // so the provider's watchdog (same atomic) could still claim the call later.
+            AsyncDispatch::callback_to_promise(nullptr, ctx, promise, [obj = doc.object()](auto resolve) {
+                resolve(ToolResult::ok_data(obj));
+            });
             return;
         }
     }
 
     auto* runner = &python::PythonRunner::instance();
     AsyncDispatch::callback_to_promise(
-        runner, ctx, promise,
-        [runner, command, data_json, cache_key, ctx](auto resolve) {
+        runner, ctx, promise, [runner, command, data_json, cache_key, ctx](auto resolve) {
             runner->run("Analytics/alternateInvestment/cli.py", {command, "--data", data_json},
                         [resolve, cache_key, ctx](const python::PythonResult& result) {
                             if (ctx.cancelled()) {
@@ -53,8 +56,7 @@ static void run_alt_async(const QString& command, const QJsonObject& params, Too
                                 return;
                             }
                             if (!result.success) {
-                                resolve(ToolResult::fail(
-                                    result.error.isEmpty() ? "Analysis failed" : result.error));
+                                resolve(ToolResult::fail(result.error.isEmpty() ? "Analysis failed" : result.error));
                                 return;
                             }
                             // Extract JSON from stdout
@@ -66,8 +68,7 @@ static void run_alt_async(const QString& command, const QJsonObject& params, Too
                                 return;
                             }
                             QJsonParseError err;
-                            auto doc = QJsonDocument::fromJson(
-                                out.mid(start, end - start + 1).toUtf8(), &err);
+                            auto doc = QJsonDocument::fromJson(out.mid(start, end - start + 1).toUtf8(), &err);
                             if (doc.isNull() || !doc.isObject()) {
                                 resolve(ToolResult::fail("Invalid JSON: " + err.errorString()));
                                 return;
@@ -119,7 +120,7 @@ static ToolSchema make_schema(const QString& type_description) {
         t.input_schema = make_schema(TYPE_DESC);                                                                       \
         t.default_timeout_ms = kAltTimeoutMs;                                                                          \
         t.async_handler = [](const QJsonObject& args, ToolContext ctx,                                                 \
-                              std::shared_ptr<QPromise<ToolResult>> promise) {                                          \
+                             std::shared_ptr<QPromise<ToolResult>> promise) {                                          \
             QJsonObject p;                                                                                             \
             p["name"] = args["name"].toString("Investment");                                                           \
             p["type"] = args["type"].toString("default");                                                              \

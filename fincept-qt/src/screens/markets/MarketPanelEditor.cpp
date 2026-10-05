@@ -26,8 +26,8 @@ static QString input_ss() {
     return QString("QLineEdit{background:%1;color:%2;border:1px solid %3;"
                    "padding:4px 8px;selection-background-color:%4;}"
                    "QLineEdit:focus{border-color:%5;}")
-        .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_MED(),
-             ui::colors::BG_HOVER(), ui::colors::AMBER());
+        .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_MED(), ui::colors::BG_HOVER(),
+             ui::colors::AMBER());
 }
 
 static QString list_ss() {
@@ -35,8 +35,8 @@ static QString list_ss() {
                    "QListWidget::item{padding:5px 10px;border-bottom:1px solid %3;color:%4;}"
                    "QListWidget::item:hover{background:%5;color:%6;}"
                    "QListWidget::item:selected{background:%5;color:%6;}")
-        .arg(ui::colors::BG_RAISED(), ui::colors::BORDER_MED(), ui::colors::BORDER_DIM(),
-             ui::colors::TEXT_PRIMARY(), ui::colors::BG_HOVER(), ui::colors::AMBER());
+        .arg(ui::colors::BG_RAISED(), ui::colors::BORDER_MED(), ui::colors::BORDER_DIM(), ui::colors::TEXT_PRIMARY(),
+             ui::colors::BG_HOVER(), ui::colors::AMBER());
 }
 
 static QString section_lbl_ss() {
@@ -50,28 +50,32 @@ MarketPanelEditor::MarketPanelEditor(const MarketPanelConfig& config, QWidget* p
 }
 
 void MarketPanelEditor::build_ui() {
-    setWindowTitle(config_.id.isEmpty() ? "New Panel" : "Edit Panel — " + config_.title);
+    setWindowTitle(config_.id.isEmpty() ? tr("New Panel") : tr("Edit Panel — %1").arg(config_.title));
     setModal(true);
     setMinimumSize(440, 520);
-    setStyleSheet(QString("QDialog{background:%1;color:%2;}")
-                      .arg(ui::colors::BG_BASE(), ui::colors::TEXT_PRIMARY()));
+    setStyleSheet(QString("QDialog{background:%1;color:%2;}").arg(ui::colors::BG_BASE(), ui::colors::TEXT_PRIMARY()));
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(18, 18, 18, 18);
     root->setSpacing(10);
 
     // Title
-    auto* title_lbl = new QLabel("PANEL TITLE");
-    title_lbl->setStyleSheet(section_lbl_ss());
-    root->addWidget(title_lbl);
+    title_lbl_ = new QLabel(tr("PANEL TITLE"));
+    title_lbl_->setStyleSheet(section_lbl_ss());
+    root->addWidget(title_lbl_);
 
     title_edit_ = new QLineEdit(config_.title);
-    title_edit_->setPlaceholderText("e.g. My Tech Stocks");
+    title_edit_->setPlaceholderText(tr("e.g. My Tech Stocks"));
     title_edit_->setStyleSheet(input_ss());
+    connect(title_edit_, &QLineEdit::textChanged, this, [this](const QString&) {
+        if (error_lbl_)
+            error_lbl_->setVisible(false);
+    });
     root->addWidget(title_edit_);
 
     auto make_sep = [&]() {
-        auto* s = new QFrame; s->setFixedHeight(1);
+        auto* s = new QFrame;
+        s->setFixedHeight(1);
         s->setStyleSheet(QString("background:%1;border:none;").arg(ui::colors::BORDER_DIM()));
         return s;
     };
@@ -79,41 +83,38 @@ void MarketPanelEditor::build_ui() {
 
     // Ticker list header
     auto* tickers_hdr = new QWidget;
-    auto* tickers_hl  = new QHBoxLayout(tickers_hdr);
+    auto* tickers_hl = new QHBoxLayout(tickers_hdr);
     tickers_hl->setContentsMargins(0, 0, 0, 0);
-    auto* tickers_lbl = new QLabel("TICKERS");
-    tickers_lbl->setStyleSheet(section_lbl_ss());
-    tickers_hl->addWidget(tickers_lbl);
+    tickers_lbl_ = new QLabel(tr("TICKERS"));
+    tickers_lbl_->setStyleSheet(section_lbl_ss());
+    tickers_hl->addWidget(tickers_lbl_);
     tickers_hl->addStretch();
-    auto* remove_btn = new QPushButton("✕ REMOVE");
-    remove_btn->setFixedHeight(20);
-    remove_btn->setCursor(Qt::PointingHandCursor);
-    remove_btn->setStyleSheet(
-        QString("QPushButton{background:transparent;color:%1;border:1px solid %1;"
-                "padding:0 8px;font-size:11px;font-weight:bold;}"
-                "QPushButton:hover{color:%2;border-color:%2;}")
-            .arg(ui::colors::BORDER_MED(), ui::colors::NEGATIVE()));
-    connect(remove_btn, &QPushButton::clicked, this, &MarketPanelEditor::on_remove_selected);
-    tickers_hl->addWidget(remove_btn);
+    remove_btn_ = new QPushButton(tr("✕ REMOVE"));
+    remove_btn_->setFixedHeight(20);
+    remove_btn_->setCursor(Qt::PointingHandCursor);
+    remove_btn_->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %1;"
+                                       "padding:0 8px;font-size:11px;font-weight:bold;}"
+                                       "QPushButton:hover{color:%2;border-color:%2;}")
+                                   .arg(ui::colors::BORDER_MED(), ui::colors::NEGATIVE()));
+    connect(remove_btn_, &QPushButton::clicked, this, &MarketPanelEditor::on_remove_selected);
+    tickers_hl->addWidget(remove_btn_);
     root->addWidget(tickers_hdr);
 
     ticker_list_ = new QListWidget;
     ticker_list_->setStyleSheet(list_ss());
     ticker_list_->setFixedHeight(150);
-    connect(ticker_list_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) {
-        on_remove_selected();
-    });
+    connect(ticker_list_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) { on_remove_selected(); });
     root->addWidget(ticker_list_);
 
     root->addWidget(make_sep());
 
     // Search / add
-    auto* search_lbl = new QLabel("ADD TICKER  ·  type to search, click or Enter to add");
-    search_lbl->setStyleSheet(section_lbl_ss());
-    root->addWidget(search_lbl);
+    search_lbl_ = new QLabel(tr("ADD TICKER  ·  type to search, click or Enter to add"));
+    search_lbl_->setStyleSheet(section_lbl_ss());
+    root->addWidget(search_lbl_);
 
     search_edit_ = new QLineEdit;
-    search_edit_->setPlaceholderText("Search symbol or name: AAPL, Reliance, Bitcoin ...");
+    search_edit_->setPlaceholderText(tr("Search symbol or name: AAPL, Reliance, Bitcoin ..."));
     search_edit_->setStyleSheet(input_ss());
     search_edit_->installEventFilter(this);
     root->addWidget(search_edit_);
@@ -122,9 +123,7 @@ void MarketPanelEditor::build_ui() {
     search_debounce_ = new QTimer(this);
     search_debounce_->setSingleShot(true);
     search_debounce_->setInterval(kDebounceMs);
-    connect(search_debounce_, &QTimer::timeout, this, [this]() {
-        fire_search(pending_query_);
-    });
+    connect(search_debounce_, &QTimer::timeout, this, [this]() { fire_search(pending_query_); });
 
     connect(search_edit_, &QLineEdit::textChanged, this, &MarketPanelEditor::on_search_text_changed);
     connect(search_edit_, &QLineEdit::returnPressed, this, [this]() {
@@ -140,19 +139,31 @@ void MarketPanelEditor::build_ui() {
     dropdown_->setFixedHeight(160);
     dropdown_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     dropdown_->hide();
-    connect(dropdown_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
-        on_add_symbol(item->data(Qt::UserRole).toString());
-    });
+    connect(dropdown_, &QListWidget::itemClicked, this,
+            [this](QListWidgetItem* item) { on_add_symbol(item->data(Qt::UserRole).toString()); });
 
     // Dialog buttons
     auto* btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     btns->setStyleSheet(
         QString("QPushButton{background:%1;color:%2;border:1px solid %3;padding:4px 16px;font-weight:bold;}"
                 "QPushButton:hover{border-color:%4;color:%4;}")
-            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(),
-                 ui::colors::BORDER_MED(), ui::colors::AMBER()));
+            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_MED(), ui::colors::AMBER()));
     connect(btns, &QDialogButtonBox::accepted, this, [this]() {
-        config_.title = title_edit_->text().trimmed();
+        const QString title = title_edit_->text().trimmed();
+        // MarketPanelStore::load() drops any config with an empty title, so a
+        // panel saved without one vanished at the next restart with no warning.
+        // Block it at the source instead.
+        if (title.isEmpty()) {
+            show_validation_error(tr("Enter a panel title."));
+            title_edit_->setFocus();
+            return;
+        }
+        if (ticker_list_->count() == 0) {
+            show_validation_error(tr("Add at least one ticker."));
+            search_edit_->setFocus();
+            return;
+        }
+        config_.title = title;
         config_.symbols.clear();
         for (int i = 0; i < ticker_list_->count(); ++i)
             config_.symbols << ticker_list_->item(i)->text();
@@ -165,13 +176,42 @@ void MarketPanelEditor::build_ui() {
         hide_dropdown();
         reject();
     });
+    // Inline validation message (hidden until something is wrong) — a modal
+    // QMessageBox for "you forgot a title" is heavier than the problem.
+    error_lbl_ = new QLabel;
+    error_lbl_->setWordWrap(true);
+    error_lbl_->setVisible(false);
+    error_lbl_->setStyleSheet(
+        QString("color:%1;background:transparent;font-size:11px;font-weight:bold;").arg(ui::colors::NEGATIVE()));
+    root->addWidget(error_lbl_);
+
     root->addWidget(btns);
+
+    // ── Accessibility + keyboard ──
+    title_edit_->setAccessibleName(tr("Panel title"));
+    search_edit_->setAccessibleName(tr("Search for a ticker to add"));
+    ticker_list_->setAccessibleName(tr("Tickers in this panel"));
+    remove_btn_->setAccessibleName(tr("Remove the selected ticker"));
+    dropdown_->setAccessibleName(tr("Ticker search results"));
+    setTabOrder(title_edit_, ticker_list_);
+    setTabOrder(ticker_list_, remove_btn_);
+    setTabOrder(remove_btn_, search_edit_);
+    setTabOrder(search_edit_, btns);
+    title_edit_->setFocus();
 
     refresh_ticker_list();
 }
 
+void MarketPanelEditor::show_validation_error(const QString& message) {
+    if (!error_lbl_)
+        return;
+    error_lbl_->setText(message);
+    error_lbl_->setVisible(true);
+}
+
 void MarketPanelEditor::reposition_dropdown() {
-    if (!search_edit_ || !dropdown_) return;
+    if (!search_edit_ || !dropdown_)
+        return;
     QPoint pos = search_edit_->mapTo(this, QPoint(0, search_edit_->height()));
     dropdown_->setGeometry(pos.x(), pos.y(), search_edit_->width(), 160);
     dropdown_->raise();
@@ -179,7 +219,8 @@ void MarketPanelEditor::reposition_dropdown() {
 
 void MarketPanelEditor::hide_dropdown() {
     search_debounce_->stop();
-    if (dropdown_) dropdown_->hide();
+    if (dropdown_)
+        dropdown_->hide();
 }
 
 void MarketPanelEditor::resizeEvent(QResizeEvent* event) {
@@ -225,7 +266,8 @@ void MarketPanelEditor::on_search_text_changed(const QString& text) {
 }
 
 void MarketPanelEditor::fire_search(const QString& query) {
-    if (query.isEmpty()) return;
+    if (query.isEmpty())
+        return;
 
     auto& svc = services::MarketSearchService::instance();
     const QString rid = QString::number(reinterpret_cast<quintptr>(this), 16);
@@ -234,9 +276,21 @@ void MarketPanelEditor::fire_search(const QString& query) {
                 [this](const QString& request_id, const QString& q,
                        const QList<services::MarketSearchService::Item>& items) {
                     const QString my_rid = QString::number(reinterpret_cast<quintptr>(this), 16);
-                    if (request_id != my_rid) return;
-                    if (pending_query_ != q) return; // stale response
+                    if (request_id != my_rid)
+                        return;
+                    if (pending_query_ != q)
+                        return; // stale response
                     on_search_results(items);
+                });
+        // A failed lookup used to vanish: the dropdown simply never appeared and the user had
+        // no idea whether the box was broken. Say so, and that Enter still adds the typed ticker.
+        connect(&svc, &services::MarketSearchService::search_failed, this,
+                [this](const QString& request_id, const QString& q, const QString&) {
+                    const QString my_rid = QString::number(reinterpret_cast<quintptr>(this), 16);
+                    if (request_id != my_rid || pending_query_ != q)
+                        return;
+                    show_validation_error(
+                        tr("Symbol search is unavailable — press Enter to add \"%1\" as typed.").arg(q.toUpper()));
                 });
         search_connected_ = true;
     }
@@ -247,7 +301,8 @@ void MarketPanelEditor::on_search_results(const QList<services::MarketSearchServ
     dropdown_->clear();
 
     for (const auto& entry : results) {
-        if (entry.symbol.isEmpty()) continue;
+        if (entry.symbol.isEmpty())
+            continue;
         const QString display =
             entry.name.isEmpty() ? entry.symbol : QString("%1  ·  %2").arg(entry.symbol, entry.name);
         auto* item = new QListWidgetItem(display);
@@ -275,8 +330,11 @@ void MarketPanelEditor::refresh_ticker_list() {
 
 void MarketPanelEditor::on_add_symbol(const QString& symbol) {
     const QString sym = symbol.trimmed().toUpper();
-    if (sym.isEmpty() || config_.symbols.contains(sym)) return;
+    if (sym.isEmpty() || config_.symbols.contains(sym))
+        return;
     config_.symbols << sym;
+    if (error_lbl_)
+        error_lbl_->setVisible(false);
     refresh_ticker_list();
     search_edit_->clear();
     hide_dropdown();
@@ -285,13 +343,40 @@ void MarketPanelEditor::on_add_symbol(const QString& symbol) {
 
 void MarketPanelEditor::on_remove_selected() {
     auto* item = ticker_list_->currentItem();
-    if (!item) return;
+    if (!item)
+        return;
     config_.symbols.removeAll(item->text());
     refresh_ticker_list();
 }
 
 MarketPanelConfig MarketPanelEditor::result_config() const {
     return config_;
+}
+
+// ---------------------------------------------------------------------------
+// i18n — live language switch
+// ---------------------------------------------------------------------------
+
+void MarketPanelEditor::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QDialog::changeEvent(event);
+}
+
+void MarketPanelEditor::retranslateUi() {
+    setWindowTitle(config_.id.isEmpty() ? tr("New Panel") : tr("Edit Panel — %1").arg(config_.title));
+    if (title_lbl_)
+        title_lbl_->setText(tr("PANEL TITLE"));
+    if (title_edit_)
+        title_edit_->setPlaceholderText(tr("e.g. My Tech Stocks"));
+    if (tickers_lbl_)
+        tickers_lbl_->setText(tr("TICKERS"));
+    if (remove_btn_)
+        remove_btn_->setText(tr("✕ REMOVE"));
+    if (search_lbl_)
+        search_lbl_->setText(tr("ADD TICKER  ·  type to search, click or Enter to add"));
+    if (search_edit_)
+        search_edit_->setPlaceholderText(tr("Search symbol or name: AAPL, Reliance, Bitcoin ..."));
 }
 
 } // namespace fincept::screens

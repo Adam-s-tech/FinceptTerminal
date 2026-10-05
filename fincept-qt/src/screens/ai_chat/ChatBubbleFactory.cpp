@@ -7,12 +7,14 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QVariant>
 #include <QWidget>
@@ -56,10 +58,10 @@ static QString role_color(const QString& role) {
 
 static QString role_label_text(const QString& role) {
     if (role == "user")
-        return "You";
+        return QObject::tr("You");
     if (role == "system")
-        return "System";
-    return "AI";
+        return QObject::tr("System");
+    return QObject::tr("AI");
 }
 
 static QString format_timestamp(const QString& timestamp) {
@@ -72,7 +74,7 @@ static QString format_timestamp(const QString& timestamp) {
 }
 
 static QPushButton* make_copy_button(const QString& initial_text) {
-    auto* btn = new QPushButton("Copy");
+    auto* btn = new QPushButton(QObject::tr("Copy"));
     btn->setFixedHeight(20);
     btn->setCursor(Qt::PointingHandCursor);
     btn->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
@@ -85,21 +87,34 @@ static QPushButton* make_copy_button(const QString& initial_text) {
         // initial_text is captured for the static-content variant; the streaming
         // variant overrides this connection at finalize_streaming() time.
         QApplication::clipboard()->setText(initial_text);
-        btn->setText("Copied!");
-        QTimer::singleShot(1500, btn, [btn]() { btn->setText("Copy"); });
+        btn->setText(QObject::tr("Copied!"));
+        QTimer::singleShot(1500, btn, [btn]() { btn->setText(QObject::tr("Copy")); });
     });
     return btn;
+}
+
+// Markdown links in a reply (sources, filings, docs) were rendered as links but did
+// nothing when clicked: a QLabel only opens them if told to. The model controls the link
+// target, so only web links are followed — a file:// or custom-scheme URL would let a
+// reply launch a local program with one click.
+static void enable_web_links(QLabel* body) {
+    QObject::connect(body, &QLabel::linkActivated, body, [](const QString& link) {
+        const QUrl url(link);
+        const QString scheme = url.scheme().toLower();
+        if (scheme == QLatin1String("http") || scheme == QLatin1String("https"))
+            QDesktopServices::openUrl(url);
+    });
 }
 
 // Build the row + column scaffold shared by static and streaming bubbles.
 // `body` is added to the bubble frame; the column + row layouts handle role
 // label and alignment. The footer is built only when show_footer is true.
 struct Scaffold {
-    QWidget*     row      = nullptr;
-    QWidget*     column   = nullptr;
-    QVBoxLayout* col_vl   = nullptr;
-    QFrame*      frame    = nullptr;
-    QLabel*      role_lbl = nullptr;
+    QWidget* row = nullptr;
+    QWidget* column = nullptr;
+    QVBoxLayout* col_vl = nullptr;
+    QFrame* frame = nullptr;
+    QLabel* role_lbl = nullptr;
 };
 
 static Scaffold build_scaffold(const ChatBubbleFactory::Options& opts) {
@@ -155,17 +170,17 @@ ChatBubbleFactory::Bubble ChatBubbleFactory::build(const Options& opts) {
     body->setTextInteractionFlags(Qt::TextBrowserInteraction);
     body->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     body->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    body->setStyleSheet(QString("QLabel{background:transparent;color:%1;font-size:%2px;}")
-                            .arg(body_color(opts.role))
-                            .arg(fnt::BODY));
+    body->setStyleSheet(
+        QString("QLabel{background:transparent;color:%1;font-size:%2px;}").arg(body_color(opts.role)).arg(fnt::BODY));
+    enable_web_links(body);
     qobject_cast<QVBoxLayout*>(s.frame->layout())->addWidget(body);
 
     Bubble out;
-    out.row      = s.row;
-    out.column   = s.column;
-    out.frame    = s.frame;
+    out.row = s.row;
+    out.column = s.column;
+    out.frame = s.frame;
     out.role_lbl = s.role_lbl;
-    out.body     = body;
+    out.body = body;
 
     if (!opts.show_footer)
         return out;
@@ -220,17 +235,17 @@ ChatBubbleFactory::Bubble ChatBubbleFactory::build_streaming(const Options& opts
     body->setTextInteractionFlags(Qt::TextBrowserInteraction);
     body->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     body->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    body->setStyleSheet(QString("QLabel{background:transparent;color:%1;font-size:%2px;}")
-                            .arg(body_color(opts.role))
-                            .arg(fnt::BODY));
+    body->setStyleSheet(
+        QString("QLabel{background:transparent;color:%1;font-size:%2px;}").arg(body_color(opts.role)).arg(fnt::BODY));
+    enable_web_links(body);
     qobject_cast<QVBoxLayout*>(s.frame->layout())->addWidget(body);
 
     Bubble out;
-    out.row      = s.row;
-    out.column   = s.column;
-    out.frame    = s.frame;
+    out.row = s.row;
+    out.column = s.column;
+    out.frame = s.frame;
     out.role_lbl = s.role_lbl;
-    out.body     = body;
+    out.body = body;
 
     if (!opts.show_footer)
         return out;
@@ -248,7 +263,7 @@ ChatBubbleFactory::Bubble ChatBubbleFactory::build_streaming(const Options& opts
     QPushButton* copy_btn = nullptr;
     if (!is_user && !is_system) {
         copy_btn = make_copy_button({});
-        copy_btn->hide();   // shown by finalize_streaming
+        copy_btn->hide(); // shown by finalize_streaming
         fhl->addStretch();
         fhl->addWidget(copy_btn);
         // Stash on the body so finalize_streaming() can find it without an
@@ -300,8 +315,8 @@ void ChatBubbleFactory::finalize_streaming(QLabel* body, const QString& final_te
         QObject::disconnect(copy_btn, &QPushButton::clicked, nullptr, nullptr);
         QObject::connect(copy_btn, &QPushButton::clicked, copy_btn, [copy_btn, text]() {
             QApplication::clipboard()->setText(text);
-            copy_btn->setText("Copied!");
-            QTimer::singleShot(1500, copy_btn, [copy_btn]() { copy_btn->setText("Copy"); });
+            copy_btn->setText(QObject::tr("Copied!"));
+            QTimer::singleShot(1500, copy_btn, [copy_btn]() { copy_btn->setText(QObject::tr("Copy")); });
         });
         copy_btn->show();
     }

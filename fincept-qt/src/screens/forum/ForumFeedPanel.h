@@ -2,9 +2,13 @@
 #pragma once
 #include "services/forum/ForumModels.h"
 
+#include <QEvent>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QLabel>
+#include <QPushButton>
 #include <QScrollArea>
+#include <QShowEvent>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -17,6 +21,10 @@ class ForumFeedPanel : public QWidget {
     explicit ForumFeedPanel(QWidget* parent = nullptr);
 
     void set_posts(const services::ForumPostsPage& page, const QString& cat_color = {});
+    /// Replace the list with a "could not load" state + Retry button. Used when a
+    /// fetch fails — otherwise the previous list stayed on screen under the new
+    /// category's header, or a misleading "NO DISCUSSIONS YET" was shown.
+    void set_error(const QString& message);
     void set_loading(bool on);
     void set_active_post(const QString& uuid);
     void clear_active();
@@ -34,6 +42,12 @@ class ForumFeedPanel : public QWidget {
     void profile_edit_requested();
     void new_post_clicked();
     void vote_post_requested(const QString& post_uuid, const QString& vote_type);
+    void retry_requested();
+
+  protected:
+    void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
   private:
     void build_ui();
@@ -42,11 +56,13 @@ class ForumFeedPanel : public QWidget {
     void rebuild_category_chips();
     void show_skeleton();
     void pulse_skeleton();
+    void retranslateUi();
 
     // Toolbar
     QWidget* toolbar_ = nullptr;
     QLabel* header_lbl_ = nullptr;
     QLabel* header_count_lbl_ = nullptr;
+    QPushButton* new_post_btn_ = nullptr;
     QWidget* chips_container_ = nullptr;
     QHBoxLayout* chips_layout_ = nullptr;
 

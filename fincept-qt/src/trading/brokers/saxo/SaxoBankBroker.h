@@ -60,6 +60,12 @@ class SaxoBankBroker : public IBroker {
 
     TokenExchangeResponse exchange_token(const QString& api_key, const QString& api_secret,
                                          const QString& auth_code) override;
+
+    // Saxo access tokens last ~20 minutes; the rolling refresh token stored at connect time
+    // re-issues one without user interaction.
+    bool supports_silent_refresh() const override { return true; }
+    TokenExchangeResponse refresh_session(const BrokerCredentials& creds) override;
+
     OrderPlaceResponse place_order(const BrokerCredentials& creds, const UnifiedOrder& order) override;
     ApiResponse<QJsonObject> modify_order(const BrokerCredentials& creds, const QString& order_id,
                                           const QJsonObject& mods) override;
@@ -87,6 +93,8 @@ class SaxoBankBroker : public IBroker {
     static int saxo_horizon(const QString& resolution);
     // Extract Uic from symbol "NYSE:AAPL:211" → "211"
     static QString extract_uic(const QString& symbol);
+    // Extract optional AssetType from symbol "EXCHANGE:SYMBOL:UIC:ASSETTYPE" → 4th part, else "Stock"
+    static QString extract_asset_type(const QString& symbol);
 };
 
 } // namespace fincept::trading

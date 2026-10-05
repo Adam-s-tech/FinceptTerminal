@@ -1,5 +1,7 @@
 #include "screens/dashboard/DashboardStatusBar.h"
 
+#include "core/config/AppConfig.h"
+#include "screens/action_center/PendingOrdersBadge.h"
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
 #include "ui/widgets/NotifBell.h"
@@ -125,6 +127,10 @@ DashboardStatusBar::DashboardStatusBar(QWidget* parent) : QWidget(parent) {
     rl->addWidget(ready_lbl_);
     rl->addWidget(make_sep());
 
+    // ── Pending approvals badge (hidden when none) ──────────────────────────
+    pending_badge_ = new PendingOrdersBadge(this);
+    rl->addWidget(pending_badge_);
+
     // ── Notification bell ──────────────────────────────────────────────────
     notif_bell_ = new fincept::ui::NotifBell(this);
     rl->addWidget(notif_bell_);
@@ -167,13 +173,20 @@ void DashboardStatusBar::refresh_theme() {
                           "#dsMem { color:%7; background:transparent; }"
                           "#dsLatency { color:%4; font-weight:bold; background:transparent; }"
                           "#dsReady { color:%5; font-weight:bold; background:transparent; }")
-                      .arg(ui::colors::BG_BASE())         // %1 — match global status bar
+                      .arg(ui::colors::BG_BASE())        // %1 — match global status bar
                       .arg(ui::colors::BORDER_DIM())     // %2
                       .arg(ui::colors::BORDER_MED())     // %3
                       .arg(ui::colors::TEXT_SECONDARY()) // %4
                       .arg(ui::colors::POSITIVE())       // %5
                       .arg(ui::colors::WARNING())        // %6
                       .arg(ui::colors::CYAN()));         // %7
+
+    // The bar-level sheet just replaced the per-label colour overrides —
+    // force them to be re-applied against the new tokens on the next tick.
+    mem_color_applied_.clear();
+    if (feeds_label_)
+        feeds_label_->setStyleSheet(QString("color:%1;font-weight:bold;background:transparent;")
+                                        .arg(feeds_connected_ ? ui::colors::POSITIVE() : ui::colors::NEGATIVE()));
 }
 
 void DashboardStatusBar::showEvent(QShowEvent* event) {
@@ -216,10 +229,13 @@ void DashboardStatusBar::set_widget_count(int count) {
 }
 
 void DashboardStatusBar::set_connected(bool connected) {
+    if (feeds_connected_ == connected && last_latency_ms_ != -2)
+        return; // no change — skip the CSS reparse
     feeds_connected_ = connected;
     feeds_label_->setText(connected ? tr("CONNECTED") : tr("DISCONNECTED"));
     feeds_label_->setStyleSheet(QString("color:%1;font-weight:bold;background:transparent;")
                                     .arg(connected ? ui::colors::POSITIVE() : ui::colors::NEGATIVE()));
+    emit connectivity_changed(connected);
 }
 
 void DashboardStatusBar::update_memory() {
@@ -228,15 +244,14 @@ void DashboardStatusBar::update_memory() {
     double rss_mb = -1.0;
 #if defined(Q_OS_WIN)
     PROCESS_MEMORY_COUNTERS_EX pmc{};
-    if (GetProcessMemoryInfo(GetCurrentProcess(),
-                             reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc))) {
+    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc))) {
         rss_mb = static_cast<double>(pmc.WorkingSetSize) / (1024.0 * 1024.0);
     }
 #elif defined(Q_OS_MAC)
     mach_task_basic_info_data_t info{};
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
-                  reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &count) ==
+        KERN_SUCCESS) {
         rss_mb = static_cast<double>(info.resident_size) / (1024.0 * 1024.0);
     }
 #elif defined(Q_OS_LINUX)
@@ -254,25 +269,37 @@ void DashboardStatusBar::update_memory() {
         return;
     }
     // Colour: green < 512 MB, amber < 1024 MB, red beyond.
-    const QString color = rss_mb < 512.0 ? ui::colors::POSITIVE()
+    const QString color = rss_mb < 512.0    ? ui::colors::POSITIVE()
                           : rss_mb < 1024.0 ? ui::colors::AMBER()
                                             : ui::colors::NEGATIVE();
     mem_label_->setText(tr("MEM: %1 MB").arg(rss_mb, 0, 'f', 0));
-    mem_label_->setStyleSheet(QString("color:%1;background:transparent;").arg(color));
+    if (color != mem_color_applied_) {
+        mem_color_applied_ = color;
+        mem_label_->setStyleSheet(QString("color:%1;background:transparent;").arg(color));
+    }
 }
 
 void DashboardStatusBar::ping_api() {
-    QNetworkRequest req(QUrl("https://api.fincept.in/health"));
+    QNetworkRequest req(QUrl(fincept::AppConfig::instance().api_base_url() + "/health"));
     req.setTransferTimeout(5000);
-    ping_elapsed_.restart();
+    // Per-request timer. A single shared member was restarted by every new probe,
+    // and showEvent() fires one on each tab show on top of the 30 s cadence — so
+    // a probe still in flight reported the age of the newest one (a too-small LAT).
+    QElapsedTimer started;
+    started.start();
     QNetworkReply* reply = nam_->get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, started]() {
         reply->deleteLater();
-        set_latency(reply->error() == QNetworkReply::NoError ? static_cast<int>(ping_elapsed_.elapsed()) : -1);
+        set_latency(reply->error() == QNetworkReply::NoError ? static_cast<int>(started.elapsed()) : -1);
     });
 }
 
 void DashboardStatusBar::set_latency(int ms) {
+    // The health probe is the only real connectivity signal this screen has;
+    // FEEDS previously said "CONNECTED" permanently because set_connected()
+    // had no caller at all.
+    set_connected(ms >= 0);
+
     last_latency_ms_ = ms;
     if (ms < 0) {
         latency_label_->setText(tr("LAT: ERR"));
@@ -292,16 +319,25 @@ void DashboardStatusBar::changeEvent(QEvent* event) {
 }
 
 void DashboardStatusBar::retranslateUi() {
-    if (session_lbl_)         session_lbl_->setText(tr("SESSION:"));
-    if (layout_caption_lbl_)  layout_caption_lbl_->setText(tr("LAYOUT:"));
-    if (feeds_caption_lbl_)   feeds_caption_lbl_->setText(tr("FEEDS:"));
-    if (ready_lbl_)           ready_lbl_->setText(QString::fromUtf8("● ") + tr("READY"));
-    if (layout_label_)        layout_label_->setText(layout_count_ > 0 ? tr("ACTIVE") : tr("EMPTY"));
-    if (feeds_label_)         feeds_label_->setText(feeds_connected_ ? tr("CONNECTED") : tr("DISCONNECTED"));
+    if (session_lbl_)
+        session_lbl_->setText(tr("SESSION:"));
+    if (layout_caption_lbl_)
+        layout_caption_lbl_->setText(tr("LAYOUT:"));
+    if (feeds_caption_lbl_)
+        feeds_caption_lbl_->setText(tr("FEEDS:"));
+    if (ready_lbl_)
+        ready_lbl_->setText(QString::fromUtf8("● ") + tr("READY"));
+    if (layout_label_)
+        layout_label_->setText(layout_count_ > 0 ? tr("ACTIVE") : tr("EMPTY"));
+    if (feeds_label_)
+        feeds_label_->setText(feeds_connected_ ? tr("CONNECTED") : tr("DISCONNECTED"));
     if (latency_label_) {
-        if (last_latency_ms_ == -2)      latency_label_->setText(tr("LAT: ---"));
-        else if (last_latency_ms_ < 0)   latency_label_->setText(tr("LAT: ERR"));
-        else                              latency_label_->setText(tr("LAT: %1ms").arg(last_latency_ms_));
+        if (last_latency_ms_ == -2)
+            latency_label_->setText(tr("LAT: ---"));
+        else if (last_latency_ms_ < 0)
+            latency_label_->setText(tr("LAT: ERR"));
+        else
+            latency_label_->setText(tr("LAT: %1ms").arg(last_latency_ms_));
     }
     // mem_label_ refreshes on its own timer; immediate re-tick keeps the label fresh.
     update_memory();

@@ -1,8 +1,8 @@
 // src/screens/gov_data/GovDataTreasuryPanel.cpp
 #include "screens/gov_data/GovDataTreasuryPanel.h"
-#include "screens/gov_data/GovDataProviderPanel.h"
 
 #include "core/logging/Logger.h"
+#include "screens/gov_data/GovDataProviderPanel.h"
 #include "services/gov_data/GovDataService.h"
 #include "ui/theme/Theme.h"
 
@@ -54,7 +54,8 @@ static QString build_treasury_style() {
     s += QString("#govCsvBtn:hover { color:%1; background:%2; }").arg(t.text_primary, t.bg_hover);
 
     // Filter bar
-    s += QString("#govTreasuryFilterBar { background:%1; border-bottom:1px solid %2; }").arg(t.bg_surface, t.border_dim);
+    s +=
+        QString("#govTreasuryFilterBar { background:%1; border-bottom:1px solid %2; }").arg(t.bg_surface, t.border_dim);
     s += QString("#govTreasuryFilterLabel { color:%1; font-size:9px; font-weight:700;"
                  "  letter-spacing:0.5px; background:transparent; }")
              .arg(t.text_secondary);
@@ -184,10 +185,10 @@ void GovDataTreasuryPanel::build_ui() {
         crhl->addWidget(card);
     };
 
-    make_card(card_total_lbl_,     total_securities_label_);
-    make_card(card_min_rate_lbl_,  min_rate_label_,  &card_min_rate_sub_);
-    make_card(card_max_rate_lbl_,  max_rate_label_,  &card_max_rate_sub_);
-    make_card(card_avg_rate_lbl_,  avg_rate_label_,  &card_avg_rate_sub_);
+    make_card(card_total_lbl_, total_securities_label_);
+    make_card(card_min_rate_lbl_, min_rate_label_, &card_min_rate_sub_);
+    make_card(card_max_rate_lbl_, max_rate_label_, &card_max_rate_sub_);
+    make_card(card_avg_rate_lbl_, avg_rate_label_, &card_avg_rate_sub_);
     make_card(card_min_price_lbl_, min_price_label_, &card_min_price_sub_);
     make_card(card_max_price_lbl_, max_price_label_, &card_max_price_sub_);
     make_card(card_avg_price_lbl_, avg_price_label_, &card_avg_price_sub_);
@@ -342,15 +343,23 @@ void GovDataTreasuryPanel::load_initial_data() {
 // ── Re-translation ───────────────────────────────────────────────────────────
 
 void GovDataTreasuryPanel::retranslateUi() {
-    if (prices_btn_)   prices_btn_->setText(tr("PRICES"));
-    if (auctions_btn_) auctions_btn_->setText(tr("AUCTIONS"));
-    if (summary_btn_)  summary_btn_->setText(tr("SUMMARY"));
-    if (fetch_btn_)    fetch_btn_->setText(tr("FETCH"));
-    if (export_btn_)   export_btn_->setText(tr("CSV"));
+    if (prices_btn_)
+        prices_btn_->setText(tr("PRICES"));
+    if (auctions_btn_)
+        auctions_btn_->setText(tr("AUCTIONS"));
+    if (summary_btn_)
+        summary_btn_->setText(tr("SUMMARY"));
+    if (fetch_btn_)
+        fetch_btn_->setText(tr("FETCH"));
+    if (export_btn_)
+        export_btn_->setText(tr("CSV"));
 
-    if (filter_from_lbl_) filter_from_lbl_->setText(tr("FROM"));
-    if (filter_to_lbl_)   filter_to_lbl_->setText(tr("TO"));
-    if (filter_type_lbl_) filter_type_lbl_->setText(tr("TYPE"));
+    if (filter_from_lbl_)
+        filter_from_lbl_->setText(tr("FROM"));
+    if (filter_to_lbl_)
+        filter_to_lbl_->setText(tr("TO"));
+    if (filter_type_lbl_)
+        filter_type_lbl_->setText(tr("TYPE"));
 
     if (security_type_) {
         // Preserve the user's current selection across language change by
@@ -363,38 +372,52 @@ void GovDataTreasuryPanel::retranslateUi() {
         security_type_->setItemText(4, tr("TIPS"));
         security_type_->setItemText(5, tr("FRN"));
         const int idx = security_type_->findData(cur);
-        if (idx >= 0) security_type_->setCurrentIndex(idx);
+        if (idx >= 0)
+            security_type_->setCurrentIndex(idx);
     }
 
     if (prices_table_)
         prices_table_->setHorizontalHeaderLabels(
-            {tr("CUSIP"), tr("TYPE"), tr("RATE %"), tr("MATURITY"),
-             tr("BID"), tr("OFFER"), tr("EOD PRICE")});
+            {tr("CUSIP"), tr("TYPE"), tr("RATE %"), tr("MATURITY"), tr("BID"), tr("OFFER"), tr("EOD PRICE")});
     if (auctions_table_)
-        auctions_table_->setHorizontalHeaderLabels(
-            {tr("CUSIP"), tr("TYPE"), tr("TERM"), tr("AUCTION DATE"),
-             tr("HIGH RATE"), tr("HIGH PRICE"), tr("BID/COVER"), tr("OFFERING")});
+        auctions_table_->setHorizontalHeaderLabels({tr("CUSIP"), tr("TYPE"), tr("TERM"), tr("AUCTION DATE"),
+                                                    tr("HIGH RATE"), tr("HIGH PRICE"), tr("BID/COVER"),
+                                                    tr("OFFERING")});
     if (type_breakdown_table_)
         type_breakdown_table_->setHorizontalHeaderLabels({tr("TYPE"), tr("COUNT")});
 
-    if (card_total_lbl_)     card_total_lbl_->setText(tr("TOTAL SECURITIES"));
-    if (card_min_rate_lbl_)  card_min_rate_lbl_->setText(tr("MIN RATE"));
-    if (card_max_rate_lbl_)  card_max_rate_lbl_->setText(tr("MAX RATE"));
-    if (card_avg_rate_lbl_)  card_avg_rate_lbl_->setText(tr("AVG RATE"));
-    if (card_min_price_lbl_) card_min_price_lbl_->setText(tr("MIN PRICE"));
-    if (card_max_price_lbl_) card_max_price_lbl_->setText(tr("MAX PRICE"));
-    if (card_avg_price_lbl_) card_avg_price_lbl_->setText(tr("AVG PRICE"));
+    if (card_total_lbl_)
+        card_total_lbl_->setText(tr("TOTAL SECURITIES"));
+    if (card_min_rate_lbl_)
+        card_min_rate_lbl_->setText(tr("MIN RATE"));
+    if (card_max_rate_lbl_)
+        card_max_rate_lbl_->setText(tr("MAX RATE"));
+    if (card_avg_rate_lbl_)
+        card_avg_rate_lbl_->setText(tr("AVG RATE"));
+    if (card_min_price_lbl_)
+        card_min_price_lbl_->setText(tr("MIN PRICE"));
+    if (card_max_price_lbl_)
+        card_max_price_lbl_->setText(tr("MAX PRICE"));
+    if (card_avg_price_lbl_)
+        card_avg_price_lbl_->setText(tr("AVG PRICE"));
 
     const QString yield_sub = tr("yield %");
     const QString price_sub = tr("per $100");
-    if (card_min_rate_sub_)  card_min_rate_sub_->setText(yield_sub);
-    if (card_max_rate_sub_)  card_max_rate_sub_->setText(yield_sub);
-    if (card_avg_rate_sub_)  card_avg_rate_sub_->setText(yield_sub);
-    if (card_min_price_sub_) card_min_price_sub_->setText(price_sub);
-    if (card_max_price_sub_) card_max_price_sub_->setText(price_sub);
-    if (card_avg_price_sub_) card_avg_price_sub_->setText(price_sub);
+    if (card_min_rate_sub_)
+        card_min_rate_sub_->setText(yield_sub);
+    if (card_max_rate_sub_)
+        card_max_rate_sub_->setText(yield_sub);
+    if (card_avg_rate_sub_)
+        card_avg_rate_sub_->setText(yield_sub);
+    if (card_min_price_sub_)
+        card_min_price_sub_->setText(price_sub);
+    if (card_max_price_sub_)
+        card_max_price_sub_->setText(price_sub);
+    if (card_avg_price_sub_)
+        card_avg_price_sub_->setText(price_sub);
 
-    if (breakdown_hdr_lbl_) breakdown_hdr_lbl_->setText(tr("SECURITY TYPE BREAKDOWN"));
+    if (breakdown_hdr_lbl_)
+        breakdown_hdr_lbl_->setText(tr("SECURITY TYPE BREAKDOWN"));
 }
 
 void GovDataTreasuryPanel::on_endpoint_changed(int index) {
@@ -457,8 +480,23 @@ void GovDataTreasuryPanel::on_result(const QString& request_id, const services::
 
 // ── Populate ─────────────────────────────────────────────────────────────────
 
+namespace {
+// government_us_data.py returns the rows under "data" (the panel used to read a "json" key the script
+// never emits, so every Prices/Auctions table rendered empty). Keep "json" as a fallback.
+QJsonArray gov_treasury_rows(const QJsonObject& json) {
+    return json["data"].isArray() ? json["data"].toArray() : json["json"].toArray();
+}
+
+// Rates arrive as fractions (0.04125 == 4.125 %); the columns are labelled in percent.
+QString gov_treasury_pct(const QJsonValue& v) {
+    if (v.isNull() || v.isUndefined() || !v.isDouble())
+        return QStringLiteral("—");
+    return QString::number(v.toDouble() * 100.0, 'f', 3);
+}
+} // namespace
+
 void GovDataTreasuryPanel::populate_prices(const QJsonObject& json) {
-    const QJsonArray records = json["json"].toArray();
+    const QJsonArray records = gov_treasury_rows(json);
     prices_table_->setRowCount(0);
     prices_table_->setRowCount(records.size());
 
@@ -476,7 +514,7 @@ void GovDataTreasuryPanel::populate_prices(const QJsonObject& json) {
         type_item->setForeground(QColor(kGovDataTreasuryColor));
         prices_table_->setItem(i, 1, type_item);
 
-        prices_table_->setItem(i, 2, new QTableWidgetItem(fmt(r["rate"])));
+        prices_table_->setItem(i, 2, new QTableWidgetItem(gov_treasury_pct(r["rate"])));
         QString mat = r["maturity_date"].toString();
         prices_table_->setItem(i, 3, new QTableWidgetItem(mat.isEmpty() ? "—" : mat));
 
@@ -490,7 +528,7 @@ void GovDataTreasuryPanel::populate_prices(const QJsonObject& json) {
 }
 
 void GovDataTreasuryPanel::populate_auctions(const QJsonObject& json) {
-    const QJsonArray records = json["json"].toArray();
+    const QJsonArray records = gov_treasury_rows(json);
     auctions_table_->setRowCount(0);
     auctions_table_->setRowCount(records.size());
 
@@ -509,18 +547,28 @@ void GovDataTreasuryPanel::populate_auctions(const QJsonObject& json) {
         auctions_table_->setItem(i, 1, type_item);
 
         auctions_table_->setItem(i, 2, new QTableWidgetItem(r["securityTerm"].toString()));
-        QString adate = r["auctionDate"].toString();
+        QString adate = r["auctionDate"].toString().left(10); // "2026-09-24T00:00:00" -> date
         auctions_table_->setItem(i, 3, new QTableWidgetItem(adate.isEmpty() ? "—" : adate));
 
+        // Bills auction on a discount rate; notes/bonds on a yield (the discount-rate field is null for
+        // them, which left the HIGH RATE column blank for every coupon security).
+        QJsonValue high_rate = r["highDiscountRate"];
+        if (high_rate.isNull() || high_rate.isUndefined())
+            high_rate = r["highYield"];
+        if (high_rate.isNull() || high_rate.isUndefined())
+            high_rate = r["highInvestmentRate"];
+
         for (int c : {4, 5, 6}) {
-            auto key = c == 4 ? "highDiscountRate" : c == 5 ? "highPrice" : "bidToCoverRatio";
-            auto* it = new QTableWidgetItem(fmt(r[key]));
+            const QString text = c == 4   ? gov_treasury_pct(high_rate)
+                                 : c == 5 ? fmt(r["highPrice"])
+                                          : fmt(r["bidToCoverRatio"]);
+            auto* it = new QTableWidgetItem(text);
             it->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
             auctions_table_->setItem(i, c, it);
         }
 
         double offering = r["offeringAmount"].toDouble(0);
-        QString os = offering > 0 ? "$" + QString::number(static_cast<qlonglong>(offering / 1e9), 'f', 1) + "B" : "—";
+        QString os = offering > 0 ? "$" + QString::number(offering / 1e9, 'f', 1) + "B" : "—";
         auctions_table_->setItem(i, 7, new QTableWidgetItem(os));
     }
     LOG_INFO("GovTreasury", QString("Loaded %1 auction records").arg(records.size()));
@@ -530,9 +578,9 @@ void GovDataTreasuryPanel::populate_summary(const QJsonObject& json) {
     total_securities_label_->setText(QString::number(json["total_securities"].toInt()));
 
     auto yield = json["yield_summary"].toObject();
-    min_rate_label_->setText(QString::number(yield["min_rate"].toDouble(), 'f', 3) + "%");
-    max_rate_label_->setText(QString::number(yield["max_rate"].toDouble(), 'f', 3) + "%");
-    avg_rate_label_->setText(QString::number(yield["avg_rate"].toDouble(), 'f', 3) + "%");
+    min_rate_label_->setText(gov_treasury_pct(yield["min_rate"]) + "%");
+    max_rate_label_->setText(gov_treasury_pct(yield["max_rate"]) + "%");
+    avg_rate_label_->setText(gov_treasury_pct(yield["avg_rate"]) + "%");
 
     auto price = json["price_summary"].toObject();
     min_price_label_->setText(QString::number(price["min_price"].toDouble(), 'f', 2));

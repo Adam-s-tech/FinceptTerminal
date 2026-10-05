@@ -7,6 +7,7 @@
 // Qt6 Charts as a dependency for a chart that is fundamentally a polyline.
 
 #include <QColor>
+#include <QEvent>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -23,13 +24,9 @@ class SurfaceLineWidget : public QWidget {
     // Render a single named curve.
     // Optional categorical x-labels are rendered as tick labels under the axis;
     // if empty, numeric x_values are formatted directly.
-    void set_curve(const QString& title,
-                   const std::vector<float>& x_values,
-                   const std::vector<float>& y_values,
-                   const QStringList& x_labels = {},
-                   const QString& x_axis_title = QString(),
-                   const QString& y_axis_title = QString(),
-                   const QColor& line_color = QColor(88, 166, 255));
+    void set_curve(const QString& title, const std::vector<float>& x_values, const std::vector<float>& y_values,
+                   const QStringList& x_labels = {}, const QString& x_axis_title = QString(),
+                   const QString& y_axis_title = QString(), const QColor& line_color = QColor(88, 166, 255));
 
     // Render multiple curves on the same axes (e.g. one per commodity for contango).
     struct Series {
@@ -38,15 +35,15 @@ class SurfaceLineWidget : public QWidget {
         std::vector<float> y_values;
         QColor color;
     };
-    void set_series(const QString& title,
-                    const std::vector<Series>& series,
-                    const QString& x_axis_title = QString(),
+    void set_series(const QString& title, const std::vector<Series>& series, const QString& x_axis_title = QString(),
                     const QString& y_axis_title = QString());
 
     void clear();
 
   protected:
     void paintEvent(QPaintEvent* event) override;
+    // Repaint on language change so the painter-drawn placeholder refreshes.
+    void changeEvent(QEvent* event) override;
 
   private:
     QString title_;

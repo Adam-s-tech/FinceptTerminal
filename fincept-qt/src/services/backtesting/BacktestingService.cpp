@@ -3,9 +3,11 @@
 
 #include "core/logging/Logger.h"
 #include "python/PythonRunner.h"
+#include "services/backtesting/BacktestBrokerData.h"
 #include "storage/cache/CacheManager.h"
 
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QPointer>
 
@@ -22,6 +24,45 @@ BacktestingService& BacktestingService::instance() {
 BacktestingService::BacktestingService(QObject* parent) : QObject(parent) {}
 
 void BacktestingService::execute(const QString& provider, const QString& command, const QJsonObject& args) {
+    const QJsonArray symbols = args.value("symbols").toArray();
+
+    // Broker data is wired for VectorBT only (v1). Skip for metadata calls
+    // (get_indicators sends empty args → no symbols) and when no Indian broker
+    // is connected — those paths are byte-for-byte the original behaviour.
+    const bool wants_broker =
+        provider == QLatin1String("vectorbt") && !symbols.isEmpty() && BacktestBrokerData::has_active_indian_broker();
+    if (!wants_broker) {
+        dispatch_python(provider, command, args);
+        return;
+    }
+
+    QStringList syms;
+    syms.reserve(symbols.size());
+    for (const auto& s : symbols)
+        syms << s.toString();
+    const QString start = args.value("startDate").toString();
+    const QString end = args.value("endDate").toString();
+    const QString interval = args.value("interval").toString(QStringLiteral("1d"));
+
+    QPointer<BacktestingService> self = this;
+    BacktestBrokerData::fetch(
+        this, syms, start, end, interval, [self, provider, command, args](QJsonObject candles, QString broker_id) {
+            if (!self)
+                return;
+            QJsonObject enriched = args;
+            if (!candles.isEmpty()) {
+                enriched["brokerCandles"] = candles;
+                enriched["brokerDataSource"] = broker_id;
+                LOG_INFO("Backtesting",
+                         QString("Using %1 broker data for %2 symbol(s)").arg(broker_id).arg(candles.size()));
+            } else {
+                LOG_INFO("Backtesting", "No broker candles resolved — using yfinance");
+            }
+            self->dispatch_python(provider, command, enriched);
+        });
+}
+
+void BacktestingService::dispatch_python(const QString& provider, const QString& command, const QJsonObject& args) {
     // Build script path: Analytics/backtesting/{provider}/{provider}_provider.py
     auto script = QString("Analytics/backtesting/%1/%1_provider.py").arg(provider);
     auto json_str = QJsonDocument(args).toJson(QJsonDocument::Compact);
@@ -75,14 +116,13 @@ void BacktestingService::execute(const QString& provider, const QString& command
                 emit self->error_occurred(ctx, err);
                 return;
             }
-            QJsonObject payload = root.contains("data") && root.value("data").isObject()
-                                      ? root.value("data").toObject()
-                                      : root;
+            QJsonObject payload =
+                root.contains("data") && root.value("data").isObject() ? root.value("data").toObject() : root;
             // Some providers (optimize, walk_forward) historically returned
             // `{success: True, data: {success: false, error: ...}}`. Surface the
             // inner failure too so the UI doesn't render an empty result panel.
-            if (payload.contains("success") && payload.value("success").isBool()
-                && !payload.value("success").toBool()) {
+            if (payload.contains("success") && payload.value("success").isBool() &&
+                !payload.value("success").toBool()) {
                 auto err = payload.value("error").toString();
                 if (err.isEmpty())
                     err = payload.value("message").toString("Command failed");
@@ -166,19 +206,29 @@ void BacktestingService::list_strategies() {
     // fincept_provider.py exposes the catalog under "get_strategies" and requires
     // a JSON args payload (sys.argv[2]) — pass an empty object.
     QPointer<BacktestingService> self = this;
-    python::PythonRunner::instance().run(
-        "Analytics/backtesting/fincept/fincept_provider.py", {"get_strategies", "{}"},
-        [self](python::PythonResult result) {
-            if (!self)
-                return;
-            if (!result.success) {
-                emit self->error_occurred("list_strategies", result.error);
-                return;
-            }
-            auto doc = QJsonDocument::fromJson(python::extract_json(result.output).toUtf8());
-            if (!doc.isNull())
-                emit self->strategies_loaded(doc.object());
-        });
+    python::PythonRunner::instance().run("Analytics/backtesting/fincept/fincept_provider.py", {"get_strategies", "{}"},
+                                         [self](python::PythonResult result) {
+                                             if (!self)
+                                                 return;
+                                             if (!result.success) {
+                                                 emit self->error_occurred("list_strategies", result.error);
+                                                 return;
+                                             }
+                                             auto doc =
+                                                 QJsonDocument::fromJson(python::extract_json(result.output).toUtf8());
+                                             if (!doc.isNull())
+                                                 emit self->strategies_loaded(doc.object());
+                                         });
+}
+
+void BacktestingService::set_pending_portfolio_config(const QJsonObject& config) {
+    pending_portfolio_config_ = config;
+}
+
+QJsonObject BacktestingService::take_pending_portfolio_config() {
+    QJsonObject result;
+    std::swap(result, pending_portfolio_config_);
+    return result;
 }
 
 } // namespace fincept::services::backtest

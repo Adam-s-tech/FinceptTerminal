@@ -119,6 +119,16 @@ ToolBar::ToolBar(QWidget* parent) : QWidget(parent) {
     plan_btn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     connect(plan_btn_, &QPushButton::clicked, this, &ToolBar::plan_clicked);
     hl->addWidget(plan_btn_);
+
+    // Enterprise CTA. Deliberately added without its own separator: the
+    // credits/chat visibility toggles in apply_responsive_layout() index into
+    // separators_ by position, so inserting one here would shift them.
+    upgrade_btn_ = new QPushButton;
+    upgrade_btn_->setFixedHeight(20);
+    upgrade_btn_->setCursor(Qt::PointingHandCursor);
+    upgrade_btn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    connect(upgrade_btn_, &QPushButton::clicked, this, &ToolBar::upgrade_clicked);
+    hl->addWidget(upgrade_btn_);
     sep();
 
     chat_mode_btn_ = new QPushButton;
@@ -141,7 +151,7 @@ ToolBar::ToolBar(QWidget* parent) : QWidget(parent) {
     clock_timer_ = new QTimer(this);
     clock_timer_->setInterval(1000);
     connect(clock_timer_, &QTimer::timeout, this, &ToolBar::update_clock);
-    clock_timer_->start();
+    // Started in showEvent() and stopped in hideEvent() (§P3).
     update_clock();
 
     connect(&auth::AuthManager::instance(), &auth::AuthManager::auth_state_changed, this,
@@ -161,16 +171,41 @@ void ToolBar::changeEvent(QEvent* e) {
     QWidget::changeEvent(e);
 }
 
+void ToolBar::showEvent(QShowEvent* e) {
+    QWidget::showEvent(e);
+    update_clock(); // catch up immediately after being hidden
+    clock_timer_->start();
+}
+
+void ToolBar::hideEvent(QHideEvent* e) {
+    QWidget::hideEvent(e);
+    clock_timer_->stop();
+}
+
 void ToolBar::retranslateUi() {
-    if (subtitle_label_) subtitle_label_->setText(tr("  |  PROFESSIONAL RESEARCH DESK"));
-    if (live_label_)     live_label_->setText(tr(" LIVE"));
-    if (plan_btn_)       plan_btn_->setToolTip(tr("View Plans & Pricing"));
+    if (subtitle_label_)
+        subtitle_label_->setText(tr("  |  PROFESSIONAL RESEARCH DESK"));
+    if (live_label_)
+        live_label_->setText(tr(" LIVE"));
+    if (plan_btn_)
+        plan_btn_->setToolTip(tr("View Plans & Pricing"));
+    if (upgrade_btn_) {
+        // U+25B4 up-pointing triangle as an icon; only the label translates.
+        // fromUtf8 is required — QStringLiteral would widen each UTF-8 byte
+        // into its own UTF-16 unit and render as mojibake.
+        upgrade_btn_->setText(QString::fromUtf8("\xe2\x96\xb4 ") + tr("UPGRADE"));
+        upgrade_btn_->setToolTip(tr("Upgrade to Fincept Terminal Enterprise — the private edition"));
+    }
     if (chat_mode_btn_) {
-        // Keep the ⬡ glyph as a visual icon; only the label after it translates.
-        chat_mode_btn_->setText(QStringLiteral("\xe2\xac\xa1 ") + tr("CHAT"));
+        // Keep the ⬡ glyph (U+2B21) as a visual icon; only the label after it
+        // translates. Must use fromUtf8 to decode the UTF-8 bytes — wrapping
+        // them in QStringLiteral widens each byte into its own UTF-16 unit and
+        // renders as mojibake ("â¬¡").
+        chat_mode_btn_->setText(QString::fromUtf8("\xe2\xac\xa1 ") + tr("CHAT"));
         chat_mode_btn_->setToolTip(tr("Switch to Chat Mode (F9)"));
     }
-    if (logout_btn_) logout_btn_->setText(tr("LOGOUT"));
+    if (logout_btn_)
+        logout_btn_->setText(tr("LOGOUT"));
     // Rebuild menus so the new translator applies to every QAction label.
     rebuild_menus();
     // Refresh user display so "FREE" / "---" placeholders pick up new locale.
@@ -178,7 +213,8 @@ void ToolBar::retranslateUi() {
 }
 
 void ToolBar::rebuild_menus() {
-    if (!menu_bar_) return;
+    if (!menu_bar_)
+        return;
     menu_bar_->clear();
     menu_bar_->addMenu(build_file_menu());
     menu_bar_->addMenu(build_navigate_menu());
@@ -193,7 +229,8 @@ void ToolBar::rebuild_menus() {
 }
 
 void ToolBar::refresh_theme() {
-    setStyleSheet(QString("background:%1;border-bottom:1px solid %2;").arg(colors::BG_BASE()).arg(colors::BORDER_DIM()));
+    setStyleSheet(
+        QString("background:%1;border-bottom:1px solid %2;").arg(colors::BG_BASE()).arg(colors::BORDER_DIM()));
     if (menu_bar_) {
         menu_bar_->setStyleSheet(menu_ss());
         for (auto* action : menu_bar_->actions())
@@ -219,6 +256,15 @@ void ToolBar::refresh_theme() {
                                          "QPushButton:hover{color:%2;}")
                                      .arg(colors::TEXT_PRIMARY())
                                      .arg(colors::AMBER()));
+    // Filled rather than outlined — the only solid button on the row, so the
+    // Enterprise CTA reads as the primary action next to LOGOUT and CHAT.
+    if (upgrade_btn_)
+        upgrade_btn_->setStyleSheet(QString("QPushButton{background:%1;color:%2;border:1px solid %1;"
+                                            "padding:0 8px;font-weight:700;}"
+                                            "QPushButton:hover{background:%3;border-color:%3;}")
+                                        .arg(colors::AMBER())
+                                        .arg(colors::BG_BASE())
+                                        .arg(colors::AMBER_DIM()));
     if (chat_mode_btn_)
         chat_mode_btn_->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
                                               "padding:0 8px;font-weight:700;}"
@@ -318,19 +364,20 @@ QMenu* ToolBar::build_file_menu() {
             const QString name = s->name();
             const QSize size = s->size();
             // Resolution format (W×H) is locale-neutral.
-            const QString label =
-                QString("%1. %2  (%3×%4)").arg(idx++).arg(name).arg(size.width()).arg(size.height());
-            monitors->addAction(label, this, [this, name]() {
-                emit action_triggered(QString("move_to_monitor:%1").arg(name));
-            });
+            const QString label = QString("%1. %2  (%3×%4)").arg(idx++).arg(name).arg(size.width()).arg(size.height());
+            monitors->addAction(label, this,
+                                [this, name]() { emit action_triggered(QString("move_to_monitor:%1").arg(name)); });
         }
     });
 
+    m->addAction(tr("Close Window"), this, [this]() { emit action_triggered("close_window"); });
+    m->addAction(tr("Close All Windows"), this, [this]() { emit action_triggered("close_all_windows"); });
+
     m->addSeparator();
-    m->addAction(tr("New Layout"),       this, [this]() { emit action_triggered("layout_new"); });
-    m->addAction(tr("Open Layout…"),     this, [this]() { emit action_triggered("layout_open"); });
-    m->addAction(tr("Save Layout"),      this, [this]() { emit action_triggered("layout_save"); });
-    m->addAction(tr("Save Layout As…"),  this, [this]() { emit action_triggered("layout_save_as"); });
+    m->addAction(tr("New Layout"), this, [this]() { emit action_triggered("layout_new"); });
+    m->addAction(tr("Open Layout…"), this, [this]() { emit action_triggered("layout_open"); });
+    m->addAction(tr("Save Layout"), this, [this]() { emit action_triggered("layout_save"); });
+    m->addAction(tr("Save Layout As…"), this, [this]() { emit action_triggered("layout_save_as"); });
     m->addSeparator();
     m->addAction(tr("Import Layout"), this, [this]() { emit action_triggered("import_data"); });
     m->addAction(tr("Export Layout"), this, [this]() { emit action_triggered("export_data"); });
@@ -417,15 +464,13 @@ QMenu* ToolBar::build_navigate_menu() {
 QMenu* ToolBar::build_view_menu() {
     auto* m = new QMenu(tr("View"), this);
     m->setStyleSheet(popup_ss());
-    m->addAction(tr("Component Browser\tCtrl+K"), this,
-                 [this]() { emit action_triggered("browse_components"); });
+    m->addAction(tr("Component Browser\tCtrl+K"), this, [this]() { emit action_triggered("browse_components"); });
     m->addSeparator();
     m->addAction(tr("Fullscreen\tF11"), this, [this]() { emit action_triggered("fullscreen"); });
     m->addSeparator();
     m->addAction(tr("Focus Mode\tF10"), this, [this]() { emit action_triggered("focus_mode"); });
     // Not checkable — state lives on WindowFrame::always_on_top_; a checkable QAction would drift on focus changes.
-    m->addAction(tr("Always on Top\tCtrl+Shift+T"), this,
-                 [this]() { emit action_triggered("always_on_top"); });
+    m->addAction(tr("Always on Top\tCtrl+Shift+T"), this, [this]() { emit action_triggered("always_on_top"); });
     m->addSeparator();
 
     auto* panels = m->addMenu(tr("Float Panel"));

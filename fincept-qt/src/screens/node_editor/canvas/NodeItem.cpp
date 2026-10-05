@@ -46,6 +46,17 @@ void NodeItem::set_execution_state(const QString& state) {
     invalidate_cache();
 }
 
+void NodeItem::set_disabled(bool disabled) {
+    if (def_.disabled == disabled)
+        return;
+    def_.disabled = disabled;
+    invalidate_cache(); // border + dim overlay are disabled-dependent
+}
+
+void NodeItem::set_continue_on_fail(bool value) {
+    def_.continue_on_fail = value; // no visual, but must reach serialize()
+}
+
 PortItem* NodeItem::find_port(const QString& port_id) const {
     for (auto* p : input_ports_)
         if (p->def().id == port_id)
@@ -94,7 +105,12 @@ QRectF NodeItem::boundingRect() const {
 void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) {
     QRectF rect = boundingRect();
 
-    if (cache_dirty_ || cache_.size() != rect.size().toSize()) {
+    // The cache is allocated at 2x device pixels, so QPixmap::size() is 2x the
+    // logical rect. Comparing it against the *logical* size was therefore always
+    // unequal — the "cache" was rebuilt (allocate + full repaint into a pixmap +
+    // blit) on EVERY paint event, for every node, making it strictly slower than
+    // painting directly. Compare against the same 2x size we allocate.
+    if (cache_dirty_ || cache_.size() != rect.size().toSize() * 2) {
         cache_ = QPixmap(rect.size().toSize() * 2); // 2x for retina
         cache_.setDevicePixelRatio(2.0);
         cache_.fill(Qt::transparent);
@@ -225,11 +241,26 @@ QVariant NodeItem::itemChange(GraphicsItemChange change, const QVariant& value) 
 }
 
 void NodeItem::keyPressEvent(QKeyEvent* event) {
-    if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
-        emit delete_requested(def_.id);
-        event->accept();
-    } else {
-        QGraphicsObject::keyPressEvent(event);
+    // Delete / Backspace are deliberately NOT handled here. A focused node used to
+    // swallow the key and delete only itself - even when it was not part of the
+    // current selection - so a multi-selection could never be deleted. Ignoring it
+    // lets the event reach NodeEditorScreen, which deletes the whole selection.
+    QGraphicsObject::keyPressEvent(event);
+}
+
+void NodeItem::mousePressEvent(QGraphicsSceneMouseEvent* event) {
+    if (event->button() == Qt::LeftButton) {
+        dragging_ = true;
+        emit move_started();
+    }
+    QGraphicsObject::mousePressEvent(event);
+}
+
+void NodeItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
+    QGraphicsObject::mouseReleaseEvent(event);
+    if (dragging_ && event->button() == Qt::LeftButton) {
+        dragging_ = false;
+        emit move_finished();
     }
 }
 
@@ -248,12 +279,12 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event) {
                                "QMenu::separator { background: %3; height: 1px; margin: 2px 6px; }")
                            .arg(tm.bg_raised, tm.text_primary, tm.border_dim, tm.accent, tm.bg_base));
 
-    auto* duplicate_action = menu.addAction("Duplicate");
-    auto* disable_action = menu.addAction(def_.disabled ? "Enable" : "Disable");
+    auto* duplicate_action = menu.addAction(tr("Duplicate"));
+    auto* disable_action = menu.addAction(def_.disabled ? tr("Enable") : tr("Disable"));
     menu.addSeparator();
-    auto* exec_from_action = menu.addAction("Execute From Here");
+    auto* exec_from_action = menu.addAction(tr("Execute From Here"));
     menu.addSeparator();
-    auto* delete_action = menu.addAction("Delete");
+    auto* delete_action = menu.addAction(tr("Delete"));
     delete_action->setShortcut(QKeySequence::Delete);
 
     auto* chosen = menu.exec(event->screenPos());
@@ -263,8 +294,7 @@ void NodeItem::contextMenuEvent(QGraphicsSceneContextMenuEvent* event) {
     if (chosen == duplicate_action) {
         emit duplicate_requested(def_.id);
     } else if (chosen == disable_action) {
-        def_.disabled = !def_.disabled;
-        invalidate_cache();
+        set_disabled(!def_.disabled);
     } else if (chosen == exec_from_action) {
         emit execute_from_requested(def_.id);
     } else if (chosen == delete_action) {

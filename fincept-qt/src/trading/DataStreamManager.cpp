@@ -1,26 +1,109 @@
 #include "trading/DataStreamManager.h"
 
 #include "core/logging/Logger.h"
+#include "datahub/DataHub.h"
+#include "datahub/DataHubMetaTypes.h"
 #include "trading/AccountManager.h"
+#include "trading/BrokerRegistry.h"
+#include "trading/BrokerTopic.h"
 
-#    include "datahub/DataHub.h"
-#    include "datahub/DataHubMetaTypes.h"
-#    include "trading/BrokerTopic.h"
-
+#include <QDateTime>
+#include <QPointer>
+#include <QSet>
 #include <QVariant>
 
 namespace fincept::trading {
 
 namespace {
 constexpr const char* DSM_TAG = "DataStreamManager";
+
+// Brokers whose tokens expire daily at ~3:00 AM IST: every Indian-region broker.
+// Derived from each broker's own profile (region == "IN") rather than a
+// hand-maintained list, so newly-added Indian brokers (samco, flattrade, paytm,
+// tradejini, icicidirect, …) are covered automatically and can't silently drift
+// out of the sweep. International brokers (US/EU regions) are excluded by region.
+bool is_daily_expiring_broker(const QString& broker_id) {
+    auto* b = BrokerRegistry::instance().get(broker_id);
+    return b != nullptr && b->profile().region == QLatin1String("IN");
 }
+
+// Hourly cadence is enough to catch the 3:00 AM IST window without polling
+// the clock aggressively.
+constexpr int DSM_EXPIRY_CHECK_MS = 60 * 60 * 1000;
+
+// Per-(account, channel) floors between hub-driven fetches. Positions / orders /
+// quotes are what users watch tick over; holdings and balance move slowly.
+constexpr qint64 DSM_REFRESH_FLOOR_FAST_MS = 3000;
+constexpr qint64 DSM_REFRESH_FLOOR_SLOW_MS = 10000;
+
+// "<account_id>|<channel>" -> wall-clock ms of the last hub-driven fetch. Touched
+// only from DataStreamManager::refresh(), which the hub invokes on the main thread.
+QHash<QString, qint64>& dsm_last_channel_refresh() {
+    static QHash<QString, qint64> last;
+    return last;
+}
+} // namespace
 
 DataStreamManager& DataStreamManager::instance() {
     static DataStreamManager s;
     return s;
 }
 
-DataStreamManager::DataStreamManager() = default;
+DataStreamManager::DataStreamManager() {
+    // Daily IST token-expiry sweep (Phase 3 §19). This is an infrastructure
+    // cadence timer on a long-lived service singleton (like the DataHub
+    // scheduler), not a visibility-driven widget timer, so it runs continuously.
+    expiry_check_timer_ = new QTimer(this);
+    expiry_check_timer_->setInterval(DSM_EXPIRY_CHECK_MS);
+    connect(expiry_check_timer_, &QTimer::timeout, this, &DataStreamManager::check_indian_token_expiry);
+    expiry_check_timer_->start();
+
+    // When an account's token is re-authenticated or silently refreshed, rebuild
+    // its live stream so the WebSocket adapter (which captures the token at
+    // construction with no setter) reconnects with the fresh token. Without this,
+    // a stream started with a now-expired token keeps getting HTTP 401 on
+    // resolve/subscribe and never streams ticks. Only rebuild streams that
+    // already exist — don't spin up streams for accounts the user hasn't opened.
+    connect(&AccountManager::instance(), &AccountManager::credentials_changed, this, [this](const QString& account_id) {
+        if (!streams_.contains(account_id))
+            return;
+        LOG_INFO(DSM_TAG, QString("Credentials changed for %1 — rebuilding stream "
+                                  "with fresh token")
+                              .arg(account_id));
+        restart_stream(account_id);
+    });
+}
+
+void DataStreamManager::check_indian_token_expiry() {
+    // Convert now → IST (UTC+5:30) without needing tz data.
+    const QDateTime ist = QDateTime::currentDateTimeUtc().addSecs(5 * 3600 + 30 * 60);
+    const int hour = ist.time().hour();
+    const int doy = ist.date().dayOfYear();
+
+    // Only act inside the 3:00–3:59 AM IST window, and at most once per IST day.
+    if (hour != 3 || doy == last_expiry_check_day_)
+        return;
+    last_expiry_check_day_ = doy;
+
+    auto& am = AccountManager::instance();
+    const auto accounts = am.list_accounts();
+    int marked = 0;
+    for (const auto& acct : accounts) {
+        if (!acct.is_active || acct.trading_mode != "live")
+            continue;
+        if (!is_daily_expiring_broker(acct.broker_id))
+            continue;
+        if (am.connection_state(acct.account_id) == ConnectionState::TokenExpired)
+            continue;
+        am.set_connection_state(acct.account_id, ConnectionState::TokenExpired,
+                                QStringLiteral("Daily 3:00 AM IST session expiry"));
+        ++marked;
+    }
+    if (marked > 0)
+        LOG_INFO(DSM_TAG, QString("3:00 AM IST sweep: marked %1 Indian account(s) "
+                                  "TokenExpired")
+                              .arg(marked));
+}
 
 // ── Stream lifecycle ────────────────────────────────────────────────────────
 
@@ -64,6 +147,25 @@ void DataStreamManager::stop_stream(const QString& account_id) {
     LOG_INFO(DSM_TAG, QString("Stopped data stream for account %1").arg(account_id));
 }
 
+void DataStreamManager::restart_stream(const QString& account_id) {
+    // stop_stream() tears down the old AccountDataStream (and its WebSocket, which
+    // caches the access token at construction); start_stream() then rebuilds it so
+    // ws_init() reloads the latest credentials from AccountManager. If no stream
+    // exists yet, stop_stream() is a no-op and start_stream() creates a fresh one.
+    //
+    // The old stream's subscriptions (consumer symbol sets, active-feed sets, the
+    // selected symbol) live only on that object, so carry them onto the new one —
+    // stop_stream() only deleteLater()s, so `previous` stays valid for this call.
+    QPointer<AccountDataStream> previous = stream_for(account_id);
+    stop_stream(account_id);
+    start_stream(account_id);
+    if (previous) {
+        if (auto* fresh = stream_for(account_id))
+            fresh->adopt_subscriptions(*previous);
+    }
+    emit stream_restarted(account_id);
+}
+
 void DataStreamManager::start_all_active() {
     const auto accounts = AccountManager::instance().active_accounts();
     for (const auto& account : accounts) {
@@ -92,6 +194,11 @@ void DataStreamManager::resume_all() {
         stream->resume();
 }
 
+void DataStreamManager::refresh_portfolio(const QString& account_id) {
+    if (auto* s = stream_for(account_id))
+        s->refresh_portfolio_now();
+}
+
 // ── Query ───────────────────────────────────────────────────────────────────
 
 bool DataStreamManager::has_stream(const QString& account_id) const {
@@ -105,51 +212,36 @@ QStringList DataStreamManager::active_stream_ids() const {
 // ── Signal wiring ───────────────────────────────────────────────────────────
 
 void DataStreamManager::wire_stream_signals(AccountDataStream* stream) {
-    // Forward all per-stream signals to aggregated manager signals
-    connect(stream, &AccountDataStream::quote_updated,
-            this, &DataStreamManager::quote_updated);
-    connect(stream, &AccountDataStream::watchlist_updated,
-            this, &DataStreamManager::watchlist_updated);
-    connect(stream, &AccountDataStream::positions_updated,
-            this, &DataStreamManager::positions_updated);
-    connect(stream, &AccountDataStream::holdings_updated,
-            this, &DataStreamManager::holdings_updated);
-    connect(stream, &AccountDataStream::orders_updated,
-            this, &DataStreamManager::orders_updated);
-    connect(stream, &AccountDataStream::funds_updated,
-            this, &DataStreamManager::funds_updated);
-    connect(stream, &AccountDataStream::candles_fetched,
-            this, &DataStreamManager::candles_fetched);
-    connect(stream, &AccountDataStream::orderbook_fetched,
-            this, &DataStreamManager::orderbook_fetched);
-    connect(stream, &AccountDataStream::time_sales_fetched,
-            this, &DataStreamManager::time_sales_fetched);
-    connect(stream, &AccountDataStream::latest_trade_fetched,
-            this, &DataStreamManager::latest_trade_fetched);
-    connect(stream, &AccountDataStream::calendar_fetched,
-            this, &DataStreamManager::calendar_fetched);
-    connect(stream, &AccountDataStream::clock_fetched,
-            this, &DataStreamManager::clock_fetched);
-    connect(stream, &AccountDataStream::connection_state_changed,
-            this, &DataStreamManager::connection_state_changed);
-    connect(stream, &AccountDataStream::token_expired,
-            this, &DataStreamManager::token_expired);
+    // On-demand / one-shot signals — relayed directly (no hub topic)
+    connect(stream, &AccountDataStream::candles_fetched, this, &DataStreamManager::candles_fetched);
+    connect(stream, &AccountDataStream::orderbook_fetched, this, &DataStreamManager::orderbook_fetched);
+    connect(stream, &AccountDataStream::time_sales_fetched, this, &DataStreamManager::time_sales_fetched);
+    connect(stream, &AccountDataStream::latest_trade_fetched, this, &DataStreamManager::latest_trade_fetched);
+    connect(stream, &AccountDataStream::calendar_fetched, this, &DataStreamManager::calendar_fetched);
+    connect(stream, &AccountDataStream::clock_fetched, this, &DataStreamManager::clock_fetched);
+    connect(stream, &AccountDataStream::connection_state_changed, this, &DataStreamManager::connection_state_changed);
+    connect(stream, &AccountDataStream::connection_state_changed, this,
+            [](const QString& account_id, ConnectionState state) {
+                AccountManager::instance().set_connection_state(account_id, state);
+            });
+    connect(stream, &AccountDataStream::token_expired, this, &DataStreamManager::token_expired);
+    // Symbol-tagged twins + the auction / condition-code results (additive relays).
+    connect(stream, &AccountDataStream::orderbook_for_symbol, this, &DataStreamManager::orderbook_for_symbol);
+    connect(stream, &AccountDataStream::time_sales_for_symbol, this, &DataStreamManager::time_sales_for_symbol);
+    connect(stream, &AccountDataStream::latest_trade_for_symbol, this, &DataStreamManager::latest_trade_for_symbol);
+    connect(stream, &AccountDataStream::auctions_fetched, this, &DataStreamManager::auctions_fetched);
+    connect(stream, &AccountDataStream::condition_codes_fetched, this, &DataStreamManager::condition_codes_fetched);
 
     // Dual-fire: publish the same per-account data onto hub topics so
     // consumers subscribed to broker:<id>:<account>:<channel> see it.
     // Only attach after register_producer() has run — no subscribers
     // otherwise, and publishing does nothing useful.
     if (hub_registered_) {
-        connect(stream, &AccountDataStream::positions_updated,
-                this, &DataStreamManager::on_positions_for_hub);
-        connect(stream, &AccountDataStream::holdings_updated,
-                this, &DataStreamManager::on_holdings_for_hub);
-        connect(stream, &AccountDataStream::orders_updated,
-                this, &DataStreamManager::on_orders_for_hub);
-        connect(stream, &AccountDataStream::funds_updated,
-                this, &DataStreamManager::on_funds_for_hub);
-        connect(stream, &AccountDataStream::quote_updated,
-                this, &DataStreamManager::on_quote_for_hub);
+        connect(stream, &AccountDataStream::positions_updated, this, &DataStreamManager::on_positions_for_hub);
+        connect(stream, &AccountDataStream::holdings_updated, this, &DataStreamManager::on_holdings_for_hub);
+        connect(stream, &AccountDataStream::orders_updated, this, &DataStreamManager::on_orders_for_hub);
+        connect(stream, &AccountDataStream::funds_updated, this, &DataStreamManager::on_funds_for_hub);
+        connect(stream, &AccountDataStream::quote_updated, this, &DataStreamManager::on_quote_for_hub);
     }
 }
 
@@ -164,20 +256,47 @@ QStringList DataStreamManager::topic_patterns() const {
 }
 
 void DataStreamManager::refresh(const QStringList& topics) {
-    // AccountDataStream's portfolio_timer already polls positions /
-    // orders / funds every 3s while a stream is running — short enough
-    // that hub refresh() can stay advisory. Just log + validate.
-    // Per-broker BrokerProducer subclasses (follow-up PRs per Phase 7
-    // plan) can override and trigger explicit fetches when needed.
+    // This used to be advisory ("the stream polls every 3 s anyway") — but the
+    // streams' own portfolio / quote timers run on a 5-MINUTE cadence, so a forced
+    // hub request (a widget's refresh button, a cold-start fetch) did nothing for
+    // up to five minutes. Serve it for real: ask the owning stream to pull exactly
+    // the requested channel now.
+    //
+    // Broker REST limits are respected two ways: the hub paces refresh() calls to
+    // max_requests_per_sec(), and each (account, channel) is additionally floored
+    // here so a burst of topics / repeated clicks collapses into one fetch.
+    // Hub refresh() runs on the main thread, like every other member of this class.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
     for (const auto& topic : topics) {
+        // broker:<broker_id>:<account_id>:<channel>[:<symbol>]
         const QStringList parts = topic.split(QLatin1Char(':'));
         if (parts.size() < 4) {
             LOG_DEBUG(DSM_TAG, "refresh: ignoring malformed topic: " + topic);
             continue;
         }
-        const QString channel = parts[3];
-        if (channel == QLatin1String("ticks")) continue;  // push-only
-        LOG_DEBUG(DSM_TAG, "refresh advisory (timer-driven): " + topic);
+        const QString& account_id = parts[2];
+        const QString& channel = parts[3];
+        if (channel == QLatin1String("ticks"))
+            continue; // push-only
+
+        auto* stream = stream_for(account_id);
+        if (!stream) {
+            LOG_DEBUG(DSM_TAG, "refresh: no stream for " + topic);
+            continue;
+        }
+
+        // Holdings / balance change slowly; positions / orders / quotes are the ones
+        // users watch tick over.
+        const qint64 floor_ms = (channel == QLatin1String("holdings") || channel == QLatin1String("balance"))
+                                    ? DSM_REFRESH_FLOOR_SLOW_MS
+                                    : DSM_REFRESH_FLOOR_FAST_MS;
+        qint64& last = dsm_last_channel_refresh()[account_id + QLatin1Char('|') + channel];
+        if (last != 0 && now - last < floor_ms) {
+            LOG_DEBUG(DSM_TAG, "refresh: throttled " + topic);
+            continue;
+        }
+        last = now;
+        stream->refresh_channel(channel);
     }
 }
 
@@ -188,7 +307,8 @@ int DataStreamManager::max_requests_per_sec() const {
 }
 
 void DataStreamManager::ensure_registered_with_hub() {
-    if (hub_registered_) return;
+    if (hub_registered_)
+        return;
     auto& hub = fincept::datahub::DataHub::instance();
     hub.register_producer(this);
 
@@ -198,7 +318,7 @@ void DataStreamManager::ensure_registered_with_hub() {
     // broker:<id>:<account>:ticks:*   — push-only, coalesce 100ms
     fincept::datahub::TopicPolicy positions_policy;
     positions_policy.ttl_ms = 5 * 1000;
-    positions_policy.min_interval_ms = 3 * 1000;  // portfolio_timer cadence
+    positions_policy.min_interval_ms = 3 * 1000; // portfolio_timer cadence
     hub.set_policy_pattern(QStringLiteral("broker:*:*:positions"), positions_policy);
 
     fincept::datahub::TopicPolicy orders_policy;
@@ -231,17 +351,13 @@ void DataStreamManager::ensure_registered_with_hub() {
 
     // Back-wire any streams that were created before registration.
     for (auto* s : streams_) {
-        if (!s) continue;
-        connect(s, &AccountDataStream::positions_updated,
-                this, &DataStreamManager::on_positions_for_hub);
-        connect(s, &AccountDataStream::holdings_updated,
-                this, &DataStreamManager::on_holdings_for_hub);
-        connect(s, &AccountDataStream::orders_updated,
-                this, &DataStreamManager::on_orders_for_hub);
-        connect(s, &AccountDataStream::funds_updated,
-                this, &DataStreamManager::on_funds_for_hub);
-        connect(s, &AccountDataStream::quote_updated,
-                this, &DataStreamManager::on_quote_for_hub);
+        if (!s)
+            continue;
+        connect(s, &AccountDataStream::positions_updated, this, &DataStreamManager::on_positions_for_hub);
+        connect(s, &AccountDataStream::holdings_updated, this, &DataStreamManager::on_holdings_for_hub);
+        connect(s, &AccountDataStream::orders_updated, this, &DataStreamManager::on_orders_for_hub);
+        connect(s, &AccountDataStream::funds_updated, this, &DataStreamManager::on_funds_for_hub);
+        connect(s, &AccountDataStream::quote_updated, this, &DataStreamManager::on_quote_for_hub);
     }
 
     LOG_INFO(DSM_TAG, "Registered with DataHub (broker:*)");
@@ -249,48 +365,123 @@ void DataStreamManager::ensure_registered_with_hub() {
 
 // ── Dual-fire hub publishers ────────────────────────────────────────────────
 
-void DataStreamManager::on_positions_for_hub(const QString& account_id,
-                                             const QVector<BrokerPosition>& positions) {
-    if (!hub_registered_) return;
+void DataStreamManager::on_positions_for_hub(const QString& account_id, const QVector<BrokerPosition>& positions) {
+    if (!hub_registered_)
+        return;
     auto* stream = stream_for(account_id);
-    if (!stream) return;
+    if (!stream)
+        return;
     const QString topic = broker_topic(stream->broker_id(), account_id, QStringLiteral("positions"));
     fincept::datahub::DataHub::instance().publish(topic, QVariant::fromValue(positions));
 }
 
-void DataStreamManager::on_holdings_for_hub(const QString& account_id,
-                                            const QVector<BrokerHolding>& holdings) {
-    if (!hub_registered_) return;
+void DataStreamManager::on_holdings_for_hub(const QString& account_id, const QVector<BrokerHolding>& holdings) {
+    if (!hub_registered_)
+        return;
     auto* stream = stream_for(account_id);
-    if (!stream) return;
+    if (!stream)
+        return;
     const QString topic = broker_topic(stream->broker_id(), account_id, QStringLiteral("holdings"));
     fincept::datahub::DataHub::instance().publish(topic, QVariant::fromValue(holdings));
 }
 
-void DataStreamManager::on_orders_for_hub(const QString& account_id,
-                                          const QVector<BrokerOrderInfo>& orders) {
-    if (!hub_registered_) return;
+void DataStreamManager::on_orders_for_hub(const QString& account_id, const QVector<BrokerOrderInfo>& orders) {
+    if (!hub_registered_)
+        return;
     auto* stream = stream_for(account_id);
-    if (!stream) return;
+    if (!stream)
+        return;
     const QString topic = broker_topic(stream->broker_id(), account_id, QStringLiteral("orders"));
     fincept::datahub::DataHub::instance().publish(topic, QVariant::fromValue(orders));
 }
 
 void DataStreamManager::on_funds_for_hub(const QString& account_id, const BrokerFunds& funds) {
-    if (!hub_registered_) return;
+    if (!hub_registered_)
+        return;
     auto* stream = stream_for(account_id);
-    if (!stream) return;
+    if (!stream)
+        return;
     const QString topic = broker_topic(stream->broker_id(), account_id, QStringLiteral("balance"));
     fincept::datahub::DataHub::instance().publish(topic, QVariant::fromValue(funds));
 }
 
-void DataStreamManager::on_quote_for_hub(const QString& account_id, const QString& symbol,
-                                         const BrokerQuote& quote) {
-    if (!hub_registered_) return;
+void DataStreamManager::on_quote_for_hub(const QString& account_id, const QString& symbol, const BrokerQuote& quote) {
+    if (!hub_registered_)
+        return;
     auto* stream = stream_for(account_id);
-    if (!stream) return;
+    if (!stream)
+        return;
     const QString topic = broker_topic(stream->broker_id(), account_id, QStringLiteral("quote"), symbol);
     fincept::datahub::DataHub::instance().publish(topic, QVariant::fromValue(quote));
+}
+
+// ── Shared quote feed (Stage 2) ─────────────────────────────────────────────
+
+void DataStreamManager::open_quote_feed(QObject* owner, const QString& consumer_id, const QString& account_id,
+                                        const QString& symbol, std::function<void(const BrokerQuote&)> cb) {
+    // This singleton + DataHub live on the main thread; callers (DeploymentRunner)
+    // run on the algo engine thread. Marshal all stream/DataHub mutation here.
+    QPointer<QObject> guard(owner);
+    QMetaObject::invokeMethod(
+        this,
+        [this, guard, consumer_id, account_id, symbol, cb]() {
+            if (!guard)
+                return;
+            ensure_registered_with_hub();
+            if (!has_stream(account_id))
+                start_stream(account_id);
+            auto* stream = stream_for(account_id);
+            if (!stream) {
+                LOG_WARN(DSM_TAG, QString("open_quote_feed: no stream for account %1").arg(account_id));
+                return;
+            }
+            // Join the account stream as an independent consumer + request fast (3s)
+            // polling on non-WS brokers so the feed stays timely for algos.
+            stream->subscribe_symbols(consumer_id, {symbol});
+            stream->set_active_feed(consumer_id, {symbol});
+
+            // Replace any prior feed registered under this consumer id.
+            if (auto old = quote_feeds_.find(consumer_id); old != quote_feeds_.end()) {
+                if (old->owner)
+                    fincept::datahub::DataHub::instance().unsubscribe(old->owner, old->topic);
+                quote_feeds_.erase(old);
+            }
+
+            const QString topic = broker_topic(stream->broker_id(), account_id, QStringLiteral("quote"), symbol);
+            // DataHub fans out on the MAIN thread; marshal each quote to the owner's
+            // (engine) thread before invoking cb so on_tick_data runs there.
+            fincept::datahub::DataHub::instance().subscribe<BrokerQuote>(guard, topic,
+                                                                         [guard, cb](const BrokerQuote& q) {
+                                                                             QMetaObject::invokeMethod(
+                                                                                 guard,
+                                                                                 [guard, cb, q]() {
+                                                                                     if (guard)
+                                                                                         cb(q);
+                                                                                 },
+                                                                                 Qt::QueuedConnection);
+                                                                         });
+            quote_feeds_.insert(consumer_id, QuoteFeed{account_id, topic, guard});
+            LOG_INFO(DSM_TAG,
+                     QString("Opened quote feed '%1' for %2 on account %3").arg(consumer_id, symbol, account_id));
+        },
+        Qt::QueuedConnection);
+}
+
+void DataStreamManager::close_quote_feed(const QString& consumer_id, const QString& account_id) {
+    QMetaObject::invokeMethod(
+        this,
+        [this, consumer_id, account_id]() {
+            if (auto it = quote_feeds_.find(consumer_id); it != quote_feeds_.end()) {
+                if (it->owner)
+                    fincept::datahub::DataHub::instance().unsubscribe(it->owner, it->topic);
+                quote_feeds_.erase(it);
+            }
+            if (auto* stream = stream_for(account_id)) {
+                stream->unsubscribe_consumer(consumer_id);
+                stream->set_active_feed(consumer_id, {});
+            }
+        },
+        Qt::QueuedConnection);
 }
 
 } // namespace fincept::trading

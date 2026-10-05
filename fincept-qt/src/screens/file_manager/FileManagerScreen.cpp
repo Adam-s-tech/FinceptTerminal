@@ -3,22 +3,29 @@
 
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
+#include "screens/excel/ExcelScreen.h"
 #include "ui/theme/Theme.h"
 
 #include <QButtonGroup>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QJsonDocument>
 #include <QMessageBox>
+#include <QMouseEvent>
+#include <QPalette>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QShowEvent>
 #include <QSplitter>
 #include <QTextStream>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace fincept::screens {
@@ -60,24 +67,28 @@ void FileManagerScreen::build_ui() {
     hhl->setContentsMargins(14, 10, 14, 10);
     hhl->setSpacing(8);
 
-    auto* title = new QLabel("FILE MANAGER");
-    title->setStyleSheet(
+    title_label_ = new QLabel(tr("FILE MANAGER"));
+    title_label_->setStyleSheet(
         QString("color:%1;font-size:14px;font-weight:700;letter-spacing:0.5px;background:transparent;%2")
             .arg(colors::AMBER(), MF));
-    hhl->addWidget(title);
+    hhl->addWidget(title_label_);
 
-    auto* sub = new QLabel("Manage files across the terminal");
-    sub->setStyleSheet(QString("color:%1;font-size:12px;background:transparent;%2").arg(colors::TEXT_TERTIARY(), MF));
-    hhl->addWidget(sub);
+    subtitle_label_ = new QLabel(tr("Manage files across the terminal"));
+    subtitle_label_->setStyleSheet(
+        QString("color:%1;font-size:12px;background:transparent;%2").arg(colors::TEXT_TERTIARY(), MF));
+    hhl->addWidget(subtitle_label_);
     hhl->addStretch();
 
-    stats_label_ = new QLabel("0 files | 0 B");
+    stats_label_ = new QLabel(tr("%1 files | %2").arg(0).arg(format_size(0)));
     stats_label_->setStyleSheet(
         QString("color:%1;font-size:11px;background:transparent;%2").arg(colors::TEXT_DIM(), MF));
     hhl->addWidget(stats_label_);
 
-    refresh_btn_ = new QPushButton("REFRESH");
+    refresh_btn_ = new QPushButton(tr("REFRESH"));
     refresh_btn_->setCursor(Qt::PointingHandCursor);
+    // No F5 shortcut here — KeyConfigManager owns F5 as the global Refresh
+    // action (Qt::ApplicationShortcut); a second binding makes both ambiguous.
+    refresh_btn_->setAccessibleName(tr("Refresh the file list"));
     refresh_btn_->setStyleSheet(
         QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
                 "padding:4px 12px;font-size:11px;%3}"
@@ -89,8 +100,9 @@ void FileManagerScreen::build_ui() {
     });
     hhl->addWidget(refresh_btn_);
 
-    upload_btn_ = new QPushButton("UPLOAD FILES");
+    upload_btn_ = new QPushButton(tr("UPLOAD FILES"));
     upload_btn_->setCursor(Qt::PointingHandCursor);
+    upload_btn_->setAccessibleName(tr("Copy files into terminal storage"));
     upload_btn_->setStyleSheet(QString("QPushButton{background:rgba(217,119,6,0.1);color:%1;border:1px solid %3;"
                                        "padding:4px 12px;font-size:11px;font-weight:700;%2}"
                                        "QPushButton:hover{background:%1;color:%4;}")
@@ -113,13 +125,14 @@ void FileManagerScreen::build_ui() {
     bbl->setContentsMargins(14, 6, 14, 6);
     bbl->setSpacing(10);
 
-    auto* sel_lbl = new QLabel("Selected files:");
-    sel_lbl->setStyleSheet(
+    bulk_sel_label_ = new QLabel(tr("Selected files:"));
+    bulk_sel_label_->setStyleSheet(
         QString("color:%1;font-size:11px;background:transparent;%2").arg(colors::TEXT_SECONDARY(), MF));
-    bbl->addWidget(sel_lbl);
+    bbl->addWidget(bulk_sel_label_);
 
-    bulk_delete_btn_ = new QPushButton("DELETE SELECTED");
+    bulk_delete_btn_ = new QPushButton(tr("DELETE SELECTED"));
     bulk_delete_btn_->setCursor(Qt::PointingHandCursor);
+    bulk_delete_btn_->setAccessibleName(tr("Delete the selected files"));
     bulk_delete_btn_->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid #7f1d1d;"
                                             "padding:3px 12px;font-size:11px;font-weight:700;%2}"
                                             "QPushButton:hover{background:%1;color:%3;}")
@@ -128,18 +141,20 @@ void FileManagerScreen::build_ui() {
     bbl->addWidget(bulk_delete_btn_);
     bbl->addStretch();
 
-    auto* desel_btn = new QPushButton("CLEAR SELECTION");
-    desel_btn->setCursor(Qt::PointingHandCursor);
-    desel_btn->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
-                                     "padding:3px 12px;font-size:11px;%3}"
-                                     "QPushButton:hover{color:%4;}")
-                                 .arg(colors::TEXT_DIM(), colors::BORDER_DIM(), MF, colors::TEXT_PRIMARY()));
-    connect(desel_btn, &QPushButton::clicked, this, [this]() {
+    bulk_clear_btn_ = new QPushButton(tr("CLEAR SELECTION"));
+    bulk_clear_btn_->setCursor(Qt::PointingHandCursor);
+    bulk_clear_btn_->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
+                                           "padding:3px 12px;font-size:11px;%3}"
+                                           "QPushButton:hover{color:%4;}")
+                                       .arg(colors::TEXT_DIM(), colors::BORDER_DIM(), MF, colors::TEXT_PRIMARY()));
+    bulk_clear_btn_->setAccessibleName(tr("Clear the file selection"));
+    connect(bulk_clear_btn_, &QPushButton::clicked, this, [this]() {
         for (auto* btn : check_btns_)
             btn->setChecked(false);
+        checked_ids_.clear();
         update_bulk_bar();
     });
-    bbl->addWidget(desel_btn);
+    bbl->addWidget(bulk_clear_btn_);
     root->addWidget(bulk_bar_);
 
     // ── Splitter: file list | preview ─────────────────────────────────────────
@@ -148,28 +163,60 @@ void FileManagerScreen::build_ui() {
     splitter_->setChildrenCollapsible(false);
 
     // Left: scroll area with file cards
-    auto* scroll = new QScrollArea;
-    scroll->setWidgetResizable(true);
-    scroll->setStyleSheet("QScrollArea{border:none;background:transparent;}"
-                          "QScrollBar:vertical{background:transparent;width:6px;}" +
-                          QString("QScrollBar::handle:vertical{background:%1;}"
-                                  "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}")
-                              .arg(colors::BORDER_MED()));
+    file_scroll_ = new QScrollArea;
+    file_scroll_->setWidgetResizable(true);
+    file_scroll_->setStyleSheet("QScrollArea{border:none;background:transparent;}"
+                                "QScrollBar:vertical{background:transparent;width:6px;}" +
+                                QString("QScrollBar::handle:vertical{background:%1;}"
+                                        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}")
+                                    .arg(colors::BORDER_MED()));
 
     file_container_ = new QWidget(this);
-    file_container_->setStyleSheet(QString("background:%1;").arg(colors::BG_BASE()));
+    file_container_->setObjectName("FMFileList"); // must precede setStyleSheet so #FMFileList resolves
+    // One stylesheet for the whole card list, keyed on object names. render_files()
+    // used to call setStyleSheet() ~10x per card, i.e. a full CSS reparse per
+    // widget per refresh; with a few hundred files that dominated the render.
+    file_container_->setStyleSheet(
+        QString("QWidget#FMFileList{background:%1;}"
+                "QWidget#FMCard{background:%2;border:1px solid %3;border-radius:2px;}"
+                "QWidget#FMCardInfo{background:transparent;}"
+                "QLabel#FMGroupLabel{color:%4;font-size:10px;font-weight:700;letter-spacing:1px;"
+                "  background:transparent;padding:8px 0 2px 0;%9}"
+                "QLabel#FMFileName{color:%5;font-size:12px;font-weight:600;background:transparent;%9}"
+                "QLabel#FMFileMeta{color:%4;font-size:10px;background:transparent;%9}"
+                "QLabel#FMTypeBadge{font-size:10px;font-weight:700;background:transparent;%9}"
+                "QPushButton#FMCheck{background:transparent;color:%4;border:none;font-size:14px;}"
+                "QPushButton#FMCheck:checked{color:%6;}"
+                "QPushButton#FMPreview{background:transparent;color:%4;border:1px solid %3;"
+                "  font-size:10px;font-weight:700;padding:0 8px;%9}"
+                "QPushButton#FMPreview:hover{color:%6;border-color:%6;}"
+                "QPushButton#FMOpenWith{background:transparent;color:%6;border:1px solid %3;"
+                "  font-size:10px;font-weight:700;padding:0 8px;%9}"
+                "QPushButton#FMOpenWith:hover{background:rgba(217,119,6,0.15);}"
+                "QPushButton#FMSave{background:transparent;color:%7;border:1px solid %3;"
+                "  font-size:10px;font-weight:700;%9}"
+                "QPushButton#FMSave:hover{color:#38bdf8;background:%8;}"
+                "QPushButton#FMDelete{background:transparent;color:%4;border:1px solid %3;"
+                "  font-size:10px;font-weight:700;%9}"
+                "QPushButton#FMDelete:hover{color:%10;background:rgba(239,68,68,0.1);}")
+            .arg(colors::BG_BASE(), colors::BG_SURFACE(), colors::BORDER_DIM(), colors::TEXT_DIM(),
+                 colors::TEXT_PRIMARY(), colors::AMBER(), colors::CYAN(), colors::BG_RAISED(), QString(MF))
+            .arg(colors::NEGATIVE()));
     file_layout_ = new QVBoxLayout(file_container_);
     file_layout_->setContentsMargins(14, 8, 14, 8);
     file_layout_->setSpacing(6);
     file_layout_->addStretch();
-    scroll->setWidget(file_container_);
-    splitter_->addWidget(scroll);
+    file_scroll_->setWidget(file_container_);
+    splitter_->addWidget(file_scroll_);
 
     // Right: preview panel (initially hidden)
     splitter_->addWidget(build_preview_panel());
     preview_panel_->setVisible(false);
 
     root->addWidget(splitter_, 1);
+
+    // Populate empty-display combo items and apply translatable text.
+    retranslateUi();
 }
 
 void FileManagerScreen::build_quota_bar(QVBoxLayout* root) {
@@ -180,7 +227,7 @@ void FileManagerScreen::build_quota_bar(QVBoxLayout* root) {
     ql->setContentsMargins(14, 6, 14, 6);
     ql->setSpacing(10);
 
-    quota_label_ = new QLabel("Storage: 0 B / 500 MB");
+    quota_label_ = new QLabel(tr("Storage: %1 / 500 MB").arg(format_size(0)));
     quota_label_->setStyleSheet(
         QString("color:%1;font-size:11px;background:transparent;%2").arg(colors::TEXT_DIM(), MF));
     ql->addWidget(quota_label_);
@@ -214,7 +261,9 @@ void FileManagerScreen::build_filter_bar(QVBoxLayout* root) {
     r1l->setSpacing(8);
 
     search_input_ = new QLineEdit;
-    search_input_->setPlaceholderText("Search files by name, type, or source...");
+    search_input_->setPlaceholderText(tr("Search files by name, type, or source..."));
+    search_input_->setClearButtonEnabled(true);
+    search_input_->setAccessibleName(tr("Search files"));
     search_input_->setStyleSheet(
         QString("QLineEdit{background:%1;color:%2;border:1px solid %3;"
                 "padding:5px 10px;font-size:12px;%4}"
@@ -223,13 +272,17 @@ void FileManagerScreen::build_filter_bar(QVBoxLayout* root) {
     connect(search_input_, &QLineEdit::textChanged, this, [this]() { render_files(); });
     r1l->addWidget(search_input_, 1);
 
-    auto* sort_lbl = new QLabel("Sort:");
-    sort_lbl->setStyleSheet(QString("color:%1;font-size:11px;background:transparent;%2").arg(colors::TEXT_DIM(), MF));
-    r1l->addWidget(sort_lbl);
+    sort_label_ = new QLabel(tr("Sort:"));
+    sort_label_->setStyleSheet(
+        QString("color:%1;font-size:11px;background:transparent;%2").arg(colors::TEXT_DIM(), MF));
+    r1l->addWidget(sort_label_);
 
+    // Sort combo — logic uses currentIndex(), so display text is set/refreshed
+    // in retranslateUi (items added empty here to fix index → option mapping).
     sort_combo_ = new QComboBox;
-    sort_combo_->addItems(
-        {"Date (newest)", "Date (oldest)", "Name (A-Z)", "Name (Z-A)", "Size (largest)", "Size (smallest)", "Type"});
+    for (int i = 0; i < 7; ++i)
+        sort_combo_->addItem(QString());
+    sort_combo_->setAccessibleName(tr("Sort order"));
     sort_combo_->setStyleSheet(
         QString("QComboBox{background:%1;color:%2;border:1px solid %3;"
                 "padding:4px 8px;font-size:11px;%4}"
@@ -257,19 +310,29 @@ void FileManagerScreen::build_filter_bar(QVBoxLayout* root) {
                               "QPushButton:hover:!checked{border-color:%4;}")
                           .arg(colors::TEXT_SECONDARY(), colors::BORDER_DIM(), MF, colors::AMBER());
 
-    static const QStringList screens = {"All",          "portfolio",    "backtesting", "news",        "equity_research",
-                                        "algo_trading", "ai_quant_lab", "notes",       "code_editor", "report_builder",
-                                        "data_sources", "excel"};
+    // Every sourceScreen tag a producer actually registers must have a chip, or
+    // those files are reachable only under "All": workflow_node (node-editor file
+    // parameters) and file_manager (manual uploads, tagged in upload_files()) had none.
+    static const QStringList screens = {"All",          "portfolio",    "backtesting",  "news",         "equity_research",
+                                        "algo_trading", "ai_quant_lab", "notes",        "code_editor",  "report_builder",
+                                        "data_sources", "excel",        "workflow_node", "file_manager"};
     for (const QString& s : screens) {
-        QString label = (s == "All") ? "All" : QString(s).replace('_', ' ').toUpper();
+        const QString filter_val = (s == "All") ? QString() : s;
+        QString label = (s == "All") ? tr("All") : QString(s).replace('_', ' ').toUpper();
         auto* chip = new QPushButton(label);
         chip->setCheckable(true);
         chip->setStyleSheet(chip_ss);
+        // Carry the raw screen key as a property. restore_state() used to
+        // compare against the chip's *display* text ("EQUITY RESEARCH"), which
+        // never matched the stored key ("equity_research"), so a restored
+        // filter silently fell back to All.
+        chip->setProperty("screenFilter", filter_val);
+        chip->setAccessibleName(s == "All" ? tr("Show files from all screens")
+                                           : tr("Show files from %1").arg(label));
         if (s == "All")
             chip->setChecked(true);
         chip_group_->addButton(chip);
         cl->addWidget(chip);
-        QString filter_val = (s == "All") ? "" : s;
         connect(chip, &QPushButton::toggled, this, [this, filter_val](bool checked) {
             if (checked) {
                 active_screen_filter_ = filter_val;
@@ -299,10 +362,11 @@ QWidget* FileManagerScreen::build_preview_panel() {
     auto* hhl = new QHBoxLayout(hdr);
     hhl->setContentsMargins(12, 8, 12, 8);
 
-    auto* plbl = new QLabel("PREVIEW");
-    plbl->setStyleSheet(QString("color:%1;font-size:11px;font-weight:700;letter-spacing:1px;background:transparent;%2")
-                            .arg(colors::AMBER(), MF));
-    hhl->addWidget(plbl);
+    preview_header_label_ = new QLabel(tr("PREVIEW"));
+    preview_header_label_->setStyleSheet(
+        QString("color:%1;font-size:11px;font-weight:700;letter-spacing:1px;background:transparent;%2")
+            .arg(colors::AMBER(), MF));
+    hhl->addWidget(preview_header_label_);
     hhl->addStretch();
 
     auto* close_btn = new QPushButton("✕");
@@ -359,7 +423,7 @@ QWidget* FileManagerScreen::build_preview_panel() {
     vl->addWidget(preview_table_, 1);
 
     // Empty/binary state
-    preview_empty_ = new QLabel("Select a file to preview");
+    preview_empty_ = new QLabel(tr("Select a file to preview"));
     preview_empty_->setAlignment(Qt::AlignCenter);
     preview_empty_->setWordWrap(true);
     preview_empty_->setStyleSheet(
@@ -380,58 +444,147 @@ void FileManagerScreen::showEvent(QShowEvent* event) {
     }
 }
 
+bool FileManagerScreen::eventFilter(QObject* watched, QEvent* event) {
+    // Card bodies carry the file id in a dynamic property; a left-click on any
+    // non-button part of a card opens the preview.
+    if (event->type() == QEvent::MouseButtonRelease) {
+        auto* me = static_cast<QMouseEvent*>(event);
+        if (me->button() == Qt::LeftButton) {
+            const QVariant fid = watched->property("fileId");
+            if (fid.isValid() && !fid.toString().isEmpty()) {
+                show_preview(fid.toString());
+                return true;
+            }
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 // ── File operations ───────────────────────────────────────────────────────────
 
 void FileManagerScreen::upload_files() {
-    QStringList paths = QFileDialog::getOpenFileNames(this, "Select Files to Upload");
+    QStringList paths = QFileDialog::getOpenFileNames(this, tr("Select Files to Upload"));
     if (paths.isEmpty())
         return;
-    for (const QString& path : paths)
-        FileManagerService::instance().import_file(path);
+    QStringList failed;
+    for (const QString& path : paths) {
+        // Tagged so manual uploads are filterable (they used to carry an empty
+        // source and showed under a blank group heading).
+        if (FileManagerService::instance().import_file(path, QStringLiteral("file_manager")).isEmpty())
+            failed << QFileInfo(path).fileName();
+    }
+    if (!failed.isEmpty()) {
+        // import_file() returns an empty id on failure; this used to be swallowed.
+        LOG_WARN("FileManager", QString("Upload failed for %1 file(s)").arg(failed.size()));
+        QMessageBox::warning(this, tr("Upload Files"),
+                             tr("%n file(s) could not be copied into storage:\n%1", "", static_cast<int>(failed.size()))
+                                 .arg(failed.join('\n')));
+    }
 }
 
 void FileManagerScreen::download_file(const QString& file_id) {
     auto f = FileManagerService::instance().find_by_id(file_id);
     if (f.id.isEmpty())
         return;
-    QString dest = QFileDialog::getSaveFileName(this, "Save File As", f.original_name);
+    QString dest = QFileDialog::getSaveFileName(this, tr("Save File As"), f.original_name);
     if (dest.isEmpty())
         return;
-    QString src = FileManagerService::instance().full_path(f.name);
-    if (QFile::exists(dest))
-        QFile::remove(dest);
-    if (!QFile::copy(src, dest))
-        QMessageBox::warning(this, "Download Failed", "Could not save file to selected location.");
-    else
-        LOG_INFO("FileManager", "Downloaded: " + f.original_name);
+
+    const QString src = FileManagerService::instance().full_path(f.name);
+    if (!QFile::exists(src)) {
+        QMessageBox::warning(this, tr("Save Failed"),
+                             tr("The stored file is missing from disk:\n%1\n\n"
+                                "Its index entry is stale — delete it and re-import.")
+                                 .arg(src));
+        return;
+    }
+
+    // Write to a sibling temp file first. The old code removed the destination
+    // and *then* copied: a failure at that point destroyed whatever the user
+    // had chosen to overwrite.
+    const QString staging = dest + QStringLiteral(".fincept-partial");
+    QFile::remove(staging);
+    if (!QFile::copy(src, staging)) {
+        QMessageBox::warning(this, tr("Save Failed"),
+                             tr("Could not write to:\n%1\n\nCheck that the folder exists and is writable.")
+                                 .arg(dest));
+        return;
+    }
+    if (QFile::exists(dest) && !QFile::remove(dest)) {
+        QFile::remove(staging);
+        QMessageBox::warning(this, tr("Save Failed"),
+                             tr("Could not replace the existing file:\n%1\n\nIt may be open in another program.")
+                                 .arg(dest));
+        return;
+    }
+    if (!QFile::rename(staging, dest)) {
+        QFile::remove(staging);
+        QMessageBox::warning(this, tr("Save Failed"), tr("Could not finish writing:\n%1").arg(dest));
+        return;
+    }
+    LOG_INFO("FileManager", "Downloaded: " + f.original_name);
 }
 
 void FileManagerScreen::delete_file(const QString& file_id) {
     auto f = FileManagerService::instance().find_by_id(file_id);
     if (f.id.isEmpty())
         return;
-    auto reply = QMessageBox::question(this, "Delete File",
-                                       QString("Delete \"%1\"? This cannot be undone.").arg(f.original_name),
-                                       QMessageBox::Yes | QMessageBox::No);
-    if (reply == QMessageBox::Yes)
-        FileManagerService::instance().remove_file(file_id);
+    auto reply =
+        QMessageBox::question(this, tr("Delete File"), tr("Delete \"%1\"? This cannot be undone.").arg(f.original_name),
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (reply != QMessageBox::Yes)
+        return;
+    checked_ids_.remove(file_id);
+    if (!FileManagerService::instance().remove_file(file_id)) {
+        QMessageBox::warning(this, tr("Delete File"),
+                             tr("Could not delete \"%1\" — it may be open in another program.").arg(f.original_name));
+    }
 }
 
 void FileManagerScreen::delete_selected() {
     QStringList to_delete;
+    QStringList names;
     for (int i = 0; i < check_btns_.size(); ++i) {
-        if (check_btns_[i]->isChecked())
+        if (check_btns_[i]->isChecked()) {
             to_delete << check_ids_[i];
+            const auto f = FileManagerService::instance().find_by_id(check_ids_[i]);
+            if (!f.original_name.isEmpty() && names.size() < 12)
+                names << f.original_name;
+        }
     }
     if (to_delete.isEmpty())
         return;
-    auto reply = QMessageBox::question(
-        this, "Delete Files", QString("Delete %1 selected file(s)? This cannot be undone.").arg(to_delete.size()),
-        QMessageBox::Yes | QMessageBox::No);
-    if (reply != QMessageBox::Yes)
+
+    // Name what is about to be destroyed — a bare count is not enough
+    // confirmation for an irreversible multi-file delete.
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("Delete Files"));
+    box.setText(tr("Delete %n selected file(s)?", "", static_cast<int>(to_delete.size())));
+    box.setInformativeText(tr("This cannot be undone."));
+    if (!names.isEmpty()) {
+        box.setDetailedText(names.join('\n') +
+                            (to_delete.size() > names.size()
+                                 ? tr("\n… and %n more", "", static_cast<int>(to_delete.size() - names.size()))
+                                 : QString()));
+    }
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+    box.setDefaultButton(QMessageBox::No);
+    if (box.exec() != QMessageBox::Yes)
         return;
-    for (const QString& id : to_delete)
-        FileManagerService::instance().remove_file(id);
+
+    int failed = 0;
+    for (const QString& id : to_delete) {
+        if (FileManagerService::instance().remove_file(id))
+            checked_ids_.remove(id);
+        else
+            ++failed;
+    }
+    if (failed > 0) {
+        QMessageBox::warning(this, tr("Delete Files"),
+                             tr("%n file(s) could not be deleted — they may be open in another program.", "", failed));
+    }
+    update_bulk_bar();
 }
 
 void FileManagerScreen::open_with(const QString& file_id) {
@@ -441,7 +594,13 @@ void FileManagerScreen::open_with(const QString& file_id) {
     QString route = route_for_mime(f.mime_type);
     if (route.isEmpty())
         return;
-    emit open_file_in_screen(route, FileManagerService::instance().full_path(f.name));
+    const QString path = FileManagerService::instance().full_path(f.name);
+    emit open_file_in_screen(route, path);
+    // The shell's open_file_in_screen handler only forwards the path for the
+    // notebook editor, so "EXCEL" used to land on a blank workbook. Hand the file
+    // to the spreadsheet screen directly (it parks the path if it is not built yet).
+    if (route == QLatin1String("excel") && !path.isEmpty())
+        ExcelScreen::open_when_ready(path);
 }
 
 void FileManagerScreen::show_preview(const QString& file_id) {
@@ -466,7 +625,7 @@ void FileManagerScreen::show_preview(const QString& file_id) {
     if (f.mime_type.contains("image") || f.mime_type.contains("video") || f.mime_type.contains("audio") ||
         f.mime_type.contains("zip") || f.mime_type.contains("spreadsheet") || f.mime_type.contains("excel") ||
         f.mime_type.contains("vnd.openxmlformats")) {
-        preview_empty_->setText("Binary file — preview not available.\nUse SAVE to download.");
+        preview_empty_->setText(tr("Binary file — preview not available.\nUse SAVE to download."));
         preview_empty_->setVisible(true);
         return;
     }
@@ -474,7 +633,7 @@ void FileManagerScreen::show_preview(const QString& file_id) {
     QString path = FileManagerService::instance().full_path(f.name);
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        preview_empty_->setText("Cannot open file for preview.");
+        preview_empty_->setText(tr("Cannot open file for preview."));
         preview_empty_->setVisible(true);
         return;
     }
@@ -532,7 +691,7 @@ void FileManagerScreen::show_preview(const QString& file_id) {
 
     preview_text_->setPlainText(content);
     if (content.length() == 64000)
-        preview_text_->append("\n\n[... truncated at 64K characters ...]");
+        preview_text_->append("\n\n" + tr("[... truncated at 64K characters ...]"));
     preview_text_->setVisible(true);
 }
 
@@ -544,7 +703,7 @@ void FileManagerScreen::clear_preview() {
     preview_table_->setVisible(false);
     preview_title_->clear();
     preview_meta_->clear();
-    preview_empty_->setText("Select a file to preview");
+    preview_empty_->setText(tr("Select a file to preview"));
     preview_empty_->setVisible(true);
     preview_panel_->setVisible(false);
 }
@@ -556,12 +715,17 @@ void FileManagerScreen::update_bulk_bar() {
             selected++;
     bulk_bar_->setVisible(selected > 0);
     if (selected > 0)
-        bulk_delete_btn_->setText(QString("DELETE %1 SELECTED").arg(selected));
+        bulk_delete_btn_->setText(tr("DELETE %1 SELECTED").arg(selected));
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 void FileManagerScreen::render_files() {
+    // Preserve where the user was — this is a full teardown and the service's
+    // files_changed signal calls it on every import/delete from any screen.
+    const int scroll_pos =
+        (file_scroll_ && file_scroll_->verticalScrollBar()) ? file_scroll_->verticalScrollBar()->value() : 0;
+
     check_btns_.clear();
     check_ids_.clear();
 
@@ -574,6 +738,17 @@ void FileManagerScreen::render_files() {
     QString filter = search_input_ ? search_input_->text().toLower() : QString();
     int sort_idx = sort_combo_ ? sort_combo_->currentIndex() : 0;
     QJsonArray all = FileManagerService::instance().all_files();
+
+    // Drop checked ids for files that no longer exist, so the bulk bar can't
+    // claim a selection that points at nothing.
+    if (!checked_ids_.isEmpty()) {
+        QSet<QString> live_ids;
+        for (const auto& v : all) {
+            if (v.isObject())
+                live_ids.insert(v.toObject()["id"].toString());
+        }
+        checked_ids_.intersect(live_ids);
+    }
 
     // Filter
     QVector<QJsonObject> files;
@@ -631,15 +806,15 @@ void FileManagerScreen::render_files() {
                 QString("color:%1;font-size:36px;font-weight:700;background:transparent;%2").arg(colors::AMBER(), MF));
             skl->addWidget(hero_lbl);
 
-            auto* hero_sub = new QLabel("Your terminal file index is empty.");
+            auto* hero_sub = new QLabel(tr("Your terminal file index is empty."));
             hero_sub->setAlignment(Qt::AlignCenter);
             hero_sub->setStyleSheet(
                 QString("color:%1;font-size:14px;background:transparent;%2").arg(colors::TEXT_SECONDARY(), MF));
             skl->addWidget(hero_sub);
 
             auto* hero_hint =
-                new QLabel("Files are registered automatically when you export, save, or generate output\n"
-                           "from any screen. You can also upload files manually using the button above.");
+                new QLabel(tr("Files are registered automatically when you export, save, or generate output\n"
+                              "from any screen. You can also upload files manually using the button above."));
             hero_hint->setAlignment(Qt::AlignCenter);
             hero_hint->setWordWrap(true);
             hero_hint->setStyleSheet(
@@ -651,27 +826,32 @@ void FileManagerScreen::render_files() {
             div->setStyleSheet(QString("background:%1;max-height:1px;border:none;").arg(colors::BORDER_DIM()));
             skl->addWidget(div);
 
-            auto* sources_lbl = new QLabel("FILES ARE COLLECTED FROM");
+            auto* sources_lbl = new QLabel(tr("FILES ARE COLLECTED FROM"));
             sources_lbl->setStyleSheet(QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;"
                                                "background:transparent;%2")
                                            .arg(colors::TEXT_DIM(), MF));
             skl->addWidget(sources_lbl);
 
+            // tr() must see literals at extraction time — the previous version
+            // called tr(runtime_qstring.toUtf8().constData()), which lupdate
+            // cannot extract, so none of these ever had a translation.
             struct SI {
-                QString icon, name, desc;
+                const char* icon;
+                QString name;
+                QString desc;
             };
-            static const SI sources[] = {
-                {"RPT", "Report Builder", "Saved reports and exported PDFs"},
-                {"NTB", "Code Editor", "Saved Jupyter notebooks (.ipynb)"},
-                {"XLS", "Excel", "Imported/exported spreadsheets & CSV"},
-                {"NOTE", "Notes", "Exported markdown note files"},
-                {"PFL", "Portfolio", "Portfolio CSV & JSON exports"},
-                {"DS", "Data Sources", "Connector configuration JSON"},
-                {"ALG", "Algo Trading", "Saved strategy definitions"},
-                {"BT", "Backtesting", "Backtest result JSON exports"},
-                {"AQL", "AI Quant Lab", "Module result exports"},
-                {"NEWS", "News", "Saved article text files"},
-                {"EQR", "Equity Research", "Financial statement CSV exports"},
+            const SI sources[] = {
+                {"RPT", tr("Report Builder"), tr("Saved reports and exported PDFs")},
+                {"NTB", tr("Code Editor"), tr("Saved Jupyter notebooks (.ipynb)")},
+                {"XLS", tr("Excel"), tr("Imported/exported spreadsheets & CSV")},
+                {"NOTE", tr("Notes"), tr("Exported markdown note files")},
+                {"PFL", tr("Portfolio"), tr("Portfolio CSV & JSON exports")},
+                {"DS", tr("Data Sources"), tr("Connector configuration JSON")},
+                {"ALG", tr("Algo Trading"), tr("Saved strategy definitions")},
+                {"BT", tr("Backtesting"), tr("Backtest result JSON exports")},
+                {"AQL", tr("AI Quant Lab"), tr("Module result exports")},
+                {"NEWS", tr("News"), tr("Saved article text files")},
+                {"EQR", tr("Equity Research"), tr("Financial statement CSV exports")},
             };
 
             auto* grid_w = new QWidget(this);
@@ -718,18 +898,19 @@ void FileManagerScreen::render_files() {
             div2->setStyleSheet(QString("background:%1;max-height:1px;border:none;").arg(colors::BORDER_DIM()));
             skl->addWidget(div2);
 
-            auto* tips_lbl = new QLabel("TIPS");
+            auto* tips_lbl = new QLabel(tr("TIPS"));
             tips_lbl->setStyleSheet(QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;"
                                             "background:transparent;%2")
                                         .arg(colors::TEXT_DIM(), MF));
             skl->addWidget(tips_lbl);
 
-            for (const char* tip : {
-                     "Use the filter chips above to narrow files by source screen.",
-                     "Click any file card to preview its contents in the right panel.",
-                     "Use checkboxes on file cards to bulk-delete multiple files at once.",
-                     "MCP tools can list and read your files directly in AI Chat.",
-                 }) {
+            const QStringList tips = {
+                tr("Use the filter chips above to narrow files by source screen."),
+                tr("Click any file card to preview its contents in the right panel."),
+                tr("Use checkboxes on file cards to bulk-delete multiple files at once."),
+                tr("MCP tools can list and read your files directly in AI Chat."),
+            };
+            for (const QString& tip : tips) {
                 auto* tl2 = new QLabel(QString("•  ") + tip);
                 tl2->setWordWrap(true);
                 tl2->setStyleSheet(
@@ -739,7 +920,7 @@ void FileManagerScreen::render_files() {
             skl->addStretch();
             file_layout_->addWidget(skeleton);
         } else {
-            auto* empty = new QLabel("No files match your search or filter.");
+            auto* empty = new QLabel(tr("No files match your search or filter."));
             empty->setAlignment(Qt::AlignCenter);
             empty->setStyleSheet(QString("color:%1;font-size:13px;padding:40px;%2").arg(colors::TEXT_DIM(), MF));
             file_layout_->addWidget(empty);
@@ -749,83 +930,96 @@ void FileManagerScreen::render_files() {
         return;
     }
 
-    // Group by source screen
+    // Group by source screen. Every widget below is styled by object name via
+    // the single container stylesheet installed in build_ui() — no per-row
+    // setStyleSheet() calls, which is what made a large file list slow.
     QString current_group;
     for (const QJsonObject& file : files) {
         QString source = file["sourceScreen"].toString();
         if (active_screen_filter_.isEmpty() && source != current_group) {
             current_group = source;
-            auto* grp_lbl = new QLabel(source.toUpper().replace('_', ' '));
-            grp_lbl->setStyleSheet(QString("color:%1;font-size:10px;font-weight:700;letter-spacing:1px;"
-                                           "background:transparent;padding:8px 0 2px 0;%2")
-                                       .arg(colors::TEXT_DIM(), MF));
+            // Legacy manual uploads carry no source tag — give them a heading
+            // instead of an empty label.
+            auto* grp_lbl = new QLabel(source.isEmpty() ? tr("UPLOADED") : source.toUpper().replace('_', ' '));
+            grp_lbl->setObjectName("FMGroupLabel");
             file_layout_->addWidget(grp_lbl);
         }
 
+        const QString fid = file["id"].toString();
+        const QString display_name = file["originalName"].toString();
+
         // ── Card ─────────────────────────────────────────────────────────────
         auto* card = new QWidget(this);
-        card->setStyleSheet(panel_ss());
+        card->setObjectName("FMCard");
         card->setCursor(Qt::PointingHandCursor);
         auto* hl = new QHBoxLayout(card);
         hl->setContentsMargins(8, 8, 12, 8);
         hl->setSpacing(8);
 
-        // Checkbox
-        auto* chk = new QPushButton("☐");
+        // Checkbox — restore its state from checked_ids_ so a refresh (which
+        // the files_changed signal triggers) doesn't silently drop a pending
+        // bulk selection.
+        auto* chk = new QPushButton(checked_ids_.contains(fid) ? "☑" : "☐");
+        chk->setObjectName("FMCheck");
         chk->setCheckable(true);
+        chk->setChecked(checked_ids_.contains(fid));
         chk->setFixedSize(22, 22);
-        chk->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:none;font-size:14px;}"
-                                   "QPushButton:checked{color:%2;}")
-                               .arg(colors::TEXT_DIM(), colors::AMBER()));
-        connect(chk, &QPushButton::toggled, this, [this, chk](bool checked) {
+        chk->setAccessibleName(tr("Select %1").arg(display_name));
+        connect(chk, &QPushButton::toggled, this, [this, chk, fid](bool checked) {
             chk->setText(checked ? "☑" : "☐");
+            if (checked)
+                checked_ids_.insert(fid);
+            else
+                checked_ids_.remove(fid);
             update_bulk_bar();
         });
         check_btns_.append(chk);
-        check_ids_.append(file["id"].toString());
+        check_ids_.append(fid);
         hl->addWidget(chk);
 
-        // Type badge
+        // Type badge — the colour is per-mime so it stays a (cheap) palette
+        // lookup on the label's own foreground rather than a CSS reparse.
         QString type = file["type"].toString();
         auto* type_dot = new QLabel("[" + type.section('/', 1, 1).left(4).toUpper() + "]");
+        type_dot->setObjectName("FMTypeBadge");
         type_dot->setFixedWidth(46);
-        type_dot->setStyleSheet(QString("color:%1;font-size:10px;font-weight:700;background:transparent;%2")
-                                    .arg(file_type_color(type), MF));
+        QPalette badge_pal = type_dot->palette();
+        badge_pal.setColor(QPalette::WindowText, QColor(file_type_color(type)));
+        type_dot->setPalette(badge_pal);
         hl->addWidget(type_dot);
 
-        // Name + meta (clickable for preview)
+        // Name + meta (clickable for preview — see eventFilter)
         auto* info = new QWidget(this);
-        info->setStyleSheet("background:transparent;");
+        info->setObjectName("FMCardInfo");
         info->setCursor(Qt::PointingHandCursor);
         auto* info_vl = new QVBoxLayout(info);
         info_vl->setContentsMargins(0, 0, 0, 0);
         info_vl->setSpacing(1);
 
-        auto* name_lbl = new QLabel(file["originalName"].toString());
-        name_lbl->setStyleSheet(QString("color:%1;font-size:12px;font-weight:600;background:transparent;%2")
-                                    .arg(colors::TEXT_PRIMARY(), MF));
+        auto* name_lbl = new QLabel(display_name);
+        name_lbl->setObjectName("FMFileName");
         info_vl->addWidget(name_lbl);
 
         QString date_str = QDateTime::fromString(file["uploadedAt"].toString(), Qt::ISODate)
                                .toLocalTime()
                                .toString("yyyy-MM-dd HH:mm");
         auto* meta_lbl = new QLabel(format_size(file["size"].toInteger()) + "  |  " + date_str);
-        meta_lbl->setStyleSheet(
-            QString("color:%1;font-size:10px;background:transparent;%2").arg(colors::TEXT_DIM(), MF));
+        meta_lbl->setObjectName("FMFileMeta");
         info_vl->addWidget(meta_lbl);
 
-        QString fid = file["id"].toString();
-        // Click card body → preview
+        // Clicking the card body previews the file. eventFilter() reads the
+        // file id back off this property.
+        info->setProperty("fileId", fid);
         info->installEventFilter(this);
-        connect(name_lbl, &QLabel::linkActivated, this, [this, fid]() { show_preview(fid); });
-        // Use a transparent button overlay trick — simpler: connect via QPushButton
-        auto* preview_btn = new QPushButton("PREVIEW");
+        card->setProperty("fileId", fid);
+        card->installEventFilter(this);
+        card->setToolTip(tr("Click to preview %1").arg(display_name));
+
+        auto* preview_btn = new QPushButton(tr("PREVIEW"));
+        preview_btn->setObjectName("FMPreview");
         preview_btn->setCursor(Qt::PointingHandCursor);
         preview_btn->setFixedHeight(26);
-        preview_btn->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
-                                           "font-size:10px;font-weight:700;padding:0 8px;%3}"
-                                           "QPushButton:hover{color:%4;border-color:%4;}")
-                                       .arg(colors::TEXT_DIM(), colors::BORDER_DIM(), MF, colors::AMBER()));
+        preview_btn->setAccessibleName(tr("Preview %1").arg(display_name));
         connect(preview_btn, &QPushButton::clicked, this, [this, fid]() { show_preview(fid); });
         hl->addWidget(info, 1);
         hl->addWidget(preview_btn);
@@ -834,35 +1028,29 @@ void FileManagerScreen::render_files() {
         QString route = route_for_mime(type);
         if (!route.isEmpty()) {
             auto* open_btn = new QPushButton(open_with_label(type));
+            open_btn->setObjectName("FMOpenWith");
             open_btn->setCursor(Qt::PointingHandCursor);
             open_btn->setFixedHeight(26);
-            open_btn->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
-                                            "font-size:10px;font-weight:700;padding:0 8px;%3}"
-                                            "QPushButton:hover{color:%1;background:rgba(217,119,6,0.15);}")
-                                        .arg(colors::AMBER(), colors::BORDER_DIM(), MF));
+            open_btn->setAccessibleName(tr("Open %1 in the matching screen").arg(display_name));
             connect(open_btn, &QPushButton::clicked, this, [this, fid]() { open_with(fid); });
             hl->addWidget(open_btn);
         }
 
         // Save button
-        auto* dl_btn = new QPushButton("SAVE");
+        auto* dl_btn = new QPushButton(tr("SAVE"));
+        dl_btn->setObjectName("FMSave");
         dl_btn->setCursor(Qt::PointingHandCursor);
         dl_btn->setFixedSize(54, 26);
-        dl_btn->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
-                                      "font-size:10px;font-weight:700;%3}"
-                                      "QPushButton:hover{color:#38bdf8;background:%4;}")
-                                  .arg(colors::CYAN(), colors::BORDER_DIM(), MF, colors::BG_RAISED()));
+        dl_btn->setAccessibleName(tr("Save a copy of %1").arg(display_name));
         connect(dl_btn, &QPushButton::clicked, this, [this, fid]() { download_file(fid); });
         hl->addWidget(dl_btn);
 
         // Delete button
-        auto* del_btn = new QPushButton("DEL");
+        auto* del_btn = new QPushButton(tr("DEL"));
+        del_btn->setObjectName("FMDelete");
         del_btn->setCursor(Qt::PointingHandCursor);
         del_btn->setFixedSize(44, 26);
-        del_btn->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
-                                       "font-size:10px;font-weight:700;%3}"
-                                       "QPushButton:hover{color:%4;background:rgba(239,68,68,0.1);}")
-                                   .arg(colors::TEXT_DIM(), colors::BORDER_DIM(), MF, colors::NEGATIVE()));
+        del_btn->setAccessibleName(tr("Delete %1").arg(display_name));
         connect(del_btn, &QPushButton::clicked, this, [this, fid]() { delete_file(fid); });
         hl->addWidget(del_btn);
 
@@ -871,6 +1059,17 @@ void FileManagerScreen::render_files() {
 
     file_layout_->addStretch();
     update_bulk_bar();
+
+    // Restore the scroll position after the layout has settled — the cards are
+    // built synchronously but their geometry isn't final until the event loop
+    // spins, so setValue() now would clamp against a stale range.
+    if (file_scroll_ && file_scroll_->verticalScrollBar() && scroll_pos > 0) {
+        QScrollBar* sb = file_scroll_->verticalScrollBar();
+        QTimer::singleShot(0, this, [sb, scroll_pos]() {
+            if (sb)
+                sb->setValue(scroll_pos);
+        });
+    }
 }
 
 void FileManagerScreen::update_stats() {
@@ -880,13 +1079,13 @@ void FileManagerScreen::update_stats() {
         if (v.isObject())
             total_size += v.toObject()["size"].toInteger();
 
-    stats_label_->setText(QString("%1 files | %2").arg(files.size()).arg(format_size(total_size)));
+    stats_label_->setText(tr("%1 files | %2").arg(files.size()).arg(format_size(total_size)));
 
     // Quota bar
     if (quota_bar_ && quota_label_) {
         int pct = (int)(total_size * 1000 / kQuotaBytes);
         quota_bar_->setValue(qMin(pct, 1000));
-        quota_label_->setText(QString("Storage: %1 / 500 MB").arg(format_size(total_size)));
+        quota_label_->setText(tr("Storage: %1 / 500 MB").arg(format_size(total_size)));
         // Turn red if > 80%
         QString chunk_color = (pct > 800) ? colors::NEGATIVE() : colors::AMBER();
         quota_bar_->setStyleSheet(QString("QProgressBar{background:%1;border:none;border-radius:3px;}"
@@ -927,12 +1126,12 @@ QString FileManagerScreen::file_type_color(const QString& mime) {
 
 QString FileManagerScreen::open_with_label(const QString& mime) {
     if (mime.contains("ipynb") || mime.contains("python"))
-        return "NOTEBOOK";
+        return QCoreApplication::translate("FileManagerScreen", "NOTEBOOK");
     if (mime.contains("spreadsheet") || mime.contains("csv") || mime.contains("excel"))
-        return "EXCEL";
+        return QCoreApplication::translate("FileManagerScreen", "EXCEL");
     if (mime.contains("pdf"))
-        return "REPORT";
-    return "OPEN";
+        return QCoreApplication::translate("FileManagerScreen", "REPORT");
+    return QCoreApplication::translate("FileManagerScreen", "OPEN");
 }
 
 QString FileManagerScreen::route_for_mime(const QString& mime) {
@@ -945,6 +1144,58 @@ QString FileManagerScreen::route_for_mime(const QString& mime) {
     return {};
 }
 
+// ── Live language switch ─────────────────────────────────────────────────────
+
+void FileManagerScreen::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void FileManagerScreen::retranslateUi() {
+    // Header
+    if (title_label_)
+        title_label_->setText(tr("FILE MANAGER"));
+    if (subtitle_label_)
+        subtitle_label_->setText(tr("Manage files across the terminal"));
+    if (refresh_btn_)
+        refresh_btn_->setText(tr("REFRESH"));
+    if (upload_btn_)
+        upload_btn_->setText(tr("UPLOAD FILES"));
+
+    // Filter / sort bar
+    if (sort_label_)
+        sort_label_->setText(tr("Sort:"));
+    if (sort_combo_) {
+        const QStringList opts = {tr("Date (newest)"),  tr("Date (oldest)"),   tr("Name (A-Z)"), tr("Name (Z-A)"),
+                                  tr("Size (largest)"), tr("Size (smallest)"), tr("Type")};
+        for (int i = 0; i < opts.size() && i < sort_combo_->count(); ++i)
+            sort_combo_->setItemText(i, opts[i]);
+    }
+    if (search_input_)
+        search_input_->setPlaceholderText(tr("Search files by name, type, or source..."));
+
+    // Bulk action bar
+    if (bulk_sel_label_)
+        bulk_sel_label_->setText(tr("Selected files:"));
+    if (bulk_clear_btn_)
+        bulk_clear_btn_->setText(tr("CLEAR SELECTION"));
+
+    // Preview panel header + empty placeholder (when no file is being previewed)
+    if (preview_header_label_)
+        preview_header_label_->setText(tr("PREVIEW"));
+    if (preview_empty_ && preview_empty_->isVisible() && preview_title_ && preview_title_->text().isEmpty())
+        preview_empty_->setText(tr("Select a file to preview"));
+
+    // Re-render stats footer / quota and the file cards (which carry
+    // translatable button labels and empty-state copy).
+    if (stats_label_)
+        update_stats();
+    update_bulk_bar();
+    if (loaded_)
+        render_files();
+}
+
 // ── IStatefulScreen ───────────────────────────────────────────────────────────
 
 QVariantMap FileManagerScreen::save_state() const {
@@ -955,16 +1206,12 @@ void FileManagerScreen::restore_state(const QVariantMap& state) {
     const QString filter = state.value("screen_filter").toString();
     if (filter != active_screen_filter_) {
         active_screen_filter_ = filter;
-        // Find and check the matching chip
+        // Match on the "screenFilter" property, not the localized button text.
         if (chip_group_) {
             for (auto* btn : chip_group_->buttons()) {
-                auto* chip = qobject_cast<QPushButton*>(btn);
-                if (!chip)
-                    continue;
-                QString chip_filter = chip->text() == "All" ? "" : chip->text();
-                if (chip_filter == filter) {
-                    chip->setChecked(true);
-                    break;
+                if (btn->property("screenFilter").toString() == filter) {
+                    btn->setChecked(true); // toggled() re-renders and re-sets the filter
+                    return;
                 }
             }
         }

@@ -10,13 +10,13 @@
 #include "core/session/ScreenStateManager.h"
 #include "core/symbol/SymbolContext.h"
 #include "core/symbol/SymbolRef.h"
-#include "screens/portfolio/PortfolioInsightsPanel.h"
 #include "screens/portfolio/PortfolioBlotter.h"
 #include "screens/portfolio/PortfolioCommandBar.h"
 #include "screens/portfolio/PortfolioDetailWrapper.h"
 #include "screens/portfolio/PortfolioDialogs.h"
 #include "screens/portfolio/PortfolioFFNView.h"
 #include "screens/portfolio/PortfolioHeatmap.h"
+#include "screens/portfolio/PortfolioInsightsPanel.h"
 #include "screens/portfolio/PortfolioOrderPanel.h"
 #include "screens/portfolio/PortfolioPanelHeader.h"
 #include "screens/portfolio/PortfolioPerfChart.h"
@@ -24,6 +24,7 @@
 #include "screens/portfolio/PortfolioStatsRibbon.h"
 #include "screens/portfolio/PortfolioStatusBar.h"
 #include "screens/portfolio/PortfolioTxnPanel.h"
+#include "services/cloud/CloudSyncEngine.h"
 #include "services/file_manager/FileManagerService.h"
 #include "services/portfolio/PortfolioService.h"
 #include "storage/repositories/SettingsRepository.h"
@@ -45,12 +46,18 @@
 
 #include <memory>
 
-
 namespace fincept::screens {
 
 PortfolioScreen::PortfolioScreen(QWidget* parent) : QWidget(parent) {
     build_ui();
     refresh_theme(); // Apply theme-aware font sizes and colors on first build
+
+    // Reload the portfolio list from the local cache when a cloud pull lands.
+    connect(&fincept::services::cloud::CloudSyncEngine::instance(),
+            &fincept::services::cloud::CloudSyncEngine::cloud_data_changed, this, [](const QString& entity) {
+                if (entity == QLatin1String("portfolio"))
+                    services::PortfolioService::instance().load_portfolios();
+            });
 
     // Connect to PortfolioService signals
     auto& svc = services::PortfolioService::instance();
@@ -70,12 +77,18 @@ PortfolioScreen::PortfolioScreen(QWidget* parent) : QWidget(parent) {
     connect(&svc, &services::PortfolioService::correlation_computed, this, [this](QHash<QString, double> matrix) {
         if (sector_panel_)
             sector_panel_->set_correlation(matrix);
+        if (detail_wrapper_)
+            detail_wrapper_->update_correlation(matrix);
     });
     connect(&svc, &services::PortfolioService::spy_history_loaded, this,
-            [this](QStringList /*dates*/, QVector<double> /*closes*/) {
+            [this](QStringList /*dates*/, QVector<double> closes) {
+                // Feed the FFN view's BENCHMARK (SPY) column — it computes
+                // total return / CAGR / vol / Sharpe / max-DD from the closes.
+                if (ffn_view_)
+                    ffn_view_->set_benchmark(closes);
                 // Recompute metrics now that SPY data is available for OLS beta.
                 // The chart consumes the per-symbol benchmark_history_loaded
-                // signal below — SPY here is purely a Beta signal.
+                // signal below — SPY there may differ from this Beta fetch.
                 if (summary_loaded_)
                     services::PortfolioService::instance().compute_metrics(current_summary_);
             });
@@ -86,8 +99,8 @@ PortfolioScreen::PortfolioScreen(QWidget* parent) : QWidget(parent) {
                 // currency-normalisation are correct.
                 if (!perf_chart_ || !summary_loaded_)
                     return;
-                const QString want = services::PortfolioService::default_benchmark_for_currency(
-                    current_summary_.portfolio.currency);
+                const QString want =
+                    services::PortfolioService::default_benchmark_for_currency(current_summary_.portfolio.currency);
                 if (symbol != want)
                     return; // ignore the secondary SPY-for-Beta fetch
                 perf_chart_->set_benchmark_history(symbol, dates, closes);
@@ -99,13 +112,12 @@ PortfolioScreen::PortfolioScreen(QWidget* parent) : QWidget(parent) {
     });
     // After yfinance backfill lands, refresh snapshots and metrics so Beta/MDD
     // populate without requiring a manual refresh.
-    connect(&svc, &services::PortfolioService::history_backfilled, this,
-            [this](QString portfolio_id, int point_count) {
-                if (point_count <= 0 || !summary_loaded_ || portfolio_id != selected_id_)
-                    return;
-                services::PortfolioService::instance().load_snapshots(portfolio_id);
-                services::PortfolioService::instance().compute_metrics(current_summary_);
-            });
+    connect(&svc, &services::PortfolioService::history_backfilled, this, [this](QString portfolio_id, int point_count) {
+        if (point_count <= 0 || !summary_loaded_ || portfolio_id != selected_id_)
+            return;
+        services::PortfolioService::instance().load_snapshots(portfolio_id, kSnapshotHistoryDays);
+        services::PortfolioService::instance().compute_metrics(current_summary_);
+    });
 
     // Restore persisted refresh interval (P17)
     {
@@ -132,21 +144,26 @@ PortfolioScreen::PortfolioScreen(QWidget* parent) : QWidget(parent) {
             [this](const ui::ThemeTokens&) { refresh_theme(); });
 }
 
-
 void PortfolioScreen::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
+    update_loading_anim();
     refresh_timer_->start();
     status_bar_->start_clock();
+    if (blotter_ && !current_summary_.portfolio.broker_account_id.isEmpty())
+        blotter_->hub_resubscribe_broker_quotes(current_summary_.portfolio.broker_account_id);
+    // Rate-gated pull of cloud portfolios on screen entry (no-op when sync is off).
+    fincept::services::cloud::CloudSyncEngine::instance().request_pull(QStringLiteral("portfolio"));
 }
 
 void PortfolioScreen::hideEvent(QHideEvent* event) {
     QWidget::hideEvent(event);
+    if (loading_anim_)
+        loading_anim_->stop();
     refresh_timer_->stop();
     status_bar_->stop_clock();
 }
 
 // ── Slots ────────────────────────────────────────────────────────────────────
-
 
 void PortfolioScreen::changeEvent(QEvent* event) {
     if (event->type() == QEvent::LanguageChange)
@@ -206,7 +223,6 @@ void PortfolioScreen::refresh_theme() {
         txn_panel_->refresh_theme();
 }
 
-
 void PortfolioScreen::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     reposition_order_panel();
@@ -234,9 +250,11 @@ const portfolio::HoldingWithQuote* PortfolioScreen::find_holding(const QString& 
     return nullptr;
 }
 
-
 QVariantMap PortfolioScreen::save_state() const {
-    return {{"portfolio_id", selected_id_}, {"symbol", selected_symbol_}};
+    QVariantMap state{{"portfolio_id", selected_id_}, {"symbol", selected_symbol_}};
+    if (positions_filter_edit_)
+        state["filter"] = positions_filter_edit_->text();
+    return state;
 }
 
 void PortfolioScreen::restore_state(const QVariantMap& state) {
@@ -246,6 +264,8 @@ void PortfolioScreen::restore_state(const QVariantMap& state) {
         on_portfolio_selected(id);
     if (!sym.isEmpty())
         selected_symbol_ = sym;
+    if (positions_filter_edit_ && state.contains("filter"))
+        positions_filter_edit_->setText(state.value("filter").toString());
 }
 
 // ── IGroupLinked ─────────────────────────────────────────────────────────────

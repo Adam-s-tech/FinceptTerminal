@@ -93,6 +93,19 @@ void LoadingOverlay::attach_to(QWidget* target) {
 
 void LoadingOverlay::set_shimmer_phase(qreal v) {
     shimmer_phase_ = v;
+
+    // Rate-gate to P9's 20fps ceiling. The driving QPropertyAnimation loops
+    // forever, and an unconditional update() here repainted at Qt's animation
+    // rate (~60Hz) — while each frame builds four QPainterPaths and four
+    // QLinearGradients under Antialiasing. Every dashboard tile owns one of
+    // these and they are all shimmering simultaneously at startup, which is
+    // exactly when the machine is busiest constructing the dashboard.
+    //
+    // The phase value is still stored every tick, so the animation stays smooth
+    // in value terms; only the repaint is throttled.
+    if (repaint_clock_.isValid() && repaint_clock_.elapsed() < kMinRepaintIntervalMs)
+        return;
+    repaint_clock_.restart();
     update();
 }
 
@@ -222,6 +235,16 @@ void LoadingOverlay::hideEvent(QHideEvent* e) {
     stop_shimmer();
 }
 
+void LoadingOverlay::changeEvent(QEvent* e) {
+    // The status text ("LOADING…" / "LOADING X / Y ITEMS") is rendered with
+    // tr() directly in paintEvent(), so there are no cached label widgets to
+    // re-apply. A repaint on language change is enough — the next paint picks
+    // up the new translation.
+    if (e->type() == QEvent::LanguageChange)
+        update();
+    QWidget::changeEvent(e);
+}
+
 void LoadingOverlay::sync_geometry() {
     if (target_)
         setGeometry(target_->rect());
@@ -281,7 +304,7 @@ void LoadingOverlay::paintEvent(QPaintEvent* /*e*/) {
     const int bar_h = 8;
     const int row_gap = 10;
     const int center_y = r.center().y();
-    const int progress_block_h = 56;  // text + progress bar reserved
+    const int progress_block_h = 56; // text + progress bar reserved
     const int top = std::max(r.top() + 12, center_y - progress_block_h / 2 - bar_h * 3 - row_gap * 2);
 
     struct SkelRow {

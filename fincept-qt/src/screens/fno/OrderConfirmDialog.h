@@ -13,6 +13,7 @@
 #include "trading/TradingTypes.h"
 
 #include <QDialog>
+#include <QEvent>
 #include <QLabel>
 #include <QPointer>
 #include <QPushButton>
@@ -27,9 +28,8 @@ class OrderConfirmDialog : public QDialog {
     Q_OBJECT
   public:
     OrderConfirmDialog(const fincept::services::options::Strategy& strategy,
-                       const fincept::services::options::OptionChain& chain,
-                       double premium, double max_profit, double max_loss,
-                       QWidget* parent = nullptr);
+                       const fincept::services::options::OptionChain& chain, double premium, double max_profit,
+                       double max_loss, QWidget* parent = nullptr);
 
     /// Margin returned by the broker. Empty until the async fetch completes;
     /// the dialog can be accepted without it (the loader times out at 5s).
@@ -37,20 +37,32 @@ class OrderConfirmDialog : public QDialog {
 
     const fincept::services::options::Strategy& strategy() const { return strategy_; }
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private:
     void setup_ui(double premium, double max_profit, double max_loss);
     void populate_legs();
     void start_margin_fetch();
     void on_margin_loaded(bool ok, fincept::trading::BasketMargin margin, QString error);
+    void retranslateUi();
 
     fincept::services::options::Strategy strategy_;
     fincept::services::options::OptionChain chain_;
     std::optional<fincept::trading::BasketMargin> margin_;
 
     QTableWidget* legs_table_ = nullptr;
+    QLabel* title_label_ = nullptr;
+    QLabel* sub_label_ = nullptr;
+    /// "N of M legs will be placed" — makes preview/submission divergence
+    /// impossible to miss when some legs are toggled off or have zero lots.
+    QLabel* legs_note_ = nullptr;
     QLabel* lbl_premium_ = nullptr;
     QLabel* lbl_max_pnl_ = nullptr;
     QLabel* lbl_margin_ = nullptr;
+    QLabel* key_premium_ = nullptr;
+    QLabel* key_max_pnl_ = nullptr;
+    QLabel* key_margin_ = nullptr;
     QPushButton* place_btn_ = nullptr;
     QPushButton* cancel_btn_ = nullptr;
 };

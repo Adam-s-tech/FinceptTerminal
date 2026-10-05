@@ -1,15 +1,13 @@
 // src/app/WindowFrame_Setup.cpp
 //
-// Initial setup helpers — auth stack, docking mode, dock screens, and the
-// (currently-stub) app/navigation hooks. Called from the WindowFrame
-// constructor in WindowFrame.cpp.
+// Initial setup helpers — auth stack, docking mode and dock-screen
+// registration. Called from the WindowFrame constructor in WindowFrame.cpp.
 //
 // Part of the partial-class split of WindowFrame.cpp.
 
-#include "app/WindowFrame.h"
-
 #include "app/DockScreenRouter.h"
 #include "app/TerminalShell.h"
+#include "app/WindowFrame.h"
 #include "auth/AuthManager.h"
 #include "auth/InactivityGuard.h"
 #include "auth/lock/LockOverlayController.h"
@@ -19,7 +17,6 @@
 #include "core/layout/LayoutCatalog.h"
 #include "core/logging/Logger.h"
 #include "core/session/SessionManager.h"
-#include "screens/common/ComingSoonScreen.h"
 #include "screens/about/AboutScreen.h"
 #include "screens/agent_config/AgentConfigScreen.h"
 #include "screens/ai_chat/AiChatScreen.h"
@@ -37,6 +34,7 @@
 #include "screens/backtesting/BacktestingScreen.h"
 #include "screens/chat_mode/ChatModeScreen.h"
 #include "screens/code_editor/CodeEditorScreen.h"
+#include "screens/common/ComingSoonScreen.h"
 #include "screens/crypto_center/CryptoCenterScreen.h"
 #include "screens/crypto_trading/CryptoTradingScreen.h"
 #include "screens/dashboard/DashboardScreen.h"
@@ -72,6 +70,7 @@
 #include "screens/quantlib/QuantLibScreen.h"
 #include "screens/relationship_map/RelationshipMapScreen.h"
 #include "screens/report_builder/ReportBuilderScreen.h"
+#include "screens/screener/ScreenerScreen.h"
 #include "screens/settings/SettingsScreen.h"
 #include "screens/support/SupportScreen.h"
 #include "screens/surface_analytics/SurfaceAnalyticsScreen.h"
@@ -168,11 +167,10 @@ void WindowFrame::setup_docking_mode() {
         // Per-widget removal: DockWidgetFloatable feature (in
         // DockScreenRouter::create_dock_widget) — see note there.
         ads::CDockManager::setConfigFlags(
-            ads::CDockManager::DefaultOpaqueConfig |
-            ads::CDockManager::AlwaysShowTabs | ads::CDockManager::DockAreaHasTabsMenuButton |
-            ads::CDockManager::DockAreaDynamicTabsMenuButtonVisibility |
+            ads::CDockManager::DefaultOpaqueConfig | ads::CDockManager::AlwaysShowTabs |
+            ads::CDockManager::DockAreaHasTabsMenuButton | ads::CDockManager::DockAreaDynamicTabsMenuButtonVisibility |
             ads::CDockManager::FloatingContainerHasWidgetTitle | ads::CDockManager::FloatingContainerHasWidgetIcon |
-            ads::CDockManager::EqualSplitOnInsertion       // prevents new panels from spawning tiny slivers
+            ads::CDockManager::EqualSplitOnInsertion // prevents new panels from spawning tiny slivers
         );
         // Disable auto-hide entirely: the pin button converts panels to collapsible
         // sidebars which collapse when another panel is opened beside them.
@@ -212,8 +210,16 @@ void WindowFrame::setup_docking_mode() {
     // or close is also captured.
     connect(dock_manager_, &ads::CDockManager::dockAreaCreated, this,
             [this](ads::CDockAreaWidget*) { schedule_dock_layout_save(); });
-    connect(dock_manager_, &ads::CDockManager::dockWidgetAdded, this,
-            [this](ads::CDockWidget*) { schedule_dock_layout_save(); });
+    connect(dock_manager_, &ads::CDockManager::dockWidgetAdded, this, [this](ads::CDockWidget* dw) {
+        schedule_dock_layout_save();
+        // Per-widget close persistence: when a tab is closed via
+        // the X button, ADS calls toggleView(false) which emits
+        // viewToggled but no manager-level signal (dockWidgetRemoved
+        // only fires on full removal, not hide). Without this
+        // connection, closing a tab doesn't persist — the tab
+        // reappears on next launch.
+        connect(dw, &ads::CDockWidget::viewToggled, this, [this](bool) { schedule_dock_layout_save(); });
+    });
     connect(dock_manager_, &ads::CDockManager::dockWidgetRemoved, this,
             [this](ads::CDockWidget*) { schedule_dock_layout_save(); });
     connect(dock_manager_, &ads::CDockManager::floatingWidgetCreated, this,
@@ -257,6 +263,7 @@ void WindowFrame::setup_dock_screens() {
     dock_router_->register_factory("derivatives", []() { return new screens::DerivativesScreen; });
     dock_router_->register_factory("fno", []() { return new screens::fno::FnoScreen; });
     dock_router_->register_factory("equity_research", []() { return new screens::EquityResearchScreen; });
+    dock_router_->register_factory("screener", []() { return new screens::ScreenerScreen; });
     dock_router_->register_factory("ma_analytics", []() { return new screens::MAAnalyticsScreen; });
     dock_router_->register_factory("alt_investments", []() { return new screens::AltInvestmentsScreen; });
     dock_router_->register_factory("geopolitics", []() { return new screens::GeopoliticsScreen; });
@@ -269,22 +276,34 @@ void WindowFrame::setup_dock_screens() {
     dock_router_->register_factory("file_manager", [this]() {
         auto* fm = new screens::FileManagerScreen;
         connect(fm, &screens::FileManagerScreen::open_file_in_screen, this,
-                [this](const QString& route_id, const QString& /*file_path*/) { dock_router_->navigate(route_id); });
+                [this](const QString& route_id, const QString& file_path) {
+                    dock_router_->navigate(route_id);
+                    // Notebooks open into the editor with the file loaded — hand
+                    // the path to the live CodeEditorScreen after it materializes.
+                    if (route_id == "code_editor" && !file_path.isEmpty()) {
+                        dock_router_->materialize_now(route_id);
+                        if (auto* nb = qobject_cast<screens::CodeEditorScreen*>(dock_router_->screen_widget(route_id)))
+                            nb->open_notebook_path(file_path);
+                    }
+                });
         return fm;
     });
     dock_router_->register_factory("excel", []() { return new screens::ExcelScreen; });
     dock_router_->register_factory("trade_viz", []() { return new screens::TradeVizScreen; });
     dock_router_->register_factory("docs", []() { return new screens::DocsScreen; });
 
-    // Info/legal pages: static content, safe to construct eagerly.
-    dock_router_->register_screen("contact", new screens::ContactScreen);
-    dock_router_->register_screen("terms", new screens::TermsScreen);
-    dock_router_->register_screen("privacy", new screens::PrivacyScreen);
-    dock_router_->register_screen("trademarks", new screens::TrademarksScreen);
-    dock_router_->register_screen("help", new screens::HelpScreen);
+    // Info/legal pages. setup_auth_screens() above already builds one of each for
+    // info_stack_, so an eager register_screen() here would create a SECOND instance
+    // of all five per window, none of them visible at startup. The info screens now
+    // build their page content on first show (e.g. HelpScreen::showEvent), so an
+    // unshown copy is only a shell — but it is still a pointless one per window.
+    // Factories construct the dock copy only when the user actually opens the panel;
+    // the auth-stack copies stay the only eager instances.
+    dock_router_->register_factory("contact", []() { return new screens::ContactScreen; });
+    dock_router_->register_factory("terms", []() { return new screens::TermsScreen; });
+    dock_router_->register_factory("privacy", []() { return new screens::PrivacyScreen; });
+    dock_router_->register_factory("trademarks", []() { return new screens::TrademarksScreen; });
+    dock_router_->register_factory("help", []() { return new screens::HelpScreen; });
 }
-
-void WindowFrame::setup_app_screens() {}
-void WindowFrame::setup_navigation() {}
 
 } // namespace fincept

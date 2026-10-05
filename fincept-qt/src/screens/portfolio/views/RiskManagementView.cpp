@@ -7,6 +7,7 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QTabBar>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -14,6 +15,33 @@
 #include <numeric>
 
 namespace fincept::screens {
+
+namespace {
+
+/// Recursively empties a layout, destroying the widgets it owns.
+///
+/// `delete panel->layout()` alone does NOT destroy child widgets — they stay
+/// parented to the panel, keep their last geometry and keep painting, so every
+/// rebuild stacked another full set of metric cards on top of the previous one
+/// (a visible artefact and an unbounded leak). Always drain the layout first.
+void clear_layout(QLayout* layout) {
+    if (!layout)
+        return;
+    QLayoutItem* item = nullptr;
+    while ((item = layout->takeAt(0)) != nullptr) {
+        if (auto* w = item->widget()) {
+            w->hide();
+            w->deleteLater();
+        } else if (auto* child = item->layout()) {
+            clear_layout(child);
+        }
+        // `item` IS the nested layout when item->layout() is non-null, so a
+        // single delete covers both cases — never delete both.
+        delete item;
+    }
+}
+
+} // namespace
 
 // Pre-defined stress test scenarios
 struct StressScenario {
@@ -52,6 +80,9 @@ void RiskManagementView::build_ui() {
     layout->setContentsMargins(0, 0, 0, 0);
 
     tabs_ = new QTabWidget;
+    tabs_->tabBar()->setElideMode(Qt::ElideNone);
+    tabs_->tabBar()->setExpanding(false);
+    tabs_->tabBar()->setUsesScrollButtons(false);
     tabs_->setDocumentMode(true);
     tabs_->setStyleSheet(QString("QTabWidget::pane { border:0; background:%1; }"
                                  "QTabBar::tab { background:%2; color:%3; padding:8px 18px; border:0;"
@@ -84,7 +115,7 @@ void RiskManagementView::build_ui() {
     stress_table_ = new QTableWidget;
     stress_table_->setColumnCount(5);
     stress_table_->setHorizontalHeaderLabels(
-        {tr("SCENARIO"), tr("DESCRIPTION"), tr("EQUITY SHOCK"), tr("PORTFOLIO IMPACT"), tr("LOSS")});
+        {tr("SCENARIO"), tr("DESCRIPTION"), tr("EQUITY SHOCK"), tr("PORTFOLIO IMPACT"), tr("P&L IMPACT")});
     stress_table_->setSelectionMode(QAbstractItemView::NoSelection);
     stress_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     stress_table_->setShowGrid(false);
@@ -129,7 +160,8 @@ void RiskManagementView::build_ui() {
                                           "  border-bottom:2px solid %6; padding:4px 8px; font-size:9px;"
                                           "  font-weight:700; letter-spacing:0.5px; }")
                                       .arg(ui::colors::BG_BASE(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM(),
-                                           ui::colors::BG_SURFACE(), ui::colors::TEXT_SECONDARY(), ui::colors::AMBER()));
+                                           ui::colors::BG_SURFACE(), ui::colors::TEXT_SECONDARY(),
+                                           ui::colors::AMBER()));
     contrib_layout->addWidget(contrib_table_, 1);
     contrib_tab_index_ = tabs_->addTab(contrib_w, tr("RISK CONTRIBUTION"));
 
@@ -153,17 +185,23 @@ void RiskManagementView::changeEvent(QEvent* event) {
 
 void RiskManagementView::retranslateUi() {
     if (tabs_) {
-        if (overview_tab_index_ >= 0) tabs_->setTabText(overview_tab_index_, tr("RISK OVERVIEW"));
-        if (stress_tab_index_ >= 0)   tabs_->setTabText(stress_tab_index_, tr("STRESS TEST"));
-        if (contrib_tab_index_ >= 0)  tabs_->setTabText(contrib_tab_index_, tr("RISK CONTRIBUTION"));
+        if (overview_tab_index_ >= 0)
+            tabs_->setTabText(overview_tab_index_, tr("RISK OVERVIEW"));
+        if (stress_tab_index_ >= 0)
+            tabs_->setTabText(stress_tab_index_, tr("STRESS TEST"));
+        if (contrib_tab_index_ >= 0)
+            tabs_->setTabText(contrib_tab_index_, tr("RISK CONTRIBUTION"));
     }
-    if (stress_title_)  stress_title_->setText(tr("PORTFOLIO STRESS TESTING"));
-    if (stress_note_)   stress_note_->setText(tr("Estimated impact of historical and hypothetical market scenarios"));
-    if (contrib_title_) contrib_title_->setText(tr("RISK CONTRIBUTION BY HOLDING"));
+    if (stress_title_)
+        stress_title_->setText(tr("PORTFOLIO STRESS TESTING"));
+    if (stress_note_)
+        stress_note_->setText(tr("Estimated impact of historical and hypothetical market scenarios"));
+    if (contrib_title_)
+        contrib_title_->setText(tr("RISK CONTRIBUTION BY HOLDING"));
 
     if (stress_table_)
         stress_table_->setHorizontalHeaderLabels(
-            {tr("SCENARIO"), tr("DESCRIPTION"), tr("EQUITY SHOCK"), tr("PORTFOLIO IMPACT"), tr("LOSS")});
+            {tr("SCENARIO"), tr("DESCRIPTION"), tr("EQUITY SHOCK"), tr("PORTFOLIO IMPACT"), tr("P&L IMPACT")});
     if (contrib_table_)
         contrib_table_->setHorizontalHeaderLabels(
             {tr("SYMBOL"), tr("WEIGHT"), tr("VOL PROXY"), tr("RISK CONTRIB"), tr("VAR CONTRIB"), tr("CONCENTRATION")});
@@ -178,12 +216,19 @@ void RiskManagementView::retranslateUi() {
 
 void RiskManagementView::set_metrics(const portfolio::ComputedMetrics& metrics) {
     metrics_ = metrics;
+    // The overview cards (volatility, VaR, CVaR) read metrics_ too. Metrics land
+    // asynchronously after the summary, so without this the cards kept showing the
+    // day-change proxy until the next set_data().
+    if (has_data_)
+        update_overview();
     update_stress_test(); // rescale with real beta
 }
 
 void RiskManagementView::update_overview() {
-    if (overview_panel_->layout())
-        delete overview_panel_->layout();
+    if (auto* old = overview_panel_->layout()) {
+        clear_layout(old);
+        delete old;
+    }
 
     auto* layout = new QVBoxLayout(overview_panel_);
     layout->setContentsMargins(16, 12, 16, 12);
@@ -228,9 +273,17 @@ void RiskManagementView::update_overview() {
     for (qsizetype i = 0; i < std::min(qsizetype{5}, sorted.size()); ++i)
         conc_top5 += sorted[i].weight;
 
-    // VaR/CVaR — parametric normal: CVaR/VaR = phi(1.645)/0.05 ≈ 1.546
+    // VaR/CVaR — parametric normal: CVaR/VaR = phi(1.645)/0.05 ≈ 1.546. This is the
+    // fallback only: when PortfolioService has produced its historical-simulation
+    // figures (the ones PERF/RISK shows) use those, so the two views agree.
     double var95 = total_mv * avg_vol * 1.645 / 100.0;
     double cvar95 = var95 * 1.546;
+    bool var_historical = false;
+    if (metrics_.var_95.has_value() && metrics_.cvar_95.has_value()) {
+        var95 = *metrics_.var_95;
+        cvar95 = *metrics_.cvar_95;
+        var_historical = true;
+    }
 
     // Metric cards grid
     auto* grid = new QGridLayout;
@@ -246,8 +299,8 @@ void RiskManagementView::update_overview() {
         cl->setSpacing(2);
 
         auto* lbl = new QLabel(label);
-        lbl->setStyleSheet(
-            QString("color:%1; font-size:8px; font-weight:700; letter-spacing:0.5px;").arg(ui::colors::TEXT_TERTIARY()));
+        lbl->setStyleSheet(QString("color:%1; font-size:8px; font-weight:700; letter-spacing:0.5px;")
+                               .arg(ui::colors::TEXT_TERTIARY()));
         cl->addWidget(lbl);
 
         auto* val = new QLabel(value);
@@ -267,10 +320,13 @@ void RiskManagementView::update_overview() {
 
     add_card(0, 0, tr("PORTFOLIO VALUE"), QString("%1 %2").arg(currency_, fmt(total_mv)), ui::colors::WARNING,
              tr("Total market value"));
+    // Be honest about which of the two sources produced the number — the card
+    // previously always claimed "day-change proxy" even when the real 30-day
+    // realized volatility from ComputedMetrics was used.
     add_card(0, 1, tr("ANNUALIZED VOLATILITY"), QString("%1%").arg(fmt(ann_vol, 1)), ui::colors::AMBER,
-             tr("Based on day-change proxy"));
+             metrics_.volatility.has_value() ? tr("Realized, daily snapshots") : tr("Based on day-change proxy"));
     add_card(0, 2, tr("VALUE AT RISK (95%)"), QString("%1 %2").arg(currency_, fmt(var95)), ui::colors::NEGATIVE,
-             tr("1-day parametric"));
+             var_historical ? tr("1-day historical") : tr("1-day parametric"));
     add_card(0, 3, tr("CONDITIONAL VaR"), QString("%1 %2").arg(currency_, fmt(cvar95)), ui::colors::NEGATIVE,
              tr("Expected shortfall"));
 
@@ -350,7 +406,10 @@ void RiskManagementView::update_stress_test() {
             impact_pct = equity_impact + other_impact;
         }
 
-        double loss = total_mv * std::abs(impact_pct) / 100.0;
+        // Signed currency delta. The column used to hard-code a leading "-"
+        // even for scenarios the portfolio profits from (e.g. Inflation Surge
+        // on a commodity-heavy book), reporting a gain as a loss.
+        const double delta = total_mv * impact_pct / 100.0;
 
         set_cell(0, tr(s.name), ui::colors::TEXT_PRIMARY);
         set_cell(1, tr(s.description), ui::colors::TEXT_SECONDARY);
@@ -358,8 +417,12 @@ void RiskManagementView::update_stress_test() {
                  s.equity_shock < 0 ? ui::colors::NEGATIVE : ui::colors::POSITIVE, Qt::AlignRight | Qt::AlignVCenter);
         set_cell(3, QString("%1%2%").arg(impact_pct < 0 ? "" : "+").arg(QString::number(impact_pct, 'f', 1)),
                  impact_pct < 0 ? ui::colors::NEGATIVE : ui::colors::POSITIVE, Qt::AlignRight | Qt::AlignVCenter);
-        set_cell(4, QString("-%1 %2").arg(currency_, QString::number(loss, 'f', 0)), ui::colors::NEGATIVE,
-                 Qt::AlignRight | Qt::AlignVCenter);
+        set_cell(4,
+                 QString("%1%2 %3")
+                     .arg(delta < 0 ? "-" : "+")
+                     .arg(currency_)
+                     .arg(QString::number(std::abs(delta), 'f', 0)),
+                 delta < 0 ? ui::colors::NEGATIVE : ui::colors::POSITIVE, Qt::AlignRight | Qt::AlignVCenter);
     }
 }
 

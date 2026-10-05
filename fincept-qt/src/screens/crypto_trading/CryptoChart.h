@@ -3,7 +3,10 @@
 // OHLC tooltip, and a last-price tag pinned to the right axis.
 
 #include "trading/TradingTypes.h"
+#include "ui/charts/ChartOverlayManager.h"
+#include "ui/charts/TimeAxisNavigator.h"
 
+#include <QEvent>
 #include <QPushButton>
 #include <QVector>
 #include <QWidget>
@@ -20,6 +23,10 @@ class QGraphicsEllipseItem;
 class QGraphicsSimpleTextItem;
 class QLabel;
 
+namespace fincept::ui {
+class IndicatorPicker;
+}
+
 namespace fincept::screens::crypto {
 
 class HoverChartView; // forward; defined in the .cpp
@@ -34,11 +41,16 @@ class CryptoChart : public QWidget {
     void clear();
 
     QString current_timeframe() const;
+    fincept::ui::ChartOverlayManager* overlay_manager() const { return overlay_mgr_; }
 
   signals:
     void timeframe_changed(const QString& tf);
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private:
+    void retranslateUi();
     void rebuild_chart();
     void update_axes(double min_price, double max_price, qint64 min_time, qint64 max_time);
     void set_active_tf(int idx);
@@ -46,6 +58,15 @@ class CryptoChart : public QWidget {
     void update_last_price_marker();
     void on_hover_position(const QPointF& chart_value_pos, const QPoint& view_pos);
     void on_hover_leave();
+
+    // ── User-driven time navigation (#338) ────────────────────────────────
+    // Wheel zooms around the cursor, left-drag pans, double-click returns to
+    // auto-follow. While the user window is active the live candle stream no
+    // longer re-fits the time axis.
+    void zoom_time(double factor, qint64 anchor_ms);
+    void pan_time_pixels(int dx);
+    void reset_view();
+    void apply_view_range();
 
     HoverChartView* chart_view_ = nullptr;
     QChart* chart_ = nullptr;
@@ -70,6 +91,9 @@ class CryptoChart : public QWidget {
     // OHLC tooltip pinned to the chart's top-left corner
     QLabel* ohlc_tooltip_ = nullptr;
 
+    // Header title (cached for retranslateUi)
+    QLabel* title_label_ = nullptr;
+
     // Timeframe toggle buttons
     QPushButton* tf_buttons_[6] = {};
     int active_tf_ = 3; // default "1h"
@@ -77,6 +101,12 @@ class CryptoChart : public QWidget {
 
     QVector<trading::Candle> candles_;
     static constexpr int MAX_VISIBLE = 120;
+    // Never fit the time axis tighter than this many slots. Qt sizes a candle
+    // body from the slot width in DOMAIN units, so a data-fitted axis holding
+    // 3 live candles inflates each body to a third of the plot (#338).
+    static constexpr int MIN_VISIBLE_SLOTS = 40;
+
+    fincept::ui::TimeAxisNavigator nav_;
 
     // Axis range cache (padded values actually applied to the axis)
     double last_min_price_ = -1;
@@ -91,9 +121,8 @@ class CryptoChart : public QWidget {
     bool bounds_dirty_ = true;
     void recompute_bounds();
 
-    // Pending timeframe request while a fetch is already in-flight
-    // set_candles() will emit timeframe_changed again if this is set
-    QString pending_tf_;
+    fincept::ui::ChartOverlayManager* overlay_mgr_ = nullptr;
+    fincept::ui::IndicatorPicker* indicator_picker_ = nullptr;
 
     friend class HoverChartView;
 };

@@ -5,12 +5,11 @@
 // partial-class split — the file in their own folder grouping by widget
 // responsibility.
 
-#include "screens/code_editor/CodeEditorScreen.h"
-
 #include "core/keys/KeyConfigManager.h"
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
 #include "python/PythonRunner.h"
+#include "screens/code_editor/CodeEditorScreen.h"
 #include "services/file_manager/FileManagerService.h"
 #include "ui/theme/Theme.h"
 
@@ -138,7 +137,8 @@ void CellWidget::build_ui() {
         auto* btn = new QPushButton(text, toolbar_);
         btn->setFixedHeight(20);
         btn->setCursor(Qt::PointingHandCursor);
-        btn->setVisible(false); // hidden until hover
+        btn->setAccessibleName(text); // two-letter labels are opaque to a screen reader alone
+        btn->setVisible(false);       // hidden until hover
         btn->setStyleSheet(QString("QPushButton { background:transparent; color:%1; border:none;"
                                    " font-family:%2; font-size:%3px; font-weight:600; padding:0 8px;"
                                    " letter-spacing:0.5px; }"
@@ -149,27 +149,33 @@ void CellWidget::build_ui() {
         return btn;
     };
 
-    auto* run_btn = make_tool_btn("RUN", colors::POSITIVE);
-    connect(run_btn, &QPushButton::clicked, this, [this]() { emit run_requested(cell_id_); });
-    tb_layout->addWidget(run_btn);
+    run_btn_ = make_tool_btn(tr("RUN"), colors::POSITIVE);
+    run_btn_->setAccessibleName(tr("Run this cell"));
+    connect(run_btn_, &QPushButton::clicked, this, [this]() { emit run_requested(cell_id_); });
+    tb_layout->addWidget(run_btn_);
 
-    auto* type_btn = make_tool_btn("TYPE", colors::CYAN);
-    connect(type_btn, &QPushButton::clicked, this, [this]() { emit toggle_type_requested(cell_id_); });
-    tb_layout->addWidget(type_btn);
+    type_btn_ = make_tool_btn(tr("TYPE"), colors::CYAN);
+    type_btn_->setAccessibleName(tr("Switch between code and markdown"));
+    type_btn_->setToolTip(tr("Switch between code and markdown (clears this cell's output)"));
+    connect(type_btn_, &QPushButton::clicked, this, [this]() { emit toggle_type_requested(cell_id_); });
+    tb_layout->addWidget(type_btn_);
 
-    auto* up_btn = make_tool_btn("UP", colors::TEXT_SECONDARY);
-    connect(up_btn, &QPushButton::clicked, this, [this]() { emit move_up_requested(cell_id_); });
-    tb_layout->addWidget(up_btn);
+    up_btn_ = make_tool_btn(tr("UP"), colors::TEXT_SECONDARY);
+    up_btn_->setAccessibleName(tr("Move this cell up"));
+    connect(up_btn_, &QPushButton::clicked, this, [this]() { emit move_up_requested(cell_id_); });
+    tb_layout->addWidget(up_btn_);
 
-    auto* dn_btn = make_tool_btn("DN", colors::TEXT_SECONDARY);
-    connect(dn_btn, &QPushButton::clicked, this, [this]() { emit move_down_requested(cell_id_); });
-    tb_layout->addWidget(dn_btn);
+    dn_btn_ = make_tool_btn(tr("DN"), colors::TEXT_SECONDARY);
+    dn_btn_->setAccessibleName(tr("Move this cell down"));
+    connect(dn_btn_, &QPushButton::clicked, this, [this]() { emit move_down_requested(cell_id_); });
+    tb_layout->addWidget(dn_btn_);
 
     tb_layout->addStretch();
 
-    auto* del_btn = make_tool_btn("DEL", colors::NEGATIVE);
-    connect(del_btn, &QPushButton::clicked, this, [this]() { emit delete_requested(cell_id_); });
-    tb_layout->addWidget(del_btn);
+    del_btn_ = make_tool_btn(tr("DEL"), colors::NEGATIVE);
+    del_btn_->setAccessibleName(tr("Delete this cell"));
+    connect(del_btn_, &QPushButton::clicked, this, [this]() { emit delete_requested(cell_id_); });
+    tb_layout->addWidget(del_btn_);
 
     editor_vbox->addWidget(toolbar_);
 
@@ -181,7 +187,8 @@ void CellWidget::build_ui() {
     editor_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     editor_->setLineWrapMode(QTextEdit::NoWrap);
     editor_->setStyleSheet(QString("QTextEdit { background:%1; color:%2; border:none;"
-                                   " font-family:%3; font-size:%4px; padding:2px 6px;"
+                                   " font-family:%3, 'Menlo', 'SF Mono', 'Courier New', monospace;"
+                                   " font-size:%4px; padding:8px 12px;"
                                    " selection-background-color:%5; }"
                                    "QScrollBar:vertical { background:%1; width:5px; }"
                                    "QScrollBar::handle:vertical { background:%6; min-height:20px; }"
@@ -193,6 +200,9 @@ void CellWidget::build_ui() {
                                .arg(fonts::DATA)
                                .arg(colors::AMBER_DIM(), colors::BORDER_BRIGHT()));
     editor_->document()->setDocumentMargin(2);
+    editor_->setAccessibleName(tr("Notebook cell source"));
+    editor_->setAccessibleDescription(
+        tr("Python source. Ctrl+Enter runs this cell, Shift+Enter runs it and moves to the next."));
 
     // Keyboard shortcuts
     connect(editor_, &CodeTextEdit::run_shortcut, this, [this]() { emit run_requested(cell_id_); });
@@ -218,8 +228,12 @@ void CellWidget::build_ui() {
                                    .arg(fonts::DATA)
                                    .arg(colors::BORDER_BRIGHT()));
 
-    // Click on preview to edit
+    // Click on the rendered preview to drop back into the source editor.
+    // QTextBrowser swallows the press, so CellWidget::mousePressEvent never
+    // fires for it — the filter below (see eventFilter) is what makes this work.
     md_preview_->installEventFilter(this);
+    md_preview_->setCursor(Qt::IBeamCursor);
+    md_preview_->setToolTip(tr("Click to edit this markdown cell"));
 
     editor_vbox->addWidget(md_preview_);
 
@@ -242,7 +256,7 @@ void CellWidget::build_ui() {
     output_vbox->setSpacing(0);
 
     // Output header with collapse toggle
-    output_toggle_ = new QPushButton("OUTPUT", output_area_);
+    output_toggle_ = new QPushButton(tr("OUTPUT"), output_area_);
     output_toggle_->setFixedHeight(22);
     output_toggle_->setCursor(Qt::PointingHandCursor);
     output_toggle_->setStyleSheet(
@@ -250,12 +264,13 @@ void CellWidget::build_ui() {
                 " font-family:%4; font-size:10px; font-weight:700; letter-spacing:0.5px;"
                 " padding:0 10px; text-align:left; }"
                 "QPushButton:hover { background:%5; }")
-            .arg(colors::BG_RAISED(), colors::POSITIVE(), colors::BORDER_DIM(), fonts::DATA_FAMILY, colors::BG_HOVER()));
+            .arg(colors::BG_RAISED(), colors::POSITIVE(), colors::BORDER_DIM(), fonts::DATA_FAMILY,
+                 colors::BG_HOVER()));
     output_toggle_->setVisible(false);
     connect(output_toggle_, &QPushButton::clicked, this, [this]() {
         output_collapsed_ = !output_collapsed_;
         output_content_->setVisible(!output_collapsed_);
-        output_toggle_->setText(output_collapsed_ ? "OUTPUT [collapsed]" : "OUTPUT");
+        output_toggle_->setText(output_collapsed_ ? tr("OUTPUT [collapsed]") : tr("OUTPUT"));
     });
     output_vbox->addWidget(output_toggle_);
 
@@ -292,8 +307,8 @@ void CellWidget::build_ui() {
     insert_btn->setStyleSheet(QString("QPushButton { color:%1; font-family:%2; font-size:12px; font-weight:700;"
                                       " background:%3; border:1px solid %4; }"
                                       "QPushButton:hover { background:%5; color:%6; border-color:%5; }")
-                                  .arg(colors::TEXT_DIM(), fonts::DATA_FAMILY, colors::BG_SURFACE(), colors::BORDER_DIM(),
-                                       colors::AMBER_DIM(), colors::AMBER()));
+                                  .arg(colors::TEXT_DIM(), fonts::DATA_FAMILY, colors::BG_SURFACE(),
+                                       colors::BORDER_DIM(), colors::AMBER_DIM(), colors::AMBER()));
     connect(insert_btn, &QPushButton::clicked, this, [this]() { emit insert_below_requested(cell_id_); });
     insert_layout->addWidget(insert_btn);
 
@@ -306,15 +321,65 @@ void CellWidget::build_ui() {
     setMouseTracking(true);
 }
 
+void CellWidget::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void CellWidget::retranslateUi() {
+    // Hover toolbar buttons — fixed labels.
+    if (run_btn_)
+        run_btn_->setText(tr("RUN"));
+    if (type_btn_)
+        type_btn_->setText(tr("TYPE"));
+    if (up_btn_)
+        up_btn_->setText(tr("UP"));
+    if (dn_btn_)
+        dn_btn_->setText(tr("DN"));
+    if (del_btn_)
+        del_btn_->setText(tr("DEL"));
+    // output_toggle_ reflects live collapse/execution state ("OUT [n]" /
+    // "OUTPUT [collapsed]") — it is re-applied on the next state change, so we
+    // deliberately don't clobber it with stale text here.
+    // gutter_number_ ([n]/[*]) and gutter_type_ (PY/MD) are state/type codes,
+    // not translatable prose.
+}
+
 void CellWidget::adjust_editor_height() {
-    if (!editor_->isVisible())
+    // Markdown cells showing the rendered preview hide the editor — its height
+    // is irrelevant. For everything else, size to fit even while the cell's
+    // stack page is still hidden (cells are built on the Editor page while the
+    // Library page is showing), so the cell isn't stuck at a tiny default.
+    if (cell_type_ == "markdown" && !md_editing_)
         return;
-    // Exact content height from the layout engine + CSS padding (2+2)
-    int doc_h = static_cast<int>(editor_->document()->size().height());
-    int target = doc_h + 6;
-    int max_h = (cell_type_ == "code") ? 600 : 300;
-    int h = qBound(28, target, max_h);
-    editor_->setFixedHeight(h);
+
+    // adjustSize() below re-emits documentSizeChanged (this slot is connected to
+    // it) — guard against the infinite recursion that would otherwise overflow
+    // the stack.
+    if (adjusting_height_)
+        return;
+    adjusting_height_ = true;
+
+    // Grow the editor to fit ALL its lines so the cell expands with the amount
+    // of code it holds — no inner scrollbar for code. The outer notebook scroll
+    // area handles overall scrolling. Height comes from the document layout, so
+    // it is accurate regardless of current visibility.
+    editor_->document()->adjustSize();
+    const int doc_h = static_cast<int>(editor_->document()->size().height());
+    const int target = doc_h + 8; // editor CSS padding (2+2) + breathing room
+    const int min_h = 40;
+    const int max_h = (cell_type_ == "code") ? 100000 : 800; // code grows freely
+    editor_->setFixedHeight(qBound(min_h, target, max_h));
+
+    adjusting_height_ = false;
+}
+
+void CellWidget::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    // Re-measure now that the stylesheet font has been polished (QSS is applied
+    // on show); construction-time sizing may use the wrong default font metrics.
+    adjust_editor_height();
 }
 
 void CellWidget::set_cell_data(const NotebookCell& cell) {
@@ -386,7 +451,7 @@ void CellWidget::set_outputs(const QVector<CellOutput>& outputs, int exec_count)
 
     output_area_->setVisible(true);
     output_toggle_->setVisible(true);
-    output_toggle_->setText(QString("OUT [%1]").arg(exec_count));
+    output_toggle_->setText(tr("OUT [%1]").arg(exec_count));
     output_collapsed_ = false;
     output_content_->setVisible(true);
 
@@ -403,7 +468,7 @@ void CellWidget::set_outputs(const QVector<CellOutput>& outputs, int exec_count)
             QString fg = (out.name == "stderr") ? colors::WARNING : colors::TEXT_PRIMARY;
             output_view->setStyleSheet(
                 QString("QTextEdit { background:transparent; color:%1; border:none;"
-                        " font-family:%2; font-size:%3px; padding:2px 0; }"
+                        " font-family:%2, 'Menlo', 'SF Mono', monospace; font-size:%3px; padding:2px 0; }"
                         "QScrollBar:vertical { background:transparent; width:4px; }"
                         "QScrollBar::handle:vertical { background:%4; }"
                         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }")
@@ -442,7 +507,7 @@ void CellWidget::set_outputs(const QVector<CellOutput>& outputs, int exec_count)
                 tb_view->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
                 tb_view->setStyleSheet(
                     QString("QTextEdit { background:transparent; color:%1; border:none;"
-                            " font-family:%2; font-size:%3px; }"
+                            " font-family:%2, 'Menlo', 'SF Mono', monospace; font-size:%3px; }"
                             "QScrollBar:vertical { background:transparent; width:4px; }"
                             "QScrollBar::handle:vertical { background:%4; }"
                             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }")
@@ -515,9 +580,10 @@ void CellWidget::update_gutter() {
                                           .arg(fonts::TINY));
     } else {
         gutter_number_->setText(QString("[%1]").arg(index_ + 1));
-        gutter_number_->setStyleSheet(QString("color:%1; font-family:%2; font-size:%3px; font-weight:700;")
-                                          .arg(selected_ ? colors::AMBER() : colors::TEXT_TERTIARY(), fonts::DATA_FAMILY)
-                                          .arg(fonts::TINY));
+        gutter_number_->setStyleSheet(
+            QString("color:%1; font-family:%2; font-size:%3px; font-weight:700;")
+                .arg(selected_ ? colors::AMBER() : colors::TEXT_TERTIARY(), fonts::DATA_FAMILY)
+                .arg(fonts::TINY));
     }
 
     if (cell_type_ == "markdown") {
@@ -536,8 +602,9 @@ void CellWidget::update_gutter() {
 void CellWidget::render_markdown() {
     QString src = editor_->toPlainText();
     if (src.trimmed().isEmpty()) {
-        md_preview_->setHtml(QString("<p style='color:%1; font-style:italic;'>Empty markdown cell — click to edit</p>")
-                                 .arg(colors::TEXT_TERTIARY()));
+        md_preview_->setHtml(
+            QString("<p style='color:%1; font-style:italic;'>%2</p>")
+                .arg(colors::TEXT_TERTIARY(), tr("Empty markdown cell — click to edit").toHtmlEscaped()));
         md_preview_->setMinimumHeight(48);
         md_preview_->setMaximumHeight(48);
         return;
@@ -546,27 +613,28 @@ void CellWidget::render_markdown() {
     // Convert basic markdown to HTML for rendering
     // Handles: headers, bold, italic, code blocks, inline code, lists, links, horizontal rules
     QString html;
-    html += QString("<style>"
-                    "body { color:%1; font-family:%2; font-size:%3px; }"
-                    "h1 { color:%4; font-size:20px; font-weight:700; margin:8px 0 4px; border-bottom:1px solid %5; "
-                    "padding-bottom:4px; }"
-                    "h2 { color:%4; font-size:17px; font-weight:700; margin:8px 0 4px; }"
-                    "h3 { color:%4; font-size:15px; font-weight:700; margin:6px 0 3px; }"
-                    "h4 { color:%6; font-size:14px; font-weight:600; margin:4px 0 2px; }"
-                    "code { background:%7; color:%4; padding:2px 4px; font-family:%2; }"
-                    "pre { background:%7; color:%1; padding:8px; font-family:%2; font-size:13px;"
-                    "      border-left:2px solid %5; margin:6px 0; }"
-                    "a { color:%8; }"
-                    "strong { color:%1; font-weight:700; }"
-                    "em { color:%6; font-style:italic; }"
-                    "ul, ol { margin:4px 0; padding-left:20px; }"
-                    "li { margin:2px 0; }"
-                    "hr { border:none; border-top:1px solid %5; margin:8px 0; }"
-                    "blockquote { border-left:3px solid %4; padding-left:10px; color:%6; margin:6px 0; }"
-                    "</style>")
-                .arg(colors::TEXT_PRIMARY(), fonts::DATA_FAMILY)
-                .arg(fonts::DATA)
-                .arg(colors::AMBER(), colors::BORDER_MED(), colors::TEXT_SECONDARY(), colors::BG_RAISED(), colors::CYAN());
+    html +=
+        QString("<style>"
+                "body { color:%1; font-family:%2; font-size:%3px; }"
+                "h1 { color:%4; font-size:20px; font-weight:700; margin:8px 0 4px; border-bottom:1px solid %5; "
+                "padding-bottom:4px; }"
+                "h2 { color:%4; font-size:17px; font-weight:700; margin:8px 0 4px; }"
+                "h3 { color:%4; font-size:15px; font-weight:700; margin:6px 0 3px; }"
+                "h4 { color:%6; font-size:14px; font-weight:600; margin:4px 0 2px; }"
+                "code { background:%7; color:%4; padding:2px 4px; font-family:%2; }"
+                "pre { background:%7; color:%1; padding:8px; font-family:%2; font-size:13px;"
+                "      border-left:2px solid %5; margin:6px 0; }"
+                "a { color:%8; }"
+                "strong { color:%1; font-weight:700; }"
+                "em { color:%6; font-style:italic; }"
+                "ul, ol { margin:4px 0; padding-left:20px; }"
+                "li { margin:2px 0; }"
+                "hr { border:none; border-top:1px solid %5; margin:8px 0; }"
+                "blockquote { border-left:3px solid %4; padding-left:10px; color:%6; margin:6px 0; }"
+                "</style>")
+            .arg(colors::TEXT_PRIMARY(), fonts::DATA_FAMILY)
+            .arg(fonts::DATA)
+            .arg(colors::AMBER(), colors::BORDER_MED(), colors::TEXT_SECONDARY(), colors::BG_RAISED(), colors::CYAN());
 
     bool in_code_block = false;
     QString code_block;
@@ -692,6 +760,25 @@ void CellWidget::leaveEvent(QEvent* /*event*/) {
 void CellWidget::mousePressEvent(QMouseEvent* event) {
     emit cell_clicked(cell_id_);
     QWidget::mousePressEvent(event);
+}
+
+bool CellWidget::eventFilter(QObject* watched, QEvent* event) {
+    // The markdown preview is read-only and consumes its own mouse events, so
+    // without this a rendered markdown cell could only be re-opened from the
+    // navigator. installEventFilter() was already in place but no override
+    // existed, so nothing happened.
+    if (watched == md_preview_ && event->type() == QEvent::MouseButtonPress) {
+        emit cell_clicked(cell_id_); // selecting a markdown cell switches it to edit mode
+        if (!md_editing_) {
+            md_editing_ = true;
+            md_preview_->setVisible(false);
+            editor_->setVisible(true);
+            editor_->setFocus(Qt::MouseFocusReason);
+            adjust_editor_height();
+        }
+        return true;
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -21,22 +21,22 @@ namespace fincept::python {
 struct SetupStatus {
     bool uv_installed = false;
     bool python_installed = false;
-    bool venv_numpy1_created = false;   // venv directory and python exe exist
+    bool venv_numpy1_created = false; // venv directory and python exe exist
     bool venv_numpy2_created = false;
-    bool venv_numpy1_ready = false;     // venv created AND current requirements hash matches marker
+    bool venv_numpy1_ready = false; // venv created AND current requirements hash matches marker
     bool venv_numpy2_ready = false;
     bool needs_setup = true;
-    bool needs_package_sync = false;    // infra OK but ≥1 venv has a stale requirements hash
+    bool needs_package_sync = false; // infra OK but ≥1 venv has a stale requirements hash
     QString python_version;
     QString install_dir;
 };
 
 /// Progress emitted during setup
 struct SetupProgress {
-    QString step;       // "uv", "python", "venv", "packages-numpy1", "packages-numpy2", "complete"
-    int     progress = 0; // 0-100 — default-initialized to prevent garbage reads
+    QString step;     // "uv", "python", "venv", "packages-numpy1", "packages-numpy2", "complete"
+    int progress = 0; // 0-100 — default-initialized to prevent garbage reads
     QString message;
-    bool    is_error = false;
+    bool is_error = false;
 };
 
 class PythonSetupManager : public QObject {
@@ -73,6 +73,14 @@ class PythonSetupManager : public QObject {
     void emit_progress(const QString& step, int pct, const QString& msg, bool err = false);
 
     // Installation steps
+    // Non-empty when the host can never complete setup (currently musl libc only) —
+    // the string is user-facing. Checked before the first download.
+    QString unsupported_platform_reason() const;
+    // Spawns `uv --version`. SetupStatus::uv_installed is a bare file-existence
+    // check so the fast path stays process-spawn-free; call this before *skipping*
+    // the download so a broken leftover binary gets replaced instead of failing
+    // the next step.
+    bool uv_runnable() const;
     bool download_uv();
     bool install_python_via_uv();
     bool create_venv(const QString& venv_name);
@@ -104,12 +112,11 @@ class PythonSetupManager : public QObject {
     // file used for the last successful install; stale or absent → reinstall.
     QString compute_requirements_hash(const QString& filename) const;
     QString read_marker_hash(const QString& venv_name) const;
-    void    write_marker_hash(const QString& venv_name, const QString& req_hash) const;
+    void write_marker_hash(const QString& venv_name, const QString& req_hash) const;
 
     // Slow-path package verification via `uv pip list` — checks every package
     // in requirements_file is actually present in the given venv.
-    bool verify_packages_installed(const QString& venv_name,
-                                   const QString& requirements_file) const;
+    bool verify_packages_installed(const QString& venv_name, const QString& requirements_file) const;
 
     // Pinned to an exact patch so `uv python install <ver>` resolves to the
     // same build on every machine. Must match the version documented in
@@ -118,9 +125,9 @@ class PythonSetupManager : public QObject {
     static constexpr const char* kUvVersion = "0.7.12";
 
     // Session-lifetime caches — requirements files never change at runtime.
-    mutable QString cached_python_path_;                  // cleared after fresh Python install
-    mutable QMap<QString, QString> cached_req_paths_;     // filename → resolved absolute path
-    mutable QMap<QString, QString> cached_req_hashes_;    // filename → SHA-256 hex
+    mutable QString cached_python_path_;               // cleared after fresh Python install
+    mutable QMap<QString, QString> cached_req_paths_;  // filename → resolved absolute path
+    mutable QMap<QString, QString> cached_req_hashes_; // filename → SHA-256 hex
 };
 
 } // namespace fincept::python

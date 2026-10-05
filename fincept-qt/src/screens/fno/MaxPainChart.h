@@ -13,6 +13,7 @@
 #include "services/options/OptionChainTypes.h"
 
 #include <QChartView>
+#include <QEvent>
 
 class QBarCategoryAxis;
 class QBarSeries;
@@ -29,11 +30,16 @@ class MaxPainChart : public QChartView {
     void set_chain(const fincept::services::options::OptionChain& chain);
     void set_strike_window(int n) { strike_window_ = n > 0 ? n : 10; }
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private:
+    void retranslateUi();
+
     QChart* chart_ = nullptr;
     QBarSeries* series_ = nullptr;
-    QBarSet* min_set_ = nullptr;        // single-bar amber marker
-    QBarSet* others_set_ = nullptr;     // dim grey for non-min strikes
+    QBarSet* min_set_ = nullptr;    // single-bar amber marker
+    QBarSet* others_set_ = nullptr; // dim grey for non-min strikes
     QBarCategoryAxis* axis_x_ = nullptr;
     QValueAxis* axis_y_ = nullptr;
     int strike_window_ = 10;

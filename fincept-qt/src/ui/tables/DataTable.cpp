@@ -1,10 +1,18 @@
 #include "ui/tables/DataTable.h"
 
+#include "ui/tables/NumericTableWidgetItem.h"
 #include "ui/theme/Theme.h"
 
 #include <QHeaderView>
 
 namespace fincept::ui {
+
+namespace {
+/// Uniform row height, applied once on the vertical header in the constructor
+/// rather than per row. Kept in sync with the `height: 26px` item rule in the
+/// stylesheet below.
+constexpr int kRowHeightPx = 26;
+} // namespace
 
 DataTable::DataTable(QWidget* parent) : QTableWidget(parent) {
     setAlternatingRowColors(true);
@@ -13,11 +21,18 @@ DataTable::DataTable(QWidget* parent) : QTableWidget(parent) {
     setEditTriggers(QAbstractItemView::NoEditTriggers);
     setShowGrid(false);
     verticalHeader()->setVisible(false);
+    // Row height is uniform, so set it once here rather than calling
+    // setRowHeight() per row (each call triggers a geometry recalculation).
+    // setSectionResizeMode(Fixed) also lets the view skip per-row height
+    // queries entirely when laying out.
+    verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    verticalHeader()->setDefaultSectionSize(kRowHeightPx);
     horizontalHeader()->setStretchLastSection(true);
     horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     // NOTE: sorting is intentionally NOT enabled here.
     // Callers that need sorting (e.g. WatchlistScreen) opt in with
-    // setSortingEnabled(true) after attaching numeric EditRole values.
+    // setSortingEnabled(true) after giving numeric columns a numeric sort key
+    // (set_cell_numeric() / ui::NumericTableWidgetItem).
     // Enabling it globally causes lexicographic sort on tables that only
     // use setText() — e.g. "$10" sorts before "$2", "100K" before "2M".
     setStyleSheet(QString("QTableWidget { background: %1; alternate-background-color: %2; "
@@ -33,12 +48,35 @@ void DataTable::set_headers(const QStringList& headers) {
 }
 
 void DataTable::set_data(const QVector<QStringList>& rows) {
-    setRowCount(0);
-    for (const auto& row : rows) {
-        add_row(row);
+    // Size the model once, then fill. The previous form called add_row() per
+    // row, and add_row() calls insertRow() — an O(n) model mutation that emits
+    // rowsInserted every time, so the attached view ran a layout pass per row
+    // and the whole fill was O(n²) in view work. This is the one shared table
+    // abstraction in the codebase, so the pattern propagated by example.
+    //
+    // Bulk updates are also suppressed and re-enabled around the fill; without
+    // it the viewport repaints on every setItem.
+    const bool had_updates = updatesEnabled();
+    setUpdatesEnabled(false);
+    const bool was_sorting = isSortingEnabled();
+    setSortingEnabled(false); // sorting during a fill reorders rows mid-insert
+
+    setRowCount(rows.size());
+    for (int r = 0; r < rows.size(); ++r) {
+        const QStringList& row = rows[r];
+        for (int c = 0; c < row.size() && c < columnCount(); ++c) {
+            auto* item = new QTableWidgetItem(row[c]);
+            item->setForeground(QColor(colors::WHITE()));
+            setItem(r, c, item);
+        }
     }
+
+    setSortingEnabled(was_sorting);
+    setUpdatesEnabled(had_updates);
 }
 
+/// Appends a single row. Kept incremental for callers that genuinely add one
+/// row at a time; prefer set_data() for a bulk fill — see the note there.
 void DataTable::add_row(const QStringList& row) {
     int r = rowCount();
     insertRow(r);
@@ -47,7 +85,9 @@ void DataTable::add_row(const QStringList& row) {
         item->setForeground(QColor(colors::WHITE()));
         setItem(r, c, item);
     }
-    setRowHeight(r, 26);
+    // Row height is a per-table constant, not a per-row property — it is set
+    // once on the vertical header in the constructor. Calling setRowHeight()
+    // here forced a geometry recalculation for every appended row.
 }
 
 void DataTable::clear_data() {
@@ -68,8 +108,26 @@ void DataTable::set_cell_color(int row, int col, const QString& color) {
 
 void DataTable::set_cell_numeric(int row, int col, double value) {
     auto* it = item(row, col);
-    if (it)
-        it->setData(Qt::EditRole, value);
+    if (!it)
+        return;
+    // A QTableWidgetItem shares Qt::EditRole with Qt::DisplayRole, so the old
+    // `setData(Qt::EditRole, value)` replaced the formatted text ("$1.2M",
+    // "+3.4%") with the bare number. Swap in a NumericTableWidgetItem instead:
+    // it sorts by `value` while the display text stays exactly as it was.
+    if (const auto* existing = dynamic_cast<NumericTableWidgetItem*>(it); existing && existing->numeric_value() == value)
+        return;
+    auto* numeric = new NumericTableWidgetItem(it->text(), value);
+    // Carry over every role + the flags (foreground, alignment, tooltip, font, ...).
+    // Copy-assignment does not touch the numeric key held by the subclass.
+    static_cast<QTableWidgetItem&>(*numeric) = *it;
+
+    // Replacing an item re-inserts it, which would re-sort the table mid-update.
+    const bool was_sorting = isSortingEnabled();
+    if (was_sorting)
+        setSortingEnabled(false);
+    setItem(row, col, numeric); // takes ownership; deletes the old item
+    if (was_sorting)
+        setSortingEnabled(true);
 }
 
 } // namespace fincept::ui

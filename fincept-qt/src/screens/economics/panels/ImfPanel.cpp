@@ -65,12 +65,12 @@ ImfPanel::ImfPanel(QWidget* parent) : EconPanelBase(kImfSourceId, kImfColor, par
     lvl->setContentsMargins(0, 0, 0, 0);
     lvl->setSpacing(0);
 
-    auto* hdr = new QLabel("IMF INDICATOR");
-    hdr->setStyleSheet(section_lbl_style() + section_hdr_style());
-    lvl->addWidget(hdr);
+    indicator_hdr_ = new QLabel(tr("IMF INDICATOR"));
+    indicator_hdr_->setStyleSheet(section_lbl_style() + section_hdr_style());
+    lvl->addWidget(indicator_hdr_);
 
     indicator_search_ = new QLineEdit;
-    indicator_search_->setPlaceholderText("Filter indicators…");
+    indicator_search_->setPlaceholderText(tr("Filter indicators…"));
     indicator_search_->setStyleSheet(search_input_style());
     connect(indicator_search_, &QLineEdit::textChanged, this, &ImfPanel::on_indicator_filter);
     lvl->addWidget(indicator_search_);
@@ -97,20 +97,20 @@ ImfPanel::ImfPanel(QWidget* parent) : EconPanelBase(kImfSourceId, kImfColor, par
 // ── Activate ──────────────────────────────────────────────────────────────────
 
 void ImfPanel::activate() {
-    show_empty("Select an indicator and country, then click FETCH");
+    show_empty(tr("Select an indicator and country, then click FETCH"));
 }
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 
 void ImfPanel::build_controls(QHBoxLayout* thl) {
-    auto* lbl = new QLabel("COUNTRY");
-    lbl->setStyleSheet(ctrl_label_style());
+    country_lbl_ = new QLabel(tr("COUNTRY"));
+    country_lbl_->setStyleSheet(ctrl_label_style());
     country_combo_ = new QComboBox;
     for (const auto& pair : kImfCountries)
         country_combo_->addItem(pair.first, pair.second);
     country_combo_->setFixedHeight(26);
     country_combo_->setMinimumWidth(140);
-    thl->addWidget(lbl);
+    thl->addWidget(country_lbl_);
     thl->addWidget(country_combo_);
 }
 
@@ -119,14 +119,14 @@ void ImfPanel::build_controls(QHBoxLayout* thl) {
 void ImfPanel::on_fetch() {
     auto* ind_item = indicator_list_->currentItem();
     if (!ind_item) {
-        show_empty("Select an indicator");
+        show_empty(tr("Select an indicator"));
         return;
     }
 
     const QString code = ind_item->data(Qt::UserRole).toString();
     const QString country = country_combo_->currentData().toString();
 
-    show_loading("Fetching IMF DataMapper data…");
+    show_loading(tr("Fetching IMF DataMapper data…"));
     services::EconomicsService::instance().execute(kImfSourceId, kImfScript, "data", {code},
                                                    "imf_data_" + code + "_" + country);
 }
@@ -145,17 +145,36 @@ void ImfPanel::on_result(const QString& request_id, const services::EconomicsRes
         // Response: {values: {CODE: {COUNTRY: {YEAR: value}}}}
         const QJsonObject values = result.data["values"].toObject();
         if (values.isEmpty()) {
-            show_error("No data in response");
+            show_error(tr("No data in response"));
             return;
         }
 
-        auto* ind_item = indicator_list_->currentItem();
-        const QString code = ind_item ? ind_item->data(Qt::UserRole).toString() : values.keys().first();
-        const QString country = country_combo_->currentData().toString();
+        // Take the indicator / country from the request id ("imf_data_<code>_<country>"; the code
+        // itself contains underscores, the country never does) rather than from the widgets: the
+        // user may have clicked another indicator while this request was in flight, which used to
+        // look the data up under the wrong code ("No data" / wrong title).
+        const QString tail = request_id.mid(QStringLiteral("imf_data_").size());
+        const int cut = tail.lastIndexOf(QLatin1Char('_'));
+        const QString code = cut > 0 ? tail.left(cut) : values.keys().first();
+        const QString country = cut > 0 ? tail.mid(cut + 1) : QString();
+
+        QString indicator_name = code;
+        for (int i = 0; i < indicator_list_->count(); ++i) {
+            if (indicator_list_->item(i)->data(Qt::UserRole).toString() == code) {
+                indicator_name = indicator_list_->item(i)->text();
+                break;
+            }
+        }
+        const int country_idx = country_combo_->findData(country);
+        const QString country_name = country_idx >= 0 ? country_combo_->itemText(country_idx) : country;
 
         const QJsonArray rows = flatten_pivot(values, code, country);
-        const QString title = (ind_item ? ind_item->text() : code) +
-                              (country.isEmpty() ? " — All Countries" : " — " + country_combo_->currentText());
+        const QString title = indicator_name + (country.isEmpty() ? tr(" — All Countries") : " — " + country_name);
+        // "All Countries" produces a wide cross-section (one row per country,
+        // one column per year). LATEST/CHANGE/MIN/MAX/AVG would then be computed
+        // over an arbitrary single year column across unrelated countries — hide
+        // them rather than show a number nobody can interpret.
+        set_stats_visible(!country.isEmpty());
         display(rows, title);
         LOG_INFO("ImfPanel", QString("Displayed %1 rows").arg(rows.size()));
     }
@@ -193,7 +212,9 @@ QJsonArray ImfPanel::flatten_pivot(const QJsonObject& values, const QString& ind
             rows.append(row);
         }
     } else {
-        // Long format: one row per year for selected country
+        // Long format: one row per year for selected country.
+        // `years` is already sorted ascending, and rows carrying no observation
+        // are dropped entirely (never emitted as 0) so gaps stay gaps.
         const QJsonObject y_map = by_country[country_filter].toObject();
         for (const auto& y : years) {
             const QJsonValue v = y_map[y];
@@ -210,6 +231,24 @@ QJsonArray ImfPanel::flatten_pivot(const QJsonObject& values, const QString& ind
 
 void ImfPanel::on_indicator_filter(const QString& text) {
     filter_list(indicator_list_, text);
+}
+
+// ── i18n ──────────────────────────────────────────────────────────────────────
+
+void ImfPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    EconPanelBase::changeEvent(event);
+}
+
+void ImfPanel::retranslateUi() {
+    if (indicator_hdr_)
+        indicator_hdr_->setText(tr("IMF INDICATOR"));
+    if (indicator_search_)
+        indicator_search_->setPlaceholderText(tr("Filter indicators…"));
+    if (country_lbl_)
+        country_lbl_->setText(tr("COUNTRY"));
+    EconPanelBase::retranslateUi();
 }
 
 } // namespace fincept::screens

@@ -1,17 +1,15 @@
 #include "screens/dashboard/widgets/MarketSentimentWidget.h"
 
+#include "datahub/DataHub.h"
+#include "datahub/DataHubMetaTypes.h"
 #include "ui/theme/Theme.h"
-
-#    include "datahub/DataHub.h"
-#    include "datahub/DataHubMetaTypes.h"
 
 namespace fincept::screens::widgets {
 
 namespace {
-inline const QStringList kSentimentSymbols = {
-    "^VIX", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "NFLX",
-    "AMD",  "INTC", "JPM",  "GS",    "BAC",  "WMT",  "DIS",  "BA",   "XOM",
-    "CVX",  "COIN", "PLTR", "SOFI",  "NKE",  "PFE",  "PYPL"};
+inline const QStringList kSentimentSymbols = {"^VIX", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "NFLX",
+                                              "AMD",  "INTC", "JPM",  "GS",    "BAC",  "WMT",  "DIS",  "BA",   "XOM",
+                                              "CVX",  "COIN", "PLTR", "SOFI",  "NKE",  "PFE",  "PYPL"};
 }
 
 MarketSentimentWidget::MarketSentimentWidget(QWidget* parent) : BaseWidget(tr("MARKET SENTIMENT"), parent) {
@@ -117,7 +115,6 @@ MarketSentimentWidget::MarketSentimentWidget(QWidget* parent) : BaseWidget(tr("M
 
     apply_styles();
     set_loading(true);
-
 }
 
 void MarketSentimentWidget::apply_styles() {
@@ -179,7 +176,6 @@ void MarketSentimentWidget::refresh_data() {
     hub.request(topics, /*force=*/true);
 }
 
-
 void MarketSentimentWidget::hub_subscribe_all() {
     auto& hub = datahub::DataHub::instance();
     set_loading_progress(row_cache_.size(), kSentimentSymbols.size());
@@ -190,7 +186,8 @@ void MarketSentimentWidget::hub_subscribe_all() {
                 return;
             row_cache_.insert(sym, v.value<services::QuoteData>());
             set_loading_progress(row_cache_.size(), kSentimentSymbols.size());
-            rebuild_from_cache();
+            // One redraw per delivery burst, not one per symbol.
+            schedule_render([this]() { rebuild_from_cache(); });
         });
     }
     hub_active_ = true;
@@ -212,7 +209,6 @@ void MarketSentimentWidget::rebuild_from_cache() {
     if (!quotes.isEmpty())
         populate(quotes);
 }
-
 
 void MarketSentimentWidget::populate(const QVector<services::QuoteData>& quotes) {
     int bullish = 0, bearish = 0, neutral = 0;
@@ -293,6 +289,12 @@ void MarketSentimentWidget::populate(const QVector<services::QuoteData>& quotes)
     breadth_label_->setText(QString("%1A / %2D").arg(bullish).arg(bearish));
     breadth_label_->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: bold; background: transparent;")
                                       .arg(bullish > bearish ? ui::colors::POSITIVE() : ui::colors::NEGATIVE()));
+}
+
+void MarketSentimentWidget::retranslateUi() {
+    BaseWidget::retranslateUi();
+    set_title(tr("MARKET SENTIMENT"));
+    rebuild_from_cache(); // re-derives all derived text labels from cached quotes
 }
 
 } // namespace fincept::screens::widgets

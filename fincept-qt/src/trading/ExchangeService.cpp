@@ -38,8 +38,7 @@ ExchangeService::ExchangeService() {
 
     // Re-emit the pool's ready() signal as our own daemon_ready() so existing
     // consumers (e.g. CryptoTradingScreen) need no changes.
-    connect(&ExchangeDaemonPool::instance(), &ExchangeDaemonPool::ready, this,
-            [this]() { emit daemon_ready(); });
+    connect(&ExchangeDaemonPool::instance(), &ExchangeDaemonPool::ready, this, [this]() { emit daemon_ready(); });
 }
 
 ExchangeService::~ExchangeService() {
@@ -144,8 +143,15 @@ void ExchangeService::poll_prices() {
     QPointer<ExchangeService> self = this;
     QPointer<ExchangeSession> session_ptr = sess;
     (void)QtConcurrent::run([self, session_ptr, symbols, watched]() {
-        if (!self || !session_ptr)
+        if (!self)
             return;
+        if (!session_ptr) {
+            // The session was torn down between scheduling and running. Clear the
+            // in-flight latch — returning with it still set would make every later
+            // poll_prices() bail at its first line, silently ending the price feed.
+            self->poll_in_progress_ = false;
+            return;
+        }
         auto tickers = session_ptr->fetch_tickers(symbols);
         if (!self)
             return;
@@ -199,11 +205,22 @@ bool ExchangeService::is_ws_connected() const {
 }
 
 bool ExchangeService::is_ws_active() const {
-    return active_session()->is_ws_active();
+    // "A screen-managed stream is already warm". A stream the DataHub demand path
+    // started (dashboard ticker / trade tiles) is deliberately NOT counted: screens
+    // use this to skip start_ws_stream(), and that stream's primary pair and symbol
+    // list belong to the dashboard, not to the screen — attaching to it would leave
+    // the screen's own order book / trade feed empty. The screen's start_ws_stream()
+    // then takes the stream over (the hub's pairs are folded into its launch list).
+    auto* s = active_session();
+    return s->is_ws_active() && !s->is_ws_hub_owned();
 }
 
 void ExchangeService::set_ws_primary_symbol(const QString& symbol) {
     active_session()->set_ws_primary_symbol(symbol);
+}
+
+void ExchangeService::set_ws_timeframe(const QString& timeframe) {
+    active_session()->set_ws_timeframe(timeframe);
 }
 
 QString ExchangeService::get_ws_primary_symbol() const {
@@ -262,8 +279,9 @@ QJsonObject ExchangeService::fetch_balance() {
     return active_session()->fetch_balance();
 }
 QJsonObject ExchangeService::place_exchange_order(const QString& symbol, const QString& side, const QString& type,
-                                                  double amount, double price) {
-    return active_session()->place_exchange_order(symbol, side, type, amount, price);
+                                                  double amount, double price, double stop_price, double sl, double tp,
+                                                  bool reduce_only) {
+    return active_session()->place_exchange_order(symbol, side, type, amount, price, stop_price, sl, tp, reduce_only);
 }
 QJsonObject ExchangeService::cancel_exchange_order(const QString& order_id, const QString& symbol) {
     return active_session()->cancel_exchange_order(order_id, symbol);

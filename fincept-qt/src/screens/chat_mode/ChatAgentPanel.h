@@ -1,6 +1,7 @@
 #pragma once
 #include "screens/chat_mode/ChatModeTypes.h"
 
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -23,6 +24,9 @@ class ChatAgentPanel : public QWidget {
     void refresh_mcp_servers();
     void refresh_monitors();
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private slots:
     void on_tab_changed(int index);
 
@@ -37,6 +41,7 @@ class ChatAgentPanel : public QWidget {
     void on_toggle_schedule();
 
     // Tasks
+    void on_add_task();
     void on_refresh_tasks();
     void on_cancel_task();
     void on_view_task_detail();
@@ -70,6 +75,7 @@ class ChatAgentPanel : public QWidget {
 
     // Tasks tab
     QListWidget* task_list_ = nullptr;
+    QPushButton* task_add_btn_ = nullptr;
     QPushButton* task_refresh_btn_ = nullptr;
     QPushButton* task_cancel_btn_ = nullptr;
     QPushButton* task_detail_btn_ = nullptr;
@@ -101,8 +107,18 @@ class ChatAgentPanel : public QWidget {
     QWidget* build_tasks_tab();
     QWidget* build_mcp_tab();
     QWidget* build_monitors_tab();
+    void retranslateUi();
 
     static QPushButton* make_btn(const QString& text, const QString& tooltip);
+
+    // Section titles + hints (cached for retranslateUi)
+    QLabel* mem_title_ = nullptr;
+    QLabel* sched_title_ = nullptr;
+    QLabel* sched_hint_ = nullptr;
+    QLabel* tasks_title_ = nullptr;
+    QLabel* mcp_title_ = nullptr;
+    QLabel* mon_title_ = nullptr;
+    QLabel* mon_hint_ = nullptr;
 };
 
 } // namespace fincept::chat_mode

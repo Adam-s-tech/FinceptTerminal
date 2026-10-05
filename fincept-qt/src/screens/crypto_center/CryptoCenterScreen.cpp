@@ -26,8 +26,7 @@ namespace fincept::screens {
 namespace {
 
 QString cc_font_stack() {
-    return QStringLiteral(
-        "'Consolas','Cascadia Mono','JetBrains Mono','SF Mono',monospace");
+    return QStringLiteral("'Consolas','Cascadia Mono','JetBrains Mono','SF Mono',monospace");
 }
 
 } // namespace
@@ -37,10 +36,13 @@ CryptoCenterScreen::CryptoCenterScreen(QWidget* parent) : QWidget(parent) {
     build_ui();
 
     auto& svc = fincept::wallet::WalletService::instance();
-    connect(&svc, &fincept::wallet::WalletService::wallet_connected, this,
-            &CryptoCenterScreen::on_wallet_connected);
+    connect(&svc, &fincept::wallet::WalletService::wallet_connected, this, &CryptoCenterScreen::on_wallet_connected);
     connect(&svc, &fincept::wallet::WalletService::wallet_disconnected, this,
             &CryptoCenterScreen::on_wallet_disconnected);
+    // connect_failed had no listener: a rejected signature, a browser callback
+    // that never arrived or a failed loopback bind all closed the dialog and
+    // left the empty page looking untouched.
+    connect(&svc, &fincept::wallet::WalletService::connect_failed, this, &CryptoCenterScreen::on_connect_failed);
 
     apply_theme();
 
@@ -72,9 +74,9 @@ void CryptoCenterScreen::build_ui() {
     header_brand_->setObjectName(QStringLiteral("cryptoCenterBrand"));
     header_separator_ = new QLabel(QStringLiteral("/"));
     header_separator_->setObjectName(QStringLiteral("cryptoCenterSep"));
-    header_route_ = new QLabel(QStringLiteral("CRYPTO CENTER"));
+    header_route_ = new QLabel(tr("CRYPTO CENTER"));
     header_route_->setObjectName(QStringLiteral("cryptoCenterRoute"));
-    header_status_ = new QLabel(QStringLiteral("● DISCONNECTED"));
+    header_status_ = new QLabel(tr("● DISCONNECTED"));
     header_status_->setObjectName(QStringLiteral("cryptoCenterHeaderStatusOff"));
 
     hl->addWidget(header_brand_);
@@ -116,13 +118,13 @@ void CryptoCenterScreen::build_empty_page() {
     auto* head_l = new QHBoxLayout(head);
     head_l->setContentsMargins(12, 0, 12, 0);
     head_l->setSpacing(0);
-    auto* head_title = new QLabel(QStringLiteral("CONNECT WALLET"), head);
-    head_title->setObjectName(QStringLiteral("cryptoCenterPanelTitle"));
-    head_l->addWidget(head_title);
+    empty_head_title_ = new QLabel(tr("CONNECT WALLET"), head);
+    empty_head_title_->setObjectName(QStringLiteral("cryptoCenterPanelTitle"));
+    head_l->addWidget(empty_head_title_);
     head_l->addStretch();
-    auto* head_status = new QLabel(QStringLiteral("READY"), head);
-    head_status->setObjectName(QStringLiteral("cryptoCenterPanelStatus"));
-    head_l->addWidget(head_status);
+    empty_head_status_ = new QLabel(tr("READY"), head);
+    empty_head_status_->setObjectName(QStringLiteral("cryptoCenterPanelStatus"));
+    head_l->addWidget(empty_head_status_);
     panel_l->addWidget(head);
 
     auto* body = new QWidget(empty_panel_);
@@ -134,28 +136,32 @@ void CryptoCenterScreen::build_empty_page() {
     empty_title_->setObjectName(QStringLiteral("cryptoCenterEmptyTitle"));
     body_l->addWidget(empty_title_);
 
-    empty_lede_ = new QLabel(
-        tr("Connect a Solana wallet to view your $FNCPT balance, SOL holdings, "
-           "and live USD valuation. Your private keys never leave your wallet."),
-        body);
+    empty_lede_ = new QLabel(tr("Connect a Solana wallet to view your $FNCPT balance, SOL holdings, "
+                                "and live USD valuation. Your private keys never leave your wallet."),
+                             body);
     empty_lede_->setObjectName(QStringLiteral("cryptoCenterEmptyLede"));
     empty_lede_->setWordWrap(true);
     body_l->addWidget(empty_lede_);
 
     body_l->addSpacing(4);
 
-    empty_security_label_ = new QLabel(QStringLiteral("SECURITY"), body);
+    empty_security_label_ = new QLabel(tr("SECURITY"), body);
     empty_security_label_->setObjectName(QStringLiteral("cryptoCenterCaptionAccent"));
     body_l->addWidget(empty_security_label_);
 
-    empty_security_text_ = new QLabel(
-        tr("· public address read-only\n"
-           "· no private keys, no seed phrases\n"
-           "· local handshake on 127.0.0.1, single-use token\n"
-           "· cryptographic signature challenge before connect"),
-        body);
+    empty_security_text_ = new QLabel(tr("· public address read-only\n"
+                                         "· no private keys, no seed phrases\n"
+                                         "· local handshake on 127.0.0.1, single-use token\n"
+                                         "· cryptographic signature challenge before connect"),
+                                      body);
     empty_security_text_->setObjectName(QStringLiteral("cryptoCenterSecurityText"));
     body_l->addWidget(empty_security_text_);
+
+    empty_error_ = new QLabel(QString(), body);
+    empty_error_->setObjectName(QStringLiteral("cryptoCenterEmptyError"));
+    empty_error_->setWordWrap(true);
+    empty_error_->hide();
+    body_l->addWidget(empty_error_);
 
     body_l->addSpacing(6);
 
@@ -172,6 +178,7 @@ void CryptoCenterScreen::build_empty_page() {
     layout->addStretch(2);
 
     connect(connect_button_, &QPushButton::clicked, this, [this]() {
+        empty_error_->hide();
         fincept::wallet::WalletService::instance().connect_with_dialog(this);
     });
 
@@ -225,13 +232,22 @@ void CryptoCenterScreen::build_connected_page() {
     // Bridge HomeTab → TradeTab: clicking a row in the holdings table
     // pre-fills SwapPanel's FROM combo and switches the user to TRADE.
     // (Stage 2A.5.10.)
-    connect(home_tab_, &HomeTab::select_token, this,
-            [this](const QString& mint) {
-                if (mint.isEmpty()) return;
-                if (trade_tab_) trade_tab_->set_from_mint(mint);
-                const int trade_idx = tab_widget_->indexOf(trade_tab_);
-                if (trade_idx >= 0) tab_widget_->setCurrentIndex(trade_idx);
-            });
+    connect(home_tab_, &HomeTab::select_token, this, [this](const QString& mint) {
+        if (mint.isEmpty())
+            return;
+        if (trade_tab_)
+            trade_tab_->set_from_mint(mint);
+        const int trade_idx = tab_widget_->indexOf(trade_tab_);
+        if (trade_idx >= 0)
+            tab_widget_->setCurrentIndex(trade_idx);
+    });
+
+    // The holdings bar's RPC chip only re-read its provider on show/connect;
+    // refresh it when the user leaves SETTINGS (where the Helius key is saved).
+    connect(tab_widget_, &QTabWidget::currentChanged, this, [this](int) {
+        if (holdings_bar_)
+            holdings_bar_->refresh_rpc_indicator();
+    });
 
     root->addWidget(tab_widget_, 1);
     stack_->addWidget(connected_page_);
@@ -244,78 +260,88 @@ void CryptoCenterScreen::apply_theme() {
     const QString font = cc_font_stack();
 
     const QString ss = QStringLiteral(
-        // Root
-        "QWidget#cryptoCenterScreen { background:%1; }"
-        "QStackedWidget#cryptoCenterBody { background:%1; }"
-        "QWidget#cryptoCenterConnectedPage { background:%1; }"
+                           // Root
+                           "QWidget#cryptoCenterScreen { background:%1; }"
+                           "QStackedWidget#cryptoCenterBody { background:%1; }"
+                           "QWidget#cryptoCenterConnectedPage { background:%1; }"
 
-        // Header bar
-        "QWidget#cryptoCenterHeader { background:%2; border-bottom:1px solid %3; }"
-        "QLabel#cryptoCenterBrand { color:%4; font-family:%5; font-size:11px;"
-        "  font-weight:700; letter-spacing:1.5px; background:transparent; }"
-        "QLabel#cryptoCenterSep { color:%6; font-family:%5; font-size:11px;"
-        "  background:transparent; }"
-        "QLabel#cryptoCenterRoute { color:%7; font-family:%5; font-size:11px;"
-        "  font-weight:600; letter-spacing:1.2px; background:transparent; }"
-        "QLabel#cryptoCenterHeaderStatusOff { color:%8; font-family:%5; font-size:10px;"
-        "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
-        "QLabel#cryptoCenterHeaderStatusOn { color:%9; font-family:%5; font-size:10px;"
-        "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
+                           // Header bar
+                           "QWidget#cryptoCenterHeader { background:%2; border-bottom:1px solid %3; }"
+                           "QLabel#cryptoCenterBrand { color:%4; font-family:%5; font-size:11px;"
+                           "  font-weight:700; letter-spacing:1.5px; background:transparent; }"
+                           "QLabel#cryptoCenterSep { color:%6; font-family:%5; font-size:11px;"
+                           "  background:transparent; }"
+                           "QLabel#cryptoCenterRoute { color:%7; font-family:%5; font-size:11px;"
+                           "  font-weight:600; letter-spacing:1.2px; background:transparent; }"
+                           "QLabel#cryptoCenterHeaderStatusOff { color:%8; font-family:%5; font-size:10px;"
+                           "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
+                           "QLabel#cryptoCenterHeaderStatusOn { color:%9; font-family:%5; font-size:10px;"
+                           "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
 
-        // Empty-state panel
-        "QFrame#cryptoCenterEmptyPanel { background:%2; border:1px solid %3; }"
-        "QWidget#cryptoCenterPanelHead { background:%10; border-bottom:1px solid %3; }"
-        "QLabel#cryptoCenterPanelTitle { color:%4; font-family:%5; font-size:11px;"
-        "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
-        "QLabel#cryptoCenterPanelStatus { color:%8; font-family:%5; font-size:10px;"
-        "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
-        "QLabel#cryptoCenterEmptyTitle { color:%7; font-family:%5; font-size:14px;"
-        "  font-weight:600; background:transparent; }"
-        "QLabel#cryptoCenterEmptyLede { color:%11; font-family:%5; font-size:12px;"
-        "  background:transparent; }"
-        "QLabel#cryptoCenterCaptionAccent { color:%4; font-family:%5; font-size:10px;"
-        "  font-weight:700; letter-spacing:1.5px; background:transparent; }"
-        "QLabel#cryptoCenterSecurityText { color:%11; font-family:%5; font-size:11px;"
-        "  background:transparent; }"
+                           // Empty-state panel
+                           "QFrame#cryptoCenterEmptyPanel { background:%2; border:1px solid %3; }"
+                           "QWidget#cryptoCenterPanelHead { background:%10; border-bottom:1px solid %3; }"
+                           "QLabel#cryptoCenterPanelTitle { color:%4; font-family:%5; font-size:11px;"
+                           "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
+                           "QLabel#cryptoCenterPanelStatus { color:%8; font-family:%5; font-size:10px;"
+                           "  font-weight:700; letter-spacing:1.2px; background:transparent; }"
+                           "QLabel#cryptoCenterEmptyTitle { color:%7; font-family:%5; font-size:14px;"
+                           "  font-weight:600; background:transparent; }"
+                           "QLabel#cryptoCenterEmptyLede { color:%11; font-family:%5; font-size:12px;"
+                           "  background:transparent; }"
+                           "QLabel#cryptoCenterCaptionAccent { color:%4; font-family:%5; font-size:10px;"
+                           "  font-weight:700; letter-spacing:1.5px; background:transparent; }"
+                           "QLabel#cryptoCenterSecurityText { color:%11; font-family:%5; font-size:11px;"
+                           "  background:transparent; }"
+                           "QLabel#cryptoCenterEmptyError { color:%13; font-family:%5; font-size:11px;"
+                           "  background:transparent; }"
 
-        // Primary connect button
-        "QPushButton#cryptoCenterPrimaryButton { background:rgba(217,119,6,0.10); color:%4;"
-        "  border:1px solid %12; font-family:%5; font-size:12px; font-weight:700;"
-        "  letter-spacing:1.5px; padding:0 16px; }"
-        "QPushButton#cryptoCenterPrimaryButton:hover { background:%4; color:%1; }"
+                           // Primary connect button
+                           "QPushButton#cryptoCenterPrimaryButton { background:rgba(217,119,6,0.10); color:%4;"
+                           "  border:1px solid %12; font-family:%5; font-size:12px; font-weight:700;"
+                           "  letter-spacing:1.5px; padding:0 16px; }"
+                           "QPushButton#cryptoCenterPrimaryButton:hover { background:%4; color:%1; }"
 
-        // Tab bar — Fincept-flat with object-name styling (Phase 1.5 §1.5.3)
-        "QTabWidget#cryptoCenterTabs::pane { background:%1; border:none;"
-        "  border-top:1px solid %3; }"
-        "QTabWidget#cryptoCenterTabs QTabBar::tab { background:%2; color:%8;"
-        "  font-family:%5; font-size:10px; font-weight:700; letter-spacing:1.4px;"
-        "  padding:8px 14px; border-right:1px solid %3; }"
-        "QTabWidget#cryptoCenterTabs QTabBar::tab:hover { background:%10; color:%7; }"
-        "QTabWidget#cryptoCenterTabs QTabBar::tab:selected { background:%1; color:%4;"
-        "  border-bottom:2px solid %4; }"
-        "QTabWidget#cryptoCenterTabs QTabBar { background:%2; border-bottom:1px solid %3; }"
-    )
-        .arg(BG_BASE(),         // %1
-             BG_SURFACE(),      // %2
-             BORDER_DIM(),      // %3
-             AMBER(),           // %4
-             font,              // %5
-             BORDER_BRIGHT(),   // %6
-             TEXT_PRIMARY(),    // %7
-             TEXT_TERTIARY(),   // %8
-             POSITIVE())        // %9
-        .arg(BG_RAISED(),       // %10
-             TEXT_SECONDARY(),  // %11
-             QStringLiteral("#78350f")); // %12 darker amber
+                           // Tab bar — Fincept-flat with object-name styling (Phase 1.5 §1.5.3)
+                           "QTabWidget#cryptoCenterTabs::pane { background:%1; border:none;"
+                           "  border-top:1px solid %3; }"
+                           "QTabWidget#cryptoCenterTabs QTabBar::tab { background:%2; color:%8;"
+                           "  font-family:%5; font-size:10px; font-weight:700; letter-spacing:1.4px;"
+                           "  padding:8px 14px; border-right:1px solid %3; }"
+                           "QTabWidget#cryptoCenterTabs QTabBar::tab:hover { background:%10; color:%7; }"
+                           "QTabWidget#cryptoCenterTabs QTabBar::tab:selected { background:%1; color:%4;"
+                           "  border-bottom:2px solid %4; }"
+                           "QTabWidget#cryptoCenterTabs QTabBar { background:%2; border-bottom:1px solid %3; }")
+                           .arg(BG_BASE(),                  // %1
+                                BG_SURFACE(),               // %2
+                                BORDER_DIM(),               // %3
+                                AMBER(),                    // %4
+                                font,                       // %5
+                                BORDER_BRIGHT(),            // %6
+                                TEXT_PRIMARY(),             // %7
+                                TEXT_TERTIARY(),            // %8
+                                POSITIVE())                 // %9
+                           .arg(BG_RAISED(),                // %10
+                                TEXT_SECONDARY(),           // %11
+                                QStringLiteral("#78350f"),  // %12 darker amber
+                                NEGATIVE());                // %13
 
     setStyleSheet(ss);
 }
 
 // ── State handlers ─────────────────────────────────────────────────────────
 
-void CryptoCenterScreen::on_wallet_connected(const QString& /*pubkey*/,
-                                             const QString& /*label*/) {
-    header_status_->setText(QStringLiteral("● CONNECTED"));
+void CryptoCenterScreen::on_connect_failed(const QString& reason) {
+    if (!empty_error_)
+        return;
+    empty_error_->setText(tr("Connection not completed: %1").arg(reason));
+    empty_error_->show();
+}
+
+void CryptoCenterScreen::on_wallet_connected(const QString& /*pubkey*/, const QString& /*label*/) {
+    if (empty_error_)
+        empty_error_->hide();
+    header_status_->setText(tr("● CONNECTED"));
     header_status_->setObjectName(QStringLiteral("cryptoCenterHeaderStatusOn"));
     header_status_->style()->unpolish(header_status_);
     header_status_->style()->polish(header_status_);
@@ -323,11 +349,68 @@ void CryptoCenterScreen::on_wallet_connected(const QString& /*pubkey*/,
 }
 
 void CryptoCenterScreen::on_wallet_disconnected() {
-    header_status_->setText(QStringLiteral("● DISCONNECTED"));
+    header_status_->setText(tr("● DISCONNECTED"));
     header_status_->setObjectName(QStringLiteral("cryptoCenterHeaderStatusOff"));
     header_status_->style()->unpolish(header_status_);
     header_status_->style()->polish(header_status_);
     stack_->setCurrentWidget(empty_page_);
+}
+
+// ── i18n ───────────────────────────────────────────────────────────────────
+
+void CryptoCenterScreen::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void CryptoCenterScreen::retranslateUi() {
+    // Header (brand + separator are not translatable).
+    if (header_route_)
+        header_route_->setText(tr("CRYPTO CENTER"));
+    if (header_status_) {
+        const bool connected = fincept::wallet::WalletService::instance().is_connected();
+        header_status_->setText(connected ? tr("● CONNECTED") : tr("● DISCONNECTED"));
+    }
+
+    // Empty-state panel.
+    if (empty_head_title_)
+        empty_head_title_->setText(tr("CONNECT WALLET"));
+    if (empty_head_status_)
+        empty_head_status_->setText(tr("READY"));
+    if (empty_title_)
+        empty_title_->setText(tr("No wallet connected"));
+    if (empty_lede_)
+        empty_lede_->setText(tr("Connect a Solana wallet to view your $FNCPT balance, SOL holdings, "
+                                "and live USD valuation. Your private keys never leave your wallet."));
+    if (empty_security_label_)
+        empty_security_label_->setText(tr("SECURITY"));
+    if (empty_security_text_)
+        empty_security_text_->setText(tr("· public address read-only\n"
+                                         "· no private keys, no seed phrases\n"
+                                         "· local handshake on 127.0.0.1, single-use token\n"
+                                         "· cryptographic signature challenge before connect"));
+    if (connect_button_)
+        connect_button_->setText(tr("CONNECT WALLET"));
+
+    // Tab labels — re-apply by index so the live tab bar reflects the new
+    // language. Order matches build_connected_page().
+    if (tab_widget_) {
+        if (home_tab_)
+            tab_widget_->setTabText(tab_widget_->indexOf(home_tab_), tr("HOME"));
+        if (trade_tab_)
+            tab_widget_->setTabText(tab_widget_->indexOf(trade_tab_), tr("TRADE"));
+        if (activity_tab_)
+            tab_widget_->setTabText(tab_widget_->indexOf(activity_tab_), tr("ACTIVITY"));
+        if (settings_tab_)
+            tab_widget_->setTabText(tab_widget_->indexOf(settings_tab_), tr("SETTINGS"));
+        if (stake_tab_)
+            tab_widget_->setTabText(tab_widget_->indexOf(stake_tab_), tr("STAKE"));
+        if (markets_tab_)
+            tab_widget_->setTabText(tab_widget_->indexOf(markets_tab_), tr("MARKETS"));
+        if (roadmap_tab_)
+            tab_widget_->setTabText(tab_widget_->indexOf(roadmap_tab_), tr("ROADMAP"));
+    }
 }
 
 } // namespace fincept::screens

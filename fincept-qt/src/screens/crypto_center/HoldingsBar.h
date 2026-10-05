@@ -2,6 +2,7 @@
 
 #include "services/wallet/WalletTypes.h"
 
+#include <QEvent>
 #include <QHash>
 #include <QString>
 #include <QVariant>
@@ -31,15 +32,23 @@ class HoldingsBar : public QWidget {
     explicit HoldingsBar(QWidget* parent = nullptr);
     ~HoldingsBar() override;
 
+    /// Re-read which RPC provider is configured and update the chip. The bar
+    /// stays visible across every tab, so a Helius key saved on SETTINGS never
+    /// triggered showEvent and the chip kept saying PUBLIC; CryptoCenterScreen
+    /// calls this whenever the user switches tabs.
+    void refresh_rpc_indicator() { update_rpc_indicator(); }
+
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     enum class FeedStatus { Idle, Connecting, Live, Stale, Error };
 
     void build_ui();
     void apply_theme();
+    void retranslateUi();
 
     void on_wallet_connected(const QString& pubkey, const QString& label);
     void on_wallet_disconnected();
@@ -58,20 +67,27 @@ class HoldingsBar : public QWidget {
 
     QLabel* sol_value_ = nullptr;
     QLabel* fncpt_value_ = nullptr;
-    QLabel* total_value_ = nullptr;     ///< sum of all priced holdings
+    QLabel* total_value_ = nullptr;       ///< sum of all priced holdings
     QLabel* fncpt_price_value_ = nullptr; ///< $FNCPT spot for legacy display
     QLabel* updated_value_ = nullptr;
     QLabel* feed_status_ = nullptr;
     QLabel* rpc_indicator_ = nullptr;
-    QLabel* discount_chip_ = nullptr;  // hidden until Stage 2C wires it
+    QLabel* discount_chip_ = nullptr; // hidden until Stage 2C wires it
+
+    // Metric caption labels (fixed UI text — cached for retranslateUi)
+    QLabel* sol_caption_ = nullptr;
+    QLabel* fncpt_caption_ = nullptr;
+    QLabel* total_caption_ = nullptr;
+    QLabel* fncpt_price_caption_ = nullptr;
+    QLabel* updated_caption_ = nullptr;
 
     QTimer* staleness_timer_ = nullptr;
 
     QString current_pubkey_;
     QString current_balance_topic_;
     fincept::wallet::WalletBalance latest_balance_;
-    QHash<QString, double> price_usd_;     ///< mint → USD price
-    QHash<QString, QString> price_topic_;  ///< mint → topic for unsubscribe
+    QHash<QString, double> price_usd_;    ///< mint → USD price
+    QHash<QString, QString> price_topic_; ///< mint → topic for unsubscribe
     qint64 last_balance_ts_ = 0;
     FeedStatus feed_status_state_ = FeedStatus::Idle;
     bool first_publish_received_ = false;

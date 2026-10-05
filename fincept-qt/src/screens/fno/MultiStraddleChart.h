@@ -13,6 +13,7 @@
 // first series and shows the full y-stack ({label: value}) in a tooltip.
 
 #include <QChartView>
+#include <QEvent>
 #include <QGraphicsLineItem>
 #include <QLabel>
 #include <QPointer>
@@ -29,7 +30,7 @@ class MultiStraddleChart : public QChartView {
     Q_OBJECT
   public:
     struct Sample {
-        qint64 ts_secs = 0;   // floored to minute, unix epoch seconds
+        qint64 ts_secs = 0; // floored to minute, unix epoch seconds
         double premium = 0;
     };
     struct Selection {
@@ -46,13 +47,15 @@ class MultiStraddleChart : public QChartView {
   protected:
     void mouseMoveEvent(QMouseEvent* e) override;
     void leaveEvent(QEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private:
+    void retranslateUi();
     void update_crosshair(const QPoint& widget_pos);
     void hide_crosshair();
 
     QChart* chart_ = nullptr;
-    QVector<QLineSeries*> series_;          // owned by the chart
+    QVector<QLineSeries*> series_; // owned by the chart
     QDateTimeAxis* axis_x_ = nullptr;
     QValueAxis* axis_y_ = nullptr;
     QGraphicsLineItem* hover_line_ = nullptr;

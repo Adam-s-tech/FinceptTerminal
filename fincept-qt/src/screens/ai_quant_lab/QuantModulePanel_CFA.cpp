@@ -3,24 +3,23 @@
 // CFA Quant panel — 8 analysis types. This file owns the panel layout
 // (build_cfa_quant_panel); the per-command result rendering lives in
 // QuantModulePanel_CFA_Display.cpp.
+#include "core/logging/Logger.h"
 #include "screens/ai_quant_lab/QuantModulePanel.h"
 #include "screens/ai_quant_lab/QuantModulePanel_Common.h"
 #include "screens/ai_quant_lab/QuantModulePanel_GsHelpers.h"
 #include "screens/ai_quant_lab/QuantModulePanel_Styles.h"
-
-#include "core/logging/Logger.h"
 #include "services/ai_quant_lab/AIQuantLabService.h"
 #include "services/file_manager/FileManagerService.h"
 #include "ui/theme/Theme.h"
 
 #include <QAbstractItemView>
+#include <QColor>
 #include <QComboBox>
 #include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
-#include <QColor>
-#include <QHash>
 #include <QHBoxLayout>
+#include <QHash>
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -96,10 +95,10 @@ QWidget* QuantModulePanel::build_cfa_quant_panel() {
     // ── Analysis selector ───────────────────────────────────────────────────
     auto* analysis_type = new QComboBox(w);
     const QStringList analyses = {
-        "trend_analysis", "stationarity_test", "arima_model", "forecasting",
-        "supervised_learning", "unsupervised_learning", "model_evaluation",
-        "resampling_methods", "sampling_techniques", "central_limit_theorem",
-        "sampling_error_analysis", "validate_data",
+        "trend_analysis",        "stationarity_test",       "arima_model",
+        "forecasting",           "supervised_learning",     "unsupervised_learning",
+        "model_evaluation",      "resampling_methods",      "sampling_techniques",
+        "central_limit_theorem", "sampling_error_analysis", "validate_data",
     };
     analysis_type->addItems(analyses);
     analysis_type->setStyleSheet(combo_ss());
@@ -345,13 +344,11 @@ QWidget* QuantModulePanel::build_cfa_quant_panel() {
     vl->addWidget(stack);
 
     // Switch stack page when analysis combo changes
-    connect(analysis_type, qOverload<int>(&QComboBox::currentIndexChanged), stack,
-            &QStackedWidget::setCurrentIndex);
+    connect(analysis_type, qOverload<int>(&QComboBox::currentIndexChanged), stack, &QStackedWidget::setCurrentIndex);
 
     // ── Run button ──────────────────────────────────────────────────────────
     auto* run = make_run_button(tr("RUN ANALYSIS"), w);
     connect(run, &QPushButton::clicked, this, [this]() {
-        status_label_->setText(tr("Running..."));
         const QString cmd = combo_inputs_["cfa_analysis"]->currentText();
         const QString raw = text_inputs_["cfa_symbol"]->text().trimmed();
 
@@ -361,11 +358,10 @@ QWidget* QuantModulePanel::build_cfa_quant_panel() {
 
         // Sample-error analysis is the only command that doesn't read from "data".
         // Everything else reads from "data" (or "population" for sampling_techniques).
-        const bool needs_data = (cmd != "sampling_error_analysis" &&
-                                 cmd != "central_limit_theorem");
+        const bool needs_data = (cmd != "sampling_error_analysis" && cmd != "central_limit_theorem");
         if (needs_data && raw.isEmpty()) {
+            // display_error() already sets the status label to "Error".
             display_error(tr("Please enter a ticker symbol or comma-separated values"));
-            status_label_->setText(tr("Error"));
             return;
         }
         if (cmd == "sampling_techniques")
@@ -384,7 +380,8 @@ QWidget* QuantModulePanel::build_cfa_quant_panel() {
             for (const auto& part : s.split(',', Qt::SkipEmptyParts)) {
                 bool ok = false;
                 int v = part.trimmed().toInt(&ok);
-                if (ok) arr.append(v);
+                if (ok)
+                    arr.append(v);
             }
             return arr;
         };
@@ -435,6 +432,9 @@ QWidget* QuantModulePanel::build_cfa_quant_panel() {
             params["data_name"] = text_inputs_["cfa_validate_name"]->text();
         }
 
+        QString label = cmd;
+        label.replace('_', ' ');
+        show_loading(needs_data ? tr("Running %1 on %2...").arg(label, raw) : tr("Running %1...").arg(label));
         AIQuantLabService::instance().run_module("cfa_quant", cmd, params);
     });
     vl->addWidget(run);
@@ -462,6 +462,5 @@ QWidget* QuantModulePanel::build_cfa_quant_panel() {
 // Each command has its own card layout — same visual language as Quant
 // Reporting (gs_make_card / gs_card_row / gs_section_header). The flattened
 // 2-col fallback only runs when the shape doesn't match a known command.
-
 
 } // namespace fincept::screens

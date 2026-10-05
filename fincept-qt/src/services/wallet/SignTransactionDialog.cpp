@@ -15,12 +15,10 @@
 
 namespace fincept::wallet {
 
-SignTransactionDialog::SignTransactionDialog(const QString& tx_base64,
-                                             const QString& title,
-                                             const QString& lede,
+SignTransactionDialog::SignTransactionDialog(const QString& tx_base64, const QString& title, const QString& lede,
                                              QWidget* parent)
-    : QDialog(parent), tx_base64_(tx_base64), lede_(lede) {
-    setWindowTitle(title.isEmpty() ? tr("Sign transaction") : title);
+    : QDialog(parent), tx_base64_(tx_base64), title_(title), lede_(lede) {
+    setWindowTitle(title_.isEmpty() ? tr("Sign transaction") : title_);
     setModal(true);
     resize(440, 220);
 
@@ -28,17 +26,14 @@ SignTransactionDialog::SignTransactionDialog(const QString& tx_base64,
     layout->setContentsMargins(24, 20, 24, 20);
     layout->setSpacing(12);
 
-    auto* heading = new QLabel(title.isEmpty() ? tr("Sign transaction") : title, this);
-    heading->setObjectName(QStringLiteral("walletDialogTitle"));
-    layout->addWidget(heading);
+    heading_label_ = new QLabel(title_.isEmpty() ? tr("Sign transaction") : title_, this);
+    heading_label_->setObjectName(QStringLiteral("walletDialogTitle"));
+    layout->addWidget(heading_label_);
 
-    auto* lede_label = new QLabel(
-        lede_.isEmpty()
-            ? tr("Approve the transaction in your wallet to complete this action.")
-            : lede_,
-        this);
-    lede_label->setWordWrap(true);
-    layout->addWidget(lede_label);
+    lede_label_ = new QLabel(
+        lede_.isEmpty() ? tr("Approve the transaction in your wallet to complete this action.") : lede_, this);
+    lede_label_->setWordWrap(true);
+    layout->addWidget(lede_label_);
 
     status_label_ = new QLabel(this);
     status_label_->setObjectName(QStringLiteral("walletDialogStatus"));
@@ -59,7 +54,8 @@ SignTransactionDialog::SignTransactionDialog(const QString& tx_base64,
     layout->addLayout(row);
 
     connect(cancel_button_, &QPushButton::clicked, this, [this]() {
-        if (resolved_) return;
+        if (resolved_)
+            return;
         on_signature_resolved(Result<QString>::err("user_cancelled"));
     });
     connect(reopen_button_, &QPushButton::clicked, this, [this]() {
@@ -70,6 +66,29 @@ SignTransactionDialog::SignTransactionDialog(const QString& tx_base64,
 }
 
 SignTransactionDialog::~SignTransactionDialog() = default;
+
+void SignTransactionDialog::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QDialog::changeEvent(event);
+}
+
+void SignTransactionDialog::retranslateUi() {
+    // title_ / lede_ are caller-supplied (already localised at the call site);
+    // only the empty-state fallbacks are translated here.
+    setWindowTitle(title_.isEmpty() ? tr("Sign transaction") : title_);
+    if (heading_label_)
+        heading_label_->setText(title_.isEmpty() ? tr("Sign transaction") : title_);
+    if (lede_label_)
+        lede_label_->setText(lede_.isEmpty() ? tr("Approve the transaction in your wallet to complete this action.")
+                                             : lede_);
+    // status_label_ is stateful (relay progress text set live in start_signing)
+    // — do not clobber it here.
+    if (reopen_button_)
+        reopen_button_->setText(tr("Reopen browser"));
+    if (cancel_button_)
+        cancel_button_->setText(tr("Cancel"));
+}
 
 void SignTransactionDialog::showEvent(QShowEvent* e) {
     QDialog::showEvent(e);
@@ -94,26 +113,26 @@ void SignTransactionDialog::start_signing() {
     auto url_res = bridge_->request_signature(
         tx_base64_,
         [self](Result<QString> r) {
-            if (!self) return;
+            if (!self)
+                return;
             self->on_signature_resolved(std::move(r));
         },
         /*timeout_seconds=*/180); // give the user 3 min to approve
 
     if (url_res.is_err()) {
-        on_signature_resolved(
-            Result<QString>::err("bridge_failed: " + url_res.error()));
+        on_signature_resolved(Result<QString>::err("bridge_failed: " + url_res.error()));
         return;
     }
     last_open_url_ = url_res.value();
     QDesktopServices::openUrl(QUrl(last_open_url_));
-    status_label_->setText(
-        tr("Browser opened. Approve the transaction in your wallet. The terminal "
-           "is waiting on a single-use loopback bridge — this dialog will close "
-           "automatically when the wallet returns the signature."));
+    status_label_->setText(tr("Browser opened. Approve the transaction in your wallet. The terminal "
+                              "is waiting on a single-use loopback bridge — this dialog will close "
+                              "automatically when the wallet returns the signature."));
 }
 
 void SignTransactionDialog::on_signature_resolved(Result<QString> r) {
-    if (resolved_) return;
+    if (resolved_)
+        return;
     resolved_ = true;
 
     if (r.is_ok()) {

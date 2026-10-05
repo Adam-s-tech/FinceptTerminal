@@ -6,6 +6,8 @@
 #include "screens/economics/panels/EconPanelBase.h"
 
 #include <QComboBox>
+#include <QLineEdit>
+#include <QSpinBox>
 
 namespace fincept::screens {
 
@@ -19,12 +21,26 @@ class GlobalCentralBanksPanel : public EconPanelBase {
     void build_controls(QHBoxLayout* thl) override;
     void on_fetch() override;
     void on_result(const QString& request_id, const services::EconomicsResult& result) override;
+    void changeEvent(QEvent* event) override;
 
   private:
+    void retranslateUi() override;
+
     QComboBox* bank_combo_ = nullptr;
     QComboBox* series_combo_ = nullptr;
+    // Extra inputs for series that need them (a currency, a look-back window). Enabled only when
+    // the selected series takes that argument.
+    QLineEdit* ccy_edit_ = nullptr;
+    QSpinBox* days_spin_ = nullptr;
+
+    // Cached for retranslateUi
+    QLabel* bank_lbl_ = nullptr;
+    QLabel* series_lbl_ = nullptr;
+    QLabel* ccy_lbl_ = nullptr;
+    QLabel* days_lbl_ = nullptr;
 
     void update_series_for_bank(int bank_idx);
+    void update_arg_controls();
 };
 
 } // namespace fincept::screens

@@ -7,8 +7,6 @@
 #include <QStackedWidget>
 #include <QWidget>
 
-#include <functional>
-
 namespace fincept::screens {
 
 /// Container for full-screen detail views with a 36px header bar (back button + title).
@@ -22,13 +20,18 @@ class PortfolioDetailWrapper : public QWidget {
     void update_data(const portfolio::PortfolioSummary& summary, const QString& currency);
     void update_snapshots(const QVector<portfolio::PortfolioSnapshot>& snapshots);
     void update_metrics(const portfolio::ComputedMetrics& metrics);
+    void update_correlation(const QHash<QString, double>& matrix);
+    /// Pre-select the Optimization view's "Target Return" method at
+    /// @p annual_return (a fraction, e.g. 0.08). Creates the view if needed.
+    void set_optimization_target(double annual_return);
 
   protected:
     void changeEvent(QEvent* event) override;
 
   signals:
     void back_requested();
-    void sector_selected(QString sector); // forwarded from AnalyticsSectorsView
+    void sector_selected(QString sector);          // forwarded from AnalyticsSectorsView
+    void optimize_requested(double target_return); // PlanningView → open Optimization tab
 
   private:
     void build_ui();
@@ -50,6 +53,7 @@ class PortfolioDetailWrapper : public QWidget {
     portfolio::ComputedMetrics current_metrics_;
     QString current_currency_;
     QVector<portfolio::PortfolioSnapshot> current_snapshots_;
+    QHash<QString, double> current_correlation_; // keyed "SYM_A|SYM_B"
 };
 
 } // namespace fincept::screens

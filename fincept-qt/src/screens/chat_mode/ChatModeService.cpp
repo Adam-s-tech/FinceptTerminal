@@ -1,6 +1,7 @@
 #include "screens/chat_mode/ChatModeService.h"
 
 #include "auth/AuthManager.h"
+#include "core/config/AppConfig.h"
 #include "core/logging/Logger.h"
 
 #include <QDateTime>
@@ -12,8 +13,6 @@
 #include <QUrlQuery>
 
 namespace fincept::chat_mode {
-
-static constexpr const char* API_BASE = "https://api.fincept.in";
 
 // ── Singleton ─────────────────────────────────────────────────────────────────
 
@@ -30,7 +29,7 @@ ChatModeService::ChatModeService(QObject* parent) : QObject(parent) {
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 
 QString ChatModeService::base_url() const {
-    return QString::fromLatin1(API_BASE);
+    return fincept::AppConfig::instance().api_base_url();
 }
 
 QString ChatModeService::api_key() const {
@@ -81,7 +80,7 @@ void ChatModeService::handle_reply(QNetworkReply* reply,
         if (status == 402) {
             LOG_WARN("ChatModeService", "Insufficient credits (402)");
             emit insufficient_credits();
-            cb(false, {}, "Insufficient credits");
+            cb(false, {}, tr("Insufficient credits"));
             return;
         }
 
@@ -91,10 +90,20 @@ void ChatModeService::handle_reply(QNetworkReply* reply,
             return;
         }
 
+        // The only thing that aborts one of these replies is the 15 s watchdog above.
+        // It used to fall through to the JSON parser and surface as the baffling
+        // "JSON parse error on /chat/…: unterminated object" for what is a timeout.
+        if (net_err == QNetworkReply::OperationCanceledError) {
+            const QString err = tr("Request timed out");
+            LOG_WARN("ChatModeService", QString("%1: %2").arg(url_path, err));
+            cb(false, {}, err);
+            return;
+        }
+
         QJsonParseError pe;
         QJsonDocument doc = QJsonDocument::fromJson(data, &pe);
 
-        if (net_err != QNetworkReply::NoError && net_err != QNetworkReply::OperationCanceledError) {
+        if (net_err != QNetworkReply::NoError) {
             const QString err =
                 QString("HTTP %1 %2: %3")
                     .arg(status)
@@ -296,6 +305,11 @@ void ChatModeService::search_messages(const QString& query, SearchCallback cb) {
             m.role = o["role"].toString();
             m.content = o["content"].toString();
             m.created_at = o["created_at"].toString();
+            // Which conversation the hit belongs to — the sidebar needs it to mark the
+            // matching sessions (accept either spelling the backend uses elsewhere).
+            m.session_uuid = o["session_uuid"].toString();
+            if (m.session_uuid.isEmpty())
+                m.session_uuid = o["session_id"].toString();
             results.append(m);
         }
         cb(true, results, {});
@@ -357,14 +371,14 @@ void ChatModeService::optimize_prompt(const QString& prompt, const QString& mode
         reply->deleteLater();
 
         if (net_err != QNetworkReply::NoError && net_err != QNetworkReply::OperationCanceledError) {
-            cb(false, {}, "Optimize prompt request failed");
+            cb(false, {}, tr("Optimize prompt request failed"));
             return;
         }
 
         QJsonParseError pe;
         QJsonDocument doc = QJsonDocument::fromJson(data, &pe);
         if (pe.error != QJsonParseError::NoError) {
-            cb(false, {}, "JSON parse error");
+            cb(false, {}, tr("JSON parse error"));
             return;
         }
 
@@ -435,19 +449,19 @@ void ChatModeService::agent_chat(const QString& query, const QString& session_id
 
         if (status == 402) {
             emit insufficient_credits();
-            cb(false, {}, "Insufficient credits");
+            cb(false, {}, tr("Insufficient credits"));
             return;
         }
 
         if (net_err != QNetworkReply::NoError && net_err != QNetworkReply::OperationCanceledError) {
-            cb(false, {}, "Agent chat request failed");
+            cb(false, {}, tr("Agent chat request failed"));
             return;
         }
 
         QJsonParseError pe;
         QJsonDocument doc = QJsonDocument::fromJson(data, &pe);
         if (pe.error != QJsonParseError::NoError) {
-            cb(false, {}, "JSON parse error");
+            cb(false, {}, tr("JSON parse error"));
             return;
         }
 
@@ -487,7 +501,10 @@ void ChatModeService::save_memory(const QString& key, const QString& value, cons
 }
 
 void ChatModeService::delete_memory(const QString& key, VoidCallback cb) {
-    del("/chat/agent/memory/" + key, [cb = std::move(cb)](bool ok, QJsonDocument, QString err) { cb(ok, err); });
+    // Memory keys are free text typed by the user ("risk / appetite", "what?"): spliced raw
+    // into the path, a '/', '?' or '#' addressed the wrong resource or was cut off.
+    del("/chat/agent/memory/" + QString::fromUtf8(QUrl::toPercentEncoding(key)),
+        [cb = std::move(cb)](bool ok, QJsonDocument, QString err) { cb(ok, err); });
 }
 
 void ChatModeService::clear_all_memory(VoidCallback cb) {
@@ -662,11 +679,14 @@ QNetworkReply* ChatModeService::stream_task_activity(const QString& task_id, int
 }
 
 void ChatModeService::abort_task_activity_stream() {
-    if (task_sse_reply_) {
-        task_sse_reply_->abort();
-        task_sse_reply_->deleteLater();
-        task_sse_reply_ = nullptr;
-    }
+    // Same synchronous-finished() hazard as abort_stream() — detach before abort.
+    QNetworkReply* reply = task_sse_reply_;
+    if (!reply)
+        return;
+    task_sse_reply_ = nullptr;
+    disconnect(reply, nullptr, this, nullptr);
+    reply->abort();
+    reply->deleteLater();
 }
 
 void ChatModeService::handle_task_sse_line(const QByteArray& line) {
@@ -784,7 +804,8 @@ void ChatModeService::add_mcp_server(const QString& name, const QJsonObject& con
 }
 
 void ChatModeService::delete_mcp_server(const QString& server_name, VoidCallback cb) {
-    del("/chat/agent/mcp/servers/" + server_name,
+    // Server names are user-chosen free text — encode, same as delete_memory().
+    del("/chat/agent/mcp/servers/" + QString::fromUtf8(QUrl::toPercentEncoding(server_name)),
         [cb = std::move(cb)](bool ok, QJsonDocument, QString err) { cb(ok, err); });
 }
 
@@ -887,6 +908,7 @@ QNetworkReply* ChatModeService::stream_message(const QString& message, const QSt
 
     sse_reply_ = sse_nam_->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     sse_current_event_.clear();
+    sse_terminal_emitted_ = false; // fresh stream — no terminal signal yet
 
     connect(sse_reply_, &QNetworkReply::readyRead, this, [this]() {
         while (sse_reply_ && sse_reply_->canReadLine()) {
@@ -904,22 +926,64 @@ QNetworkReply* ChatModeService::stream_message(const QString& message, const QSt
         if (status == 402)
             emit insufficient_credits();
         if (net_err != QNetworkReply::NoError && net_err != QNetworkReply::OperationCanceledError) {
-            const QString body = QString::fromUtf8(sse_reply_->readAll().left(200));
-            LOG_WARN("ChatModeService", QString("SSE error body: %1").arg(body));
-            emit stream_error(QString("Stream failed (HTTP %1)").arg(status));
+            const QByteArray raw_body = sse_reply_->readAll();
+            LOG_WARN("ChatModeService", QString("SSE error body: %1").arg(QString::fromUtf8(raw_body.left(200))));
+            // The backend explains 4xx/5xx in a JSON body ({"message": …} or FastAPI's
+            // {"detail": …}); show that instead of a bare status code.
+            QString reason;
+            const QJsonDocument err_doc = QJsonDocument::fromJson(raw_body);
+            if (err_doc.isObject()) {
+                const QJsonObject eo = err_doc.object();
+                for (const char* key : {"message", "detail", "error"}) {
+                    if (eo.value(QLatin1String(key)).isString()) {
+                        reason = eo.value(QLatin1String(key)).toString().trimmed();
+                        if (!reason.isEmpty())
+                            break;
+                    }
+                }
+            }
+            sse_terminal_emitted_ = true;
+            // 402 already went out as insufficient_credits() above, and the panel turns that
+            // into the terminal error bubble — a second stream_error would stack another one.
+            if (status != 402)
+                emit stream_error(reason.isEmpty()
+                                      ? QString("Stream failed (HTTP %1)").arg(status)
+                                      : QString("Stream failed (HTTP %1): %2").arg(status).arg(reason.left(300)));
         }
         sse_reply_->deleteLater();
         sse_reply_ = nullptr;
+        // A clean close (or a cancel) that never sent a "finish"/"error" event
+        // still needs a terminal signal, otherwise the chat panel leaves its
+        // input disabled forever.
+        if (!sse_terminal_emitted_) {
+            sse_terminal_emitted_ = true;
+            emit stream_finish(0);
+        }
     });
 
     return sse_reply_;
 }
 
 void ChatModeService::abort_stream() {
-    if (sse_reply_) {
-        sse_reply_->abort();
-        sse_reply_->deleteLater();
-        sse_reply_ = nullptr;
+    // QNetworkReply::abort() emits finished() SYNCHRONOUSLY, and the finished
+    // handler below nulls sse_reply_ — so the old
+    //     sse_reply_->abort(); sse_reply_->deleteLater();
+    // sequence dereferenced a null member on the second line. Detach the reply
+    // first, drop our connections, then abort + delete it.
+    QNetworkReply* reply = sse_reply_;
+    if (!reply)
+        return; // nothing in flight — do NOT synthesise a terminal signal
+    sse_reply_ = nullptr;
+    disconnect(reply, nullptr, this, nullptr);
+    reply->abort();
+    reply->deleteLater();
+
+    // A user-initiated Stop otherwise emits no terminal signal (the finished
+    // handler skips OperationCanceledError), so the chat panel's input would
+    // stay disabled forever. Emit one if none has gone out for this stream.
+    if (!sse_terminal_emitted_) {
+        sse_terminal_emitted_ = true;
+        emit stream_finish(0);
     }
 }
 
@@ -965,6 +1029,7 @@ void ChatModeService::handle_sse_line(const QByteArray& line) {
         } else if (ev == "finish") {
             const int total = data["totalTokens"].toInt();
             LOG_INFO("ChatModeService", QString("SSE finish: %1 total tokens").arg(total));
+            sse_terminal_emitted_ = true;
             emit stream_finish(total);
         } else if (ev == "heartbeat") {
             LOG_DEBUG("ChatModeService", "SSE heartbeat");
@@ -972,6 +1037,7 @@ void ChatModeService::handle_sse_line(const QByteArray& line) {
         } else if (ev == "error") {
             const QString msg = data["message"].toString();
             LOG_WARN("ChatModeService", "SSE error: " + msg);
+            sse_terminal_emitted_ = true;
             emit stream_error(msg);
         } else if (!ev.isEmpty()) {
             LOG_DEBUG("ChatModeService", "SSE unknown event: " + ev);

@@ -20,6 +20,7 @@
 #include <QPointer>
 #include <QScrollArea>
 #include <QStackedWidget>
+#include <QTabBar>
 #include <QVBoxLayout>
 #include <QValueAxis>
 
@@ -131,6 +132,9 @@ void QuantStatsView::build_ui() {
 
     // ── Tab widget ────────────────────────────────────────────────────────────
     tabs_ = new QTabWidget;
+    tabs_->tabBar()->setElideMode(Qt::ElideNone);
+    tabs_->tabBar()->setExpanding(false);
+    tabs_->tabBar()->setUsesScrollButtons(false);
     tabs_->setDocumentMode(true);
     tabs_->setStyleSheet(QString("QTabWidget::pane { border:0; background:%1; }"
                                  "QTabBar::tab { background:%2; color:%3; padding:6px 14px; border:0;"
@@ -274,14 +278,40 @@ void QuantStatsView::build_ui() {
 // ── set_data ──────────────────────────────────────────────────────────────────
 
 void QuantStatsView::set_data(const portfolio::PortfolioSummary& summary, const QString& currency) {
+    const bool portfolio_changed = summary.portfolio.id != summary_.portfolio.id;
     summary_ = summary;
     currency_ = currency;
+
+    // Results belong to the book they were computed for - drop them when the
+    // user switches portfolio instead of showing the previous one's statistics
+    // until the new run lands.
+    if (portfolio_changed) {
+        qs_data_ = QJsonObject();
+        mc_data_ = QJsonObject();
+        for (QStackedWidget* st : {returns_stack_, drawdown_stack_, rolling_stack_, mc_stack_}) {
+            if (st)
+                st->setCurrentIndex(0);
+        }
+    }
 
     // Populate metrics immediately from live summary data
     update_metrics();
 
-    // Kick off Python fetch automatically
-    run_quantstats();
+    // Kick off the Python fetch automatically - but only when the analysis
+    // inputs changed. set_data() now also runs on every portfolio refresh (and
+    // on every re-entry to this tab); the 1-year history download + QuantStats
+    // run does not depend on live prices, so repeating it each minute only
+    // burned a Python slot. The RUN button still forces a fresh run.
+    QStringList parts;
+    parts.reserve(summary_.holdings.size());
+    for (const auto& h : summary_.holdings)
+        parts.append(h.symbol + QLatin1Char(':') + QString::number(h.quantity, 'g', 10));
+    parts.sort();
+    const QString signature = summary_.portfolio.id + QLatin1Char('|') + parts.join(QLatin1Char(','));
+    if (signature != qs_signature_ && !qs_running_) {
+        qs_signature_ = signature;
+        run_quantstats();
+    }
 }
 
 // ── update_metrics ────────────────────────────────────────────────────────────
@@ -536,8 +566,8 @@ void QuantStatsView::update_returns() {
         card_l->setSpacing(4);
 
         auto* lbl = new QLabel(c.label);
-        lbl->setStyleSheet(
-            QString("color:%1; font-size:9px; font-weight:700; letter-spacing:0.5px;").arg(ui::colors::TEXT_TERTIARY()));
+        lbl->setStyleSheet(QString("color:%1; font-size:9px; font-weight:700; letter-spacing:0.5px;")
+                               .arg(ui::colors::TEXT_TERTIARY()));
         card_l->addWidget(lbl);
 
         auto* val_lbl = new QLabel(c.value);
@@ -830,8 +860,8 @@ void QuantStatsView::update_monte_carlo_chart() {
         col_l->setContentsMargins(0, 0, 0, 0);
         col_l->setSpacing(2);
         auto* lbl = new QLabel(s.label);
-        lbl->setStyleSheet(
-            QString("color:%1; font-size:8px; font-weight:700; letter-spacing:0.5px;").arg(ui::colors::TEXT_TERTIARY()));
+        lbl->setStyleSheet(QString("color:%1; font-size:8px; font-weight:700; letter-spacing:0.5px;")
+                               .arg(ui::colors::TEXT_TERTIARY()));
         col_l->addWidget(lbl);
         auto* val = new QLabel(s.value);
         val->setStyleSheet(QString("color:%1; font-size:14px; font-weight:700;").arg(s.color));
@@ -989,36 +1019,33 @@ void QuantStatsView::run_quantstats() {
     }
 
     QPointer<QuantStatsView> self = this;
-    PortfolioAnalyticsService::instance().run_quantstats(
-        symbols, weights, [self](const AnalyticsResult& r) {
-            if (!self)
-                return;
-            QMetaObject::invokeMethod(
-                self,
-                [self, r]() {
-                    if (!self)
-                        return;
-                    self->qs_running_ = false;
-                    self->qs_run_btn_->setEnabled(true);
+    PortfolioAnalyticsService::instance().run_quantstats(symbols, weights, [self](const AnalyticsResult& r) {
+        if (!self)
+            return;
+        QMetaObject::invokeMethod(
+            self,
+            [self, r]() {
+                if (!self)
+                    return;
+                self->qs_running_ = false;
+                self->qs_run_btn_->setEnabled(true);
 
-                    if (!r.success) {
-                        self->qs_status_->setText(tr("QuantStats: %1").arg(r.error));
-                        self->qs_status_->setStyleSheet(
-                            QString("color:%1; font-size:9px;").arg(ui::colors::NEGATIVE()));
-                        return;
-                    }
+                if (!r.success) {
+                    self->qs_status_->setText(tr("QuantStats: %1").arg(r.error));
+                    self->qs_status_->setStyleSheet(QString("color:%1; font-size:9px;").arg(ui::colors::NEGATIVE()));
+                    return;
+                }
 
-                    self->qs_data_ = r.data;
-                    self->qs_status_->setText(tr("Complete"));
-                    self->qs_status_->setStyleSheet(
-                        QString("color:%1; font-size:9px;").arg(ui::colors::POSITIVE()));
-                    self->update_metrics();
-                    self->update_returns();
-                    self->update_drawdown();
-                    self->update_rolling();
-                },
-                Qt::QueuedConnection);
-        });
+                self->qs_data_ = r.data;
+                self->qs_status_->setText(tr("Complete"));
+                self->qs_status_->setStyleSheet(QString("color:%1; font-size:9px;").arg(ui::colors::POSITIVE()));
+                self->update_metrics();
+                self->update_returns();
+                self->update_drawdown();
+                self->update_rolling();
+            },
+            Qt::QueuedConnection);
+    });
 }
 
 // ── run_monte_carlo ───────────────────────────────────────────────────────────
@@ -1060,10 +1087,8 @@ void QuantStatsView::run_monte_carlo() {
 
                     self->mc_data_ = r.data;
                     self->mc_status_->setText(
-                        tr("Complete — %1 paths simulated")
-                            .arg(r.data["num_paths_shown"].toInt() > 0 ? "1000" : "0"));
-                    self->mc_status_->setStyleSheet(
-                        QString("color:%1; font-size:10px;").arg(ui::colors::POSITIVE()));
+                        tr("Complete — %1 paths simulated").arg(r.data["num_paths_shown"].toInt() > 0 ? "1000" : "0"));
+                    self->mc_status_->setStyleSheet(QString("color:%1; font-size:10px;").arg(ui::colors::POSITIVE()));
                     self->update_monte_carlo_chart();
                 },
                 Qt::QueuedConnection);
@@ -1078,24 +1103,39 @@ void QuantStatsView::changeEvent(QEvent* event) {
 
 void QuantStatsView::retranslateUi() {
     if (tabs_) {
-        if (metrics_tab_index_ >= 0)  tabs_->setTabText(metrics_tab_index_, tr("METRICS"));
-        if (returns_tab_index_ >= 0)  tabs_->setTabText(returns_tab_index_, tr("RETURNS"));
-        if (drawdown_tab_index_ >= 0) tabs_->setTabText(drawdown_tab_index_, tr("DRAWDOWN"));
-        if (rolling_tab_index_ >= 0)  tabs_->setTabText(rolling_tab_index_, tr("ROLLING"));
-        if (mc_tab_index_ >= 0)       tabs_->setTabText(mc_tab_index_, tr("MONTE CARLO"));
+        if (metrics_tab_index_ >= 0)
+            tabs_->setTabText(metrics_tab_index_, tr("METRICS"));
+        if (returns_tab_index_ >= 0)
+            tabs_->setTabText(returns_tab_index_, tr("RETURNS"));
+        if (drawdown_tab_index_ >= 0)
+            tabs_->setTabText(drawdown_tab_index_, tr("DRAWDOWN"));
+        if (rolling_tab_index_ >= 0)
+            tabs_->setTabText(rolling_tab_index_, tr("ROLLING"));
+        if (mc_tab_index_ >= 0)
+            tabs_->setTabText(mc_tab_index_, tr("MONTE CARLO"));
     }
-    if (title_lbl_)           title_lbl_->setText(tr("QUANTSTATS ANALYSIS"));
-    if (qs_run_btn_)          qs_run_btn_->setText(tr("▶ RUN QUANTSTATS"));
-    if (metrics_section_lbl_) metrics_section_lbl_->setText(tr("KEY PERFORMANCE INDICATORS"));
-    if (mc_title_)            mc_title_->setText(tr("MONTE CARLO SIMULATION"));
-    if (mc_desc_)             mc_desc_->setText(tr("Simulate 1,000 portfolio return paths using GBM to estimate probability\n"
-                                                   "distributions of future returns, drawdowns, and terminal wealth."));
-    if (mc_run_btn_)          mc_run_btn_->setText(tr("▶ RUN MONTE CARLO (1000 paths)"));
+    if (title_lbl_)
+        title_lbl_->setText(tr("QUANTSTATS ANALYSIS"));
+    if (qs_run_btn_)
+        qs_run_btn_->setText(tr("▶ RUN QUANTSTATS"));
+    if (metrics_section_lbl_)
+        metrics_section_lbl_->setText(tr("KEY PERFORMANCE INDICATORS"));
+    if (mc_title_)
+        mc_title_->setText(tr("MONTE CARLO SIMULATION"));
+    if (mc_desc_)
+        mc_desc_->setText(tr("Simulate 1,000 portfolio return paths using GBM to estimate probability\n"
+                             "distributions of future returns, drawdowns, and terminal wealth."));
+    if (mc_run_btn_)
+        mc_run_btn_->setText(tr("▶ RUN MONTE CARLO (1000 paths)"));
 
-    if (returns_placeholder_)  returns_placeholder_->setText(tr("Run QuantStats Analysis for return distribution"));
-    if (drawdown_placeholder_) drawdown_placeholder_->setText(tr("Run QuantStats Analysis for drawdown metrics"));
-    if (rolling_placeholder_)  rolling_placeholder_->setText(tr("Run QuantStats Analysis for rolling metrics"));
-    if (mc_placeholder_)       mc_placeholder_->setText(tr("Press RUN MONTE CARLO to simulate 1,000 return paths"));
+    if (returns_placeholder_)
+        returns_placeholder_->setText(tr("Run QuantStats Analysis for return distribution"));
+    if (drawdown_placeholder_)
+        drawdown_placeholder_->setText(tr("Run QuantStats Analysis for drawdown metrics"));
+    if (rolling_placeholder_)
+        rolling_placeholder_->setText(tr("Run QuantStats Analysis for rolling metrics"));
+    if (mc_placeholder_)
+        mc_placeholder_->setText(tr("Press RUN MONTE CARLO to simulate 1,000 return paths"));
 
     if (metrics_table_)
         metrics_table_->setHorizontalHeaderLabels({tr("METRIC"), tr("VALUE"), tr("BENCHMARK")});

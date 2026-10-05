@@ -37,8 +37,16 @@ class ZerodhaWebSocket : public QObject {
     bool is_connected() const;
 
     /// Add tokens to the subscription set and (re)subscribe if connected.
-    /// Mode is always "full" — we need depth for order matching.
+    /// Tokens stream in "quote" mode (44-byte: LTP/OHLC/volume) by default; the
+    /// one token set via set_full_mode_token() streams in "full" mode (184-byte,
+    /// 5-level depth) so the order book / depth table has data.
     void subscribe(const QVector<quint32>& tokens);
+
+    /// Designate the single token that should stream in "full" mode (market depth).
+    /// Typically the currently-selected symbol — the only one whose depth is shown.
+    /// Pass 0 to put everything back on "quote". Re-sends mode immediately if
+    /// connected (for both the previous and the new full-mode token).
+    void set_full_mode_token(quint32 token);
 
     /// Remove tokens from the subscription set.
     void unsubscribe(const QVector<quint32>& tokens);
@@ -64,22 +72,31 @@ class ZerodhaWebSocket : public QObject {
     void send_subscribe(const QVector<quint32>& tokens);
     void send_unsubscribe(const QVector<quint32>& tokens);
     void send_mode(const QVector<quint32>& tokens);
+    // Send one "mode" message for a token batch (mode = "quote" or "full").
+    void send_mode_batch(const char* mode, const QVector<quint32>& tokens);
     void resubscribe_all();
 
     // Binary packet parsing helpers
     ZerodhaTick parse_ltp_packet(const uchar* data) const;
     ZerodhaTick parse_quote_packet(const uchar* data) const;
     ZerodhaTick parse_full_packet(const uchar* data) const;
+    // 28-byte (quote) / 32-byte (full, + exchange timestamp) INDEX packet. Indices
+    // (NIFTY 50, SENSEX, …) are not tradable and use their own, shorter layout.
+    ZerodhaTick parse_index_packet(const uchar* data, int len) const;
 
     static quint32 read_u32(const uchar* p);
     static qint32 read_i32(const uchar* p);
     static quint16 read_u16(const uchar* p);
-    static double paise_to_rupees(qint32 paise);
+    // Kite packs prices as int32 scaled per exchange segment (low byte of the
+    // instrument token): CDS (3) → 1e7, BCD (6) → 1e4, everything else → 100
+    // (paise). Convention per Zerodha's official KiteTicker clients.
+    static double price_from_wire(qint32 raw, quint32 instrument_token);
 
     QString api_key_;
     QString access_token_;
     WebSocketClient* ws_;
     QSet<quint32> subscribed_tokens_;
+    quint32 full_mode_token_ = 0; // streams in "full" mode (depth); 0 = none
 
     static constexpr int kBatchSize = 200;
     static constexpr const char* kWsUrl = "wss://ws.kite.trade";

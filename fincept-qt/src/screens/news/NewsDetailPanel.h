@@ -4,6 +4,7 @@
 #include "services/news/NewsNlpService.h"
 #include "services/news/NewsService.h"
 
+#include <QEvent>
 #include <QLabel>
 #include <QPushButton>
 #include <QStackedWidget>
@@ -26,12 +27,24 @@ class NewsDetailPanel : public QWidget {
     void show_monitor_matches(const QVector<QPair<services::NewsMonitor, QStringList>>& matches);
     void show_entities(const services::EntityResult& entities);
     void show_infrastructure(const QVector<services::InfrastructureItem>& items);
+    /// Tell the user the ANALYZE request failed (and re-arm the button) instead
+    /// of leaving it spinning until the 30 s guard fires.
+    void show_analysis_failed();
+    /// Re-read the bookmark state of the current article from the DB and
+    /// reflect it on the BOOKMARK button (also reverts a failed toggle).
+    void refresh_bookmark_state();
+    /// Link of the article currently shown (empty when none) — lets the screen
+    /// drop an analysis result that belongs to an article the user has left.
+    QString current_article_link() const { return has_article_ ? current_article_.link : QString(); }
     void clear();
 
     /// Show/hide the panel
     void open_panel();
     void close_panel();
     bool is_panel_open() const { return panel_open_; }
+
+  protected:
+    void changeEvent(QEvent* event) override;
 
   signals:
     void analyze_requested(const QString& article_url);
@@ -43,7 +56,20 @@ class NewsDetailPanel : public QWidget {
     QWidget* build_empty_state();
     QWidget* build_content_view();
 
+    /// Re-apply tr() lookups to every widget whose text we keep a handle to.
+    /// Called from changeEvent() on QEvent::LanguageChange.
+    void retranslateUi();
+
     bool panel_open_ = false;
+
+    // Static header / empty-state / section titles (cached for retranslateUi).
+    QLabel* header_title_ = nullptr;
+    QLabel* empty_label_ = nullptr;
+    QLabel* ai_title_ = nullptr;
+    QLabel* monitor_title_ = nullptr;
+    QLabel* related_title_ = nullptr;
+    QLabel* entities_section_title_ = nullptr;
+    QLabel* infra_title_ = nullptr;
 
     // Article section
     QLabel* headline_label_ = nullptr;
@@ -59,15 +85,22 @@ class NewsDetailPanel : public QWidget {
 
     // AI analysis section
     QWidget* analysis_section_ = nullptr;
+    QLabel* ai_fetch_note_ = nullptr; // publisher-block / metadata-only banner
     QLabel* ai_summary_ = nullptr;
     QLabel* ai_sentiment_ = nullptr;
     QLabel* ai_urgency_ = nullptr;
+    QLabel* ai_prediction_ = nullptr;
     QLabel* ai_confidence_ = nullptr;
     QLabel* ai_keywords_ = nullptr;
     QLabel* ai_credits_ = nullptr;
+    QLabel* key_points_title_ = nullptr;
     QVBoxLayout* key_points_layout_ = nullptr;
+    QLabel* risk_title_ = nullptr;
     QVBoxLayout* risk_layout_ = nullptr;
+    QLabel* topics_title_ = nullptr;
     QVBoxLayout* topics_layout_ = nullptr;
+    QLabel* ai_entities_title_ = nullptr;
+    QVBoxLayout* ai_entities_layout_ = nullptr;
     QPushButton* analyze_btn_ = nullptr;
     QTimer* analyze_timeout_ = nullptr;
 

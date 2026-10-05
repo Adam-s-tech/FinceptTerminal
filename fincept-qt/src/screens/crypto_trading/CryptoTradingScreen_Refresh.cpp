@@ -6,8 +6,6 @@
 //
 // Part of the partial-class split of CryptoTradingScreen.cpp.
 
-#include "screens/crypto_trading/CryptoTradingScreen.h"
-
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
 #include "core/symbol/SymbolContext.h"
@@ -17,13 +15,13 @@
 #include "screens/crypto_trading/CryptoOrderBook.h"
 #include "screens/crypto_trading/CryptoOrderEntry.h"
 #include "screens/crypto_trading/CryptoTickerBar.h"
+#include "screens/crypto_trading/CryptoTradingScreen.h"
 #include "screens/crypto_trading/CryptoWatchlist.h"
 #include "trading/ExchangeService.h"
 #include "trading/ExchangeSession.h"
 #include "trading/ExchangeSessionManager.h"
 #include "trading/OrderMatcher.h"
 #include "trading/PaperTrading.h"
-#include "trading/exchanges/kraken/KrakenWsClient.h"
 #include "ui/theme/StyleSheets.h"
 #include "ui/theme/Theme.h"
 
@@ -43,7 +41,6 @@ using namespace fincept::trading;
 using namespace fincept::screens::crypto;
 
 static const QString TAG = "CryptoTrading";
-
 
 void CryptoTradingScreen::apply_feed_mode(bool ws_connected) {
     // WS-only mode: no REST polling fallbacks. We keep this method as a
@@ -134,7 +131,19 @@ void CryptoTradingScreen::flush_ws_updates() {
                     };
                     Result r;
                     try {
-                        const int orders_before = pt_get_orders(pid, "open").size();
+                        // Resting paper orders are stored with status "pending"/"partial"
+                        // (never "open"), and a resting order that fills drops out of that
+                        // set. SL/TP triggers close positions without touching orders, so
+                        // also watch the newest trade id — either change means a fill.
+                        const auto resting_orders = [&pid]() {
+                            return pt_get_orders(pid, "pending").size() + pt_get_orders(pid, "partial").size();
+                        };
+                        const auto newest_trade_id = [&pid]() {
+                            const auto t = pt_get_trades(pid, 1);
+                            return t.isEmpty() ? QString() : t.first().id;
+                        };
+                        const auto orders_before = resting_orders();
+                        const QString trade_before = newest_trade_id();
                         for (const auto& ticker : batch) {
                             if (ticker.last <= 0)
                                 continue;
@@ -148,8 +157,7 @@ void CryptoTradingScreen::flush_ws_updates() {
                             OrderMatcher::instance().check_sl_tp_triggers(pid, ticker.symbol, ticker.last);
                         }
                         r.positions = pt_get_positions(pid);
-                        const int orders_after = pt_get_orders(pid, "open").size();
-                        r.fill_occurred = orders_after < orders_before;
+                        r.fill_occurred = resting_orders() != orders_before || newest_trade_id() != trade_before;
                         if (r.fill_occurred) {
                             r.portfolio = pt_get_portfolio(pid);
                             r.orders = pt_get_orders(pid);
@@ -162,20 +170,23 @@ void CryptoTradingScreen::flush_ws_updates() {
                     }
 
                     if (!self)
-                        return;  // widget destroyed — nothing to reset
-                    QMetaObject::invokeMethod(self, [self, r]() {
-                        if (!self)
-                            return;
-                        self->paper_bookkeeping_in_flight_.store(false);
-                        self->bottom_panel_->set_positions(r.positions);
-                        if (r.fill_occurred) {
-                            self->portfolio_ = r.portfolio;
-                            self->order_entry_->set_balance(r.portfolio.balance);
-                            self->bottom_panel_->set_orders(r.orders);
-                            self->bottom_panel_->set_trades(r.trades);
-                            self->bottom_panel_->set_stats(r.stats);
-                        }
-                    }, Qt::QueuedConnection);
+                        return; // widget destroyed — nothing to reset
+                    QMetaObject::invokeMethod(
+                        self,
+                        [self, r]() {
+                            if (!self)
+                                return;
+                            self->paper_bookkeeping_in_flight_.store(false);
+                            self->bottom_panel_->set_positions(r.positions);
+                            if (r.fill_occurred) {
+                                self->portfolio_ = r.portfolio;
+                                self->order_entry_->set_balance(r.portfolio.balance);
+                                self->bottom_panel_->set_orders(r.orders);
+                                self->bottom_panel_->set_trades(r.trades);
+                                self->bottom_panel_->set_stats(r.stats);
+                            }
+                        },
+                        Qt::QueuedConnection);
                 });
             }
         }
@@ -235,14 +246,15 @@ void CryptoTradingScreen::refresh_orderbook() {
     if (!initialized_)
         return;
     QPointer<CryptoTradingScreen> self = this;
-    (void)QtConcurrent::run([self]() {
+    const QString symbol = selected_symbol_; // snapshot on the UI thread — see refresh_ticker()
+    (void)QtConcurrent::run([self, symbol]() {
         if (!self)
             return;
-        auto ob = ExchangeService::instance().fetch_orderbook(self->selected_symbol_, OB_MAX_DISPLAY_LEVELS);
+        auto ob = ExchangeService::instance().fetch_orderbook(symbol, OB_MAX_DISPLAY_LEVELS);
         QMetaObject::invokeMethod(
             self,
-            [self, ob]() {
-                if (!self)
+            [self, symbol, ob]() {
+                if (!self || self->selected_symbol_ != symbol)
                     return;
                 self->orderbook_->set_data(ob.bids, ob.asks, ob.spread, ob.spread_pct);
                 self->bottom_panel_->set_depth_data(ob.bids, ob.asks, ob.spread, ob.spread_pct);
@@ -284,21 +296,24 @@ void CryptoTradingScreen::refresh_portfolio() {
         }
         if (!self || !s.ok)
             return;
-        QMetaObject::invokeMethod(self, [self, s]() {
-            if (!self)
-                return;
-            self->portfolio_ = s.portfolio;
-            self->order_entry_->set_balance(s.portfolio.balance);
-            self->bottom_panel_->set_positions(s.positions);
-            self->bottom_panel_->set_orders(s.orders);
-            self->bottom_panel_->set_trades(s.trades);
-            self->bottom_panel_->set_stats(s.stats);
-            LOG_INFO(TAG, QString("Paper portfolio refreshed: %1 positions, %2 orders, %3 trades, balance=%4")
-                              .arg(s.positions.size())
-                              .arg(s.orders.size())
-                              .arg(s.trades.size())
-                              .arg(s.portfolio.balance, 0, 'f', 2));
-        }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(
+            self,
+            [self, s]() {
+                if (!self)
+                    return;
+                self->portfolio_ = s.portfolio;
+                self->order_entry_->set_balance(s.portfolio.balance);
+                self->bottom_panel_->set_positions(s.positions);
+                self->bottom_panel_->set_orders(s.orders);
+                self->bottom_panel_->set_trades(s.trades);
+                self->bottom_panel_->set_stats(s.stats);
+                LOG_INFO(TAG, QString("Paper portfolio refreshed: %1 positions, %2 orders, %3 trades, balance=%4")
+                                  .arg(s.positions.size())
+                                  .arg(s.orders.size())
+                                  .arg(s.trades.size())
+                                  .arg(s.portfolio.balance, 0, 'f', 2));
+            },
+            Qt::QueuedConnection);
     });
 }
 
@@ -306,10 +321,11 @@ void CryptoTradingScreen::refresh_watchlist() {
     if (!initialized_)
         return;
     QPointer<CryptoTradingScreen> self = this;
-    (void)QtConcurrent::run([self]() {
+    const QStringList symbols = watchlist_symbols_; // snapshot on the UI thread — see refresh_ticker()
+    (void)QtConcurrent::run([self, symbols]() {
         if (!self)
             return;
-        auto tickers = ExchangeService::instance().fetch_tickers(self->watchlist_symbols_);
+        auto tickers = ExchangeService::instance().fetch_tickers(symbols);
         QMetaObject::invokeMethod(
             self,
             [self, tickers]() {
@@ -344,6 +360,13 @@ void CryptoTradingScreen::refresh_market_info() {
                     return;
                 if (self->selected_symbol_ != symbol)
                     return; // user switched symbols — discard stale result
+                if (fr.symbol.isEmpty()) {
+                    // Daemon error / venue without funding (spot): keep the readouts at "--"
+                    // rather than publishing a fabricated 0.0000 % / $0 mark, and hide the
+                    // ribbon's mark/index chips.
+                    self->ticker_bar_->update_mark_price(0.0, 0.0);
+                    return;
+                }
                 self->market_info_cache_.funding_rate = fr.funding_rate;
                 self->market_info_cache_.mark_price = fr.mark_price;
                 self->market_info_cache_.index_price = fr.index_price;
@@ -366,6 +389,8 @@ void CryptoTradingScreen::refresh_market_info() {
                     return;
                 if (self->selected_symbol_ != symbol)
                     return; // user switched symbols — discard stale result
+                if (oi.symbol.isEmpty())
+                    return; // daemon error / unsupported — leave "--" instead of a fake $0 OI
                 self->market_info_cache_.open_interest = oi.open_interest;
                 self->market_info_cache_.open_interest_value = oi.open_interest_value;
                 self->market_info_cache_.has_data = true;

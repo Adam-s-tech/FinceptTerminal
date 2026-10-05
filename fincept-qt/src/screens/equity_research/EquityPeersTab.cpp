@@ -2,6 +2,7 @@
 #include "screens/equity_research/EquityPeersTab.h"
 
 #include "services/equity/EquityResearchService.h"
+#include "ui/tables/NumericTableWidgetItem.h"
 #include "ui/theme/Theme.h"
 
 #include <QEvent>
@@ -17,12 +18,28 @@ EquityPeersTab::EquityPeersTab(QWidget* parent) : QWidget(parent) {
     build_ui();
     auto& svc = services::equity::EquityResearchService::instance();
     connect(&svc, &services::equity::EquityResearchService::peers_loaded, this, &EquityPeersTab::on_peers_loaded);
+    // Dismiss the "LOADING PEERS…" overlay on failure — it's hidden only on success.
+    connect(&svc, &services::equity::EquityResearchService::error_occurred, this,
+            [this](const QString& ctx, const QString&) {
+                if (ctx != "Peers")
+                    return;
+                if (loading_overlay_)
+                    loading_overlay_->hide_loading();
+                // The status line kept saying "Loading peer data…" after a failure.
+                status_label_->setText(tr("Could not load peer data — press LOAD to try again."));
+                status_label_->show();
+            });
 }
 
 void EquityPeersTab::set_symbol(const QString& symbol) {
     if (symbol == current_symbol_)
         return;
     current_symbol_ = symbol;
+    // The table still holds the previous symbol's peers; clear it so a failed load leaves
+    // an empty grid + the error line instead of another company's comparison.
+    peer_table_->setRowCount(0);
+    peers_loaded_ = false;
+    cached_peers_.clear();
     auto peers = default_peers(symbol);
     peers_edit_->setText(peers.join(", "));
     loading_overlay_->show_loading(tr("LOADING PEERS…"));
@@ -62,7 +79,7 @@ void EquityPeersTab::build_ui() {
     load_btn_->setStyleSheet(QString("QPushButton { background:%1; color:%2; border:0; border-radius:3px; "
                                      "padding:5px 18px; font-size:10px; font-weight:700; }"
                                      "QPushButton:hover { background:#b45309; }")
-                                .arg(ui::colors::AMBER(), ui::colors::BG_BASE()));
+                                 .arg(ui::colors::AMBER(), ui::colors::BG_BASE()));
     hl->addWidget(load_btn_);
     connect(load_btn_, &QPushButton::clicked, this, &EquityPeersTab::on_load_clicked);
     vl->addWidget(ctrl);
@@ -89,7 +106,8 @@ void EquityPeersTab::build_ui() {
         QTableWidget::item { padding:2px 6px; }
     )")
                                    .arg(ui::colors::BG_SURFACE(), ui::colors::BG_BASE(), ui::colors::BORDER_DIM(),
-                                        ui::colors::TEXT_PRIMARY(), ui::colors::BG_RAISED(), ui::colors::TEXT_SECONDARY()));
+                                        ui::colors::TEXT_PRIMARY(), ui::colors::BG_RAISED(),
+                                        ui::colors::TEXT_SECONDARY()));
     peer_table_->setAlternatingRowColors(true);
     peer_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     peer_table_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -116,8 +134,8 @@ void EquityPeersTab::build_ui() {
     };
     make_leg(ui::colors::POSITIVE, tr("Positive / Good"));
     make_leg(ui::colors::NEGATIVE, tr("Negative / High Risk"));
-    make_leg("#eab308",            tr("Neutral"));
-    make_leg("#22d3ee",            tr("Symbol / Info"));
+    make_leg("#eab308", tr("Neutral"));
+    make_leg("#22d3ee", tr("Symbol / Info"));
     leg_hl->addStretch();
     vl->addWidget(legend);
 }
@@ -132,12 +150,20 @@ void EquityPeersTab::on_load_clicked() {
             peers.append(p.trimmed().toUpper());
     if (peers.isEmpty())
         return;
+    requested_symbols_ = QStringList{current_symbol_} + peers;
     status_label_->setText(tr("Loading peer data…"));
     status_label_->show();
     services::equity::EquityResearchService::instance().fetch_peers(current_symbol_, peers);
 }
 
 void EquityPeersTab::on_peers_loaded(QVector<services::equity::PeerData> peers) {
+    // The signal has no symbol/request id: a slow response for the previous symbol (or an
+    // MCP peers call) used to overwrite the table the user is looking at. Every returned
+    // row must belong to the request this tab last made.
+    for (const auto& p : peers) {
+        if (!requested_symbols_.contains(p.symbol, Qt::CaseInsensitive))
+            return;
+    }
     status_label_->hide();
     loading_overlay_->hide_loading();
     cached_peers_ = peers;
@@ -176,7 +202,13 @@ void EquityPeersTab::populate_table(const QVector<services::equity::PeerData>& p
 
     auto set_cell = [&](int row, int col, const QString& text, const QColor& fg = QColor(),
                         Qt::Alignment align = Qt::AlignRight | Qt::AlignVCenter) {
-        auto* item = new QTableWidgetItem(text);
+        // Sort numeric columns by magnitude, not lexically ("15","150","5"…).
+        // Parse the formatted value; non-numeric cells ("—") use a plain item.
+        QString num = text;
+        num.remove('%').remove(',').remove('$');
+        bool ok = false;
+        const double value = num.toDouble(&ok);
+        QTableWidgetItem* item = ok ? new ui::NumericTableWidgetItem(text, value) : new QTableWidgetItem(text);
         item->setTextAlignment(align);
         if (fg.isValid())
             item->setForeground(fg);
@@ -212,8 +244,12 @@ void EquityPeersTab::populate_table(const QVector<services::equity::PeerData>& p
         set_cell(r, 10, fmt_pct(p.profit_margin), color_pct_pos(p.profit_margin));
         set_cell(r, 11, fmt_pct(p.operating_margin), color_pct_pos(p.operating_margin));
         set_cell(r, 12, fmt_pct(p.revenue_growth), color_pct_pos(p.revenue_growth));
-        set_cell(r, 13, fmt(p.debt_to_equity, 2), color_ratio(p.debt_to_equity, 0.5, 2.0));
-        set_cell(r, 14, fmt_pct(p.dividend_yield),
+        // yfinance reports debtToEquity and dividendYield in percent (D/E 152 = 1.52x,
+        // yield 0.33 = 0.33%) — normalise to the ratio/fraction the thresholds and
+        // fmt_pct() expect. Raw values made every leveraged peer read "high risk" and
+        // multiplied the yield by 100.
+        set_cell(r, 13, fmt(p.debt_to_equity / 100.0, 2), color_ratio(p.debt_to_equity / 100.0, 0.5, 2.0));
+        set_cell(r, 14, fmt_pct(p.dividend_yield / 100.0),
                  p.dividend_yield > 0 ? QColor(ui::colors::POSITIVE()) : QColor("#6b7280"));
         set_cell(r, 15, fmt(p.beta, 2),
                  p.beta >= 0 && p.beta <= 1.5 ? QColor(ui::colors::POSITIVE()) : QColor(ui::colors::NEGATIVE()));
@@ -251,13 +287,15 @@ void EquityPeersTab::changeEvent(QEvent* event) {
 }
 
 void EquityPeersTab::retranslateUi() {
-    if (peers_caption_) peers_caption_->setText(tr("PEERS (comma-separated):"));
-    if (load_btn_)      load_btn_->setText(tr("LOAD"));
-    if (status_label_)  status_label_->setText(tr("Loading peer data…"));
+    if (peers_caption_)
+        peers_caption_->setText(tr("PEERS (comma-separated):"));
+    if (load_btn_)
+        load_btn_->setText(tr("LOAD"));
+    if (status_label_)
+        status_label_->setText(tr("Loading peer data…"));
 
     // Legend captions — order matches make_leg() call sequence in build_ui().
-    const QStringList legend = {tr("Positive / Good"), tr("Negative / High Risk"),
-                                tr("Neutral"),         tr("Symbol / Info")};
+    const QStringList legend = {tr("Positive / Good"), tr("Negative / High Risk"), tr("Neutral"), tr("Symbol / Info")};
     for (int i = 0; i < legend_text_lbls_.size() && i < legend.size(); ++i)
         legend_text_lbls_[i]->setText(legend[i]);
 
@@ -265,6 +303,15 @@ void EquityPeersTab::retranslateUi() {
     // the new locale. We re-render from cached data — no service refetch.
     if (peers_loaded_)
         populate_table(cached_peers_);
+}
+
+QString EquityPeersTab::peers_text() const {
+    return peers_edit_ ? peers_edit_->text() : QString();
+}
+
+void EquityPeersTab::set_peers_text(const QString& text) {
+    if (peers_edit_)
+        peers_edit_->setText(text);
 }
 
 } // namespace fincept::screens

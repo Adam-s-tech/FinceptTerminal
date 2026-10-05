@@ -7,7 +7,6 @@
 // Part of the partial-class split of WindowFrame.cpp.
 
 #include "app/WindowFrame.h"
-
 #include "auth/AuthManager.h"
 #include "auth/InactivityGuard.h"
 #include "auth/PinManager.h"
@@ -18,17 +17,35 @@
 #include "services/updater/UpdateService.h"
 #include "storage/repositories/SettingsRepository.h"
 #include "trading/instruments/InstrumentService.h"
+#include "trading/instruments/SymbolResolver.h"
 #include "ui/navigation/DockStatusBar.h"
 #include "ui/navigation/DockToolBar.h"
 #include "ui/theme/Theme.h"
-
-#include <DockManager.h>
 
 #include <QApplication>
 #include <QMessageBox>
 #include <QStackedWidget>
 
+#include <DockManager.h>
+
 namespace fincept {
+
+namespace {
+/// Show/hide the AI chat bubble according to "appearance.show_chat_bubble"
+/// (default: shown). Used when the lock screen releases a window — locking hides
+/// the bubble, and nothing else would bring it back until the next navigation.
+void wf_auth_apply_chat_bubble_setting(AiChatBubble* bubble) {
+    if (!bubble)
+        return;
+    auto r = SettingsRepository::instance().get("appearance.show_chat_bubble");
+    const bool show = !r.is_ok() || r.value() != "false";
+    bubble->setVisible(show);
+    if (show) {
+        bubble->reposition();
+        bubble->raise();
+    }
+}
+} // namespace
 
 void WindowFrame::on_auth_state_changed() {
     auto& auth = auth::AuthManager::instance();
@@ -85,10 +102,10 @@ void WindowFrame::on_auth_state_changed() {
                 }
             }
             LOG_DEBUG("WindowFrame", QString("on_auth_state_changed: skipping redirect, "
-                                            "stack index=%1, chat_mode=%2, gate_cleared=%3")
-                                        .arg(stack_->currentIndex())
-                                        .arg(chat_mode_)
-                                        .arg(pin_gate_cleared_));
+                                             "stack index=%1, chat_mode=%2, gate_cleared=%3")
+                                         .arg(stack_->currentIndex())
+                                         .arg(chat_mode_)
+                                         .arg(pin_gate_cleared_));
             return;
         }
         if (stack_->currentIndex() == 0 && auth_stack_->currentIndex() == 3)
@@ -126,10 +143,10 @@ void WindowFrame::on_auth_state_changed() {
             // still locked or ungated, log a warning so the regression is
             // visible rather than leaking the dashboard for one frame.
             if (locked_ || !pin_gate_cleared_) {
-                LOG_WARN("WindowFrame",
-                         QString("on_auth_state_changed: shell would become visible while "
-                                 "locked=%1 gate_cleared=%2 — forcing lock screen")
-                             .arg(locked_).arg(pin_gate_cleared_));
+                LOG_WARN("WindowFrame", QString("on_auth_state_changed: shell would become visible while "
+                                                "locked=%1 gate_cleared=%2 — forcing lock screen")
+                                            .arg(locked_)
+                                            .arg(pin_gate_cleared_));
                 if (auth::PinManager::instance().has_pin())
                     lock_screen_->show_unlock();
                 else
@@ -155,9 +172,13 @@ void WindowFrame::on_auth_state_changed() {
             });
             // Warm instrument cache in background — only loaded if not already cached.
             // Runs concurrently while the user reads the dashboard (3-5s head start).
-            fincept::trading::InstrumentService::instance().load_from_db_async("zerodha");
-            fincept::trading::InstrumentService::instance().load_from_db_async("angelone");
-            fincept::trading::InstrumentService::instance().load_from_db_async("groww");
+            // Load every registered broker (all 17 Indian brokers) so unified
+            // cross-broker search includes any broker whose master was already
+            // downloaded, without needing the user to focus each one first.
+            // instance() also registers all broker sources, so registered_brokers() is populated.
+            auto& isvc = fincept::trading::InstrumentService::instance();
+            for (const QString& bid : fincept::trading::SymbolResolver::instance().registered_brokers())
+                isvc.load_from_db_async(bid);
         } else {
             // Free/no plan → show pricing gate
             set_shell_visible(false);
@@ -261,8 +282,10 @@ void WindowFrame::apply_lock_state(bool locked) {
         // focus traversal, and dock-manager hit-testing cannot mutate state.
         if (dock_manager_ && dock_manager_->parentWidget())
             dock_manager_->parentWidget()->setEnabled(false);
-        if (dock_toolbar_)    dock_toolbar_->setEnabled(false);
-        if (dock_status_bar_) dock_status_bar_->setEnabled(false);
+        if (dock_toolbar_)
+            dock_toolbar_->setEnabled(false);
+        if (dock_status_bar_)
+            dock_status_bar_->setEnabled(false);
         return;
     }
 
@@ -278,10 +301,19 @@ void WindowFrame::apply_lock_state(bool locked) {
     pin_gate_cleared_ = true;
     if (dock_manager_ && dock_manager_->parentWidget())
         dock_manager_->parentWidget()->setEnabled(true);
-    if (dock_toolbar_)    dock_toolbar_->setEnabled(true);
-    if (dock_status_bar_) dock_status_bar_->setEnabled(true);
+    if (dock_toolbar_)
+        dock_toolbar_->setEnabled(true);
+    if (dock_status_bar_)
+        dock_status_bar_->setEnabled(true);
     set_shell_visible(true);
-    stack_->setCurrentIndex(1);
+    // Return to chat mode if the lock caught this window in it (chat_mode_ is not
+    // reset by locking); showing the dock stack under chat-mode chrome left the
+    // window in a mixed state that needed two F9 presses to straighten out.
+    stack_->setCurrentIndex(chat_mode_ ? 2 : 1);
+    // apply_lock_state(true) hid the bubble; the originating window restores it in
+    // on_terminal_unlocked(), siblings must do the same here.
+    if (!chat_mode_)
+        wf_auth_apply_chat_bubble_setting(chat_bubble_);
 }
 
 void WindowFrame::on_terminal_unlocked() {
@@ -296,8 +328,10 @@ void WindowFrame::on_terminal_unlocked() {
     // restore their own UI before this originator is fully ready.
     if (dock_manager_ && dock_manager_->parentWidget())
         dock_manager_->parentWidget()->setEnabled(true);
-    if (dock_toolbar_)    dock_toolbar_->setEnabled(true);
-    if (dock_status_bar_) dock_status_bar_->setEnabled(true);
+    if (dock_toolbar_)
+        dock_toolbar_->setEnabled(true);
+    if (dock_status_bar_)
+        dock_status_bar_->setEnabled(true);
 
     // Enable/restart inactivity guard. It is disabled in show_lock_screen()
     // and on logout, so it may currently be off even though the filter is
@@ -314,28 +348,39 @@ void WindowFrame::on_terminal_unlocked() {
                 guard.set_timeout_minutes(minutes);
         }
     }
-    if (!guard.is_enabled()) {
-        qApp->installEventFilter(&guard);
-        guard.set_enabled(true);
+    // Honour the user's Settings → Security → "Enable auto-lock" choice.
+    // This previously enabled the guard unconditionally, so switching
+    // auto-lock OFF was silently reverted on the very next unlock/login —
+    // the setting persisted but nothing ever read it. Auto-lock is also
+    // pointless without a PIN (there would be nothing to unlock with), so
+    // both conditions gate it. Default is ON when the key is absent, which
+    // preserves the previous behaviour for existing users.
+    const bool autolock_wanted = [] {
+        auto r = SettingsRepository::instance().get("security.autolock_enabled");
+        if (r.is_ok() && !r.value().isEmpty())
+            return r.value().compare(QLatin1String("false"), Qt::CaseInsensitive) != 0;
+        return true; // unset → previous default
+    }();
+
+    if (autolock_wanted && auth::PinManager::instance().has_pin()) {
+        if (!guard.is_enabled()) {
+            qApp->installEventFilter(&guard);
+            guard.set_enabled(true);
+        }
+        guard.reset_timer();
+    } else if (guard.is_enabled()) {
+        guard.set_enabled(false);
     }
-    guard.reset_timer();
 
     // Reset PIN lockout on successful unlock
     auth::PinManager::instance().reset_lockout();
 
     if (auth.session().has_paid_plan()) {
         set_shell_visible(true);
-        stack_->setCurrentIndex(1);
-        // Restore chat bubble based on setting
-        if (chat_bubble_) {
-            auto r = SettingsRepository::instance().get("appearance.show_chat_bubble");
-            bool show = !r.is_ok() || r.value() != "false";
-            chat_bubble_->setVisible(show);
-            if (show) {
-                chat_bubble_->reposition();
-                chat_bubble_->raise();
-            }
-        }
+        stack_->setCurrentIndex(chat_mode_ ? 2 : 1); // locked from chat mode → back to chat mode
+        // Restore chat bubble based on setting (chat mode keeps it hidden)
+        if (!chat_mode_)
+            wf_auth_apply_chat_bubble_setting(chat_bubble_);
         // Cold-boot restore via the new system (frame layouts, panels, dock
         // state, monitor variants).
         layout::WorkspaceShell::load_last_or_default();

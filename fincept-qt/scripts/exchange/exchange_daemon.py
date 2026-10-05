@@ -71,6 +71,13 @@ def _respond(req_id, success, data=None, error=None, code=None):
         pass
 
 
+def _require_cap(req_id, ex, cap, exchange_id):
+    if not ex.has.get(cap):
+        _respond(req_id, False, error=f"{exchange_id} does not support {cap}", code="NOT_SUPPORTED")
+        return False
+    return True
+
+
 # ── Exchange instance pool ──────────────────────────────────────────────────
 # Keyed by (exchange_id, has_credentials) — reuse across requests.
 # ccxt instances with credentials differ from public ones.
@@ -102,6 +109,10 @@ def _get_exchange(exchange_id, need_auth=False):
             config["secret"] = creds["secret"]
         if creds.get("password"):
             config["password"] = creds["password"]
+        if creds.get("wallet_address"):
+            config["walletAddress"] = creds["wallet_address"]
+        if creds.get("private_key"):
+            config["privateKey"] = creds["private_key"]
 
     exchange_class = getattr(ccxt, exchange_id)
     exchange = exchange_class(config)
@@ -271,6 +282,7 @@ def _handle_fetch_trades(req_id, exchange_id, args):
 
 def _handle_fetch_funding_rate(req_id, exchange_id, args):
     ex = _get_exchange(exchange_id)
+    if not _require_cap(req_id, ex, 'fetchFundingRate', exchange_id): return
     symbol = args["symbol"]
     fr = ex.fetch_funding_rate(symbol)
     _respond(req_id, True, {
@@ -285,6 +297,7 @@ def _handle_fetch_funding_rate(req_id, exchange_id, args):
 
 def _handle_fetch_open_interest(req_id, exchange_id, args):
     ex = _get_exchange(exchange_id)
+    if not _require_cap(req_id, ex, 'fetchOpenInterest', exchange_id): return
     symbol = args["symbol"]
     oi = ex.fetch_open_interest(symbol)
     _respond(req_id, True, {
@@ -316,12 +329,79 @@ def _handle_fetch_balance(req_id, exchange_id, args):
     _respond(req_id, True, {"balances": non_zero})
 
 
+def _resolve_market_symbol(ex, symbol, exchange_id):
+    """Map the app's display symbol to a valid ccxt market symbol for this exchange.
+
+    Most venues use the same unified symbol the app sends, so an exact market match
+    is returned unchanged (zero behaviour change for exchanges that already work).
+    Only when there is no exact market — e.g. Hyperliquid, where the app sends
+    "BTC/USDT" but the tradable market is the perp "BTC/USDC:USDC" — do we resolve by
+    base currency, preferring the exchange's default market type. If nothing matches
+    we return the original symbol so ccxt raises a clear BadSymbol (now surfaced to
+    the user instead of being silently swallowed).
+    """
+    markets = getattr(ex, "markets", None) or {}
+    if symbol in markets:
+        return symbol
+    base = symbol.split("/")[0].split(":")[0].strip().upper()
+    if not base:
+        return symbol
+    want_swap = get_default_type(exchange_id) in ("swap", "future")
+    candidates = [
+        m for m in markets.values()
+        if (m.get("base") or "").upper() == base and m.get("active", True)
+    ]
+    if not candidates:
+        return symbol
+    # Prefer markets whose contract type matches the exchange default (swap for a
+    # perps DEX, spot otherwise), then linear (stablecoin-settled) over inverse.
+    candidates.sort(
+        key=lambda m: (bool(m.get("swap")) == want_swap, bool(m.get("linear", True))),
+        reverse=True,
+    )
+    return candidates[0].get("symbol", symbol)
+
+
 def _handle_place_order(req_id, exchange_id, args):
     ex = _get_exchange(exchange_id, need_auth=True)
     _ensure_markets(ex, exchange_id)
+
+    symbol = _resolve_market_symbol(ex, args["symbol"], exchange_id)
+    if symbol != args["symbol"]:
+        sys.stderr.write(
+            f"[exchange_daemon] order symbol {args['symbol']} -> {symbol} ({exchange_id})\n"
+        )
+        sys.stderr.flush()
+
+    otype = args["type"]
+    price = args.get("price")
+    params = {}
+
+    # Map non-native order types to ccxt's unified (type + params) form. ccxt
+    # createOrder only accepts "market"/"limit"; stops are expressed via a
+    # triggerPrice param. Most major venues normalise these unified params.
+    trigger = args.get("stop_price")
+    if otype in ("stop", "stop_market"):
+        otype = "market"
+        if trigger:
+            params["triggerPrice"] = trigger
+    elif otype in ("stop_limit", "stop_loss_limit"):
+        otype = "limit"
+        if trigger:
+            params["triggerPrice"] = trigger
+    elif trigger:
+        params["triggerPrice"] = trigger
+
+    if args.get("reduce_only"):
+        params["reduceOnly"] = True
+    if args.get("sl"):
+        params["stopLoss"] = {"triggerPrice": args["sl"]}
+    if args.get("tp"):
+        params["takeProfit"] = {"triggerPrice": args["tp"]}
+
     order = ex.create_order(
-        args["symbol"], args["type"], args["side"],
-        args["amount"], args.get("price"),
+        symbol, otype, args["side"],
+        args["amount"], price, params,
     )
     _respond(req_id, True, {
         "id": order.get("id"),
@@ -354,6 +434,7 @@ def _handle_cancel_order(req_id, exchange_id, args):
 
 def _handle_fetch_positions(req_id, exchange_id, args):
     ex = _get_exchange(exchange_id, need_auth=True)
+    if not _require_cap(req_id, ex, 'fetchPositions', exchange_id): return
     symbol = args.get("symbol")
     positions = ex.fetch_positions([symbol] if symbol else None)
     result = [p for p in positions if abs(p.get("contracts", 0)) > 0]
@@ -412,6 +493,7 @@ def _handle_fetch_trading_fees(req_id, exchange_id, args):
     ex = _get_exchange(exchange_id)
     symbol = args.get("symbol")
     if symbol:
+        if not _require_cap(req_id, ex, 'fetchTradingFee', exchange_id): return
         fee = ex.fetch_trading_fee(symbol)
         _respond(req_id, True, {
             "symbol": symbol,
@@ -420,6 +502,7 @@ def _handle_fetch_trading_fees(req_id, exchange_id, args):
             "percentage": fee.get("percentage", True),
         })
     else:
+        if not _require_cap(req_id, ex, 'fetchTradingFees', exchange_id): return
         fees = ex.fetch_trading_fees()
         result = []
         for sym, fee in list(fees.items())[:50]:
@@ -434,6 +517,7 @@ def _handle_fetch_trading_fees(req_id, exchange_id, args):
 
 def _handle_set_leverage(req_id, exchange_id, args):
     ex = _get_exchange(exchange_id, need_auth=True)
+    if not _require_cap(req_id, ex, 'setLeverage', exchange_id): return
     symbol = args["symbol"]
     leverage = int(args["leverage"])
     # Pass defaultType via params so we don't mutate the shared pooled instance
@@ -443,6 +527,7 @@ def _handle_set_leverage(req_id, exchange_id, args):
 
 def _handle_set_margin_mode(req_id, exchange_id, args):
     ex = _get_exchange(exchange_id, need_auth=True)
+    if not _require_cap(req_id, ex, 'setMarginMode', exchange_id): return
     symbol = args["symbol"]
     mode = args["mode"]  # "cross" or "isolated"
     result = ex.set_margin_mode(mode, symbol, params={"defaultType": "swap"})

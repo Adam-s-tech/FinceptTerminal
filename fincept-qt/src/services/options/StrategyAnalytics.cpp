@@ -15,8 +15,14 @@ using fincept::trading::InstrumentType;
 
 namespace {
 
-/// Days-to-expiry for a leg, actual/365. Floors at 1 day so expiry-day
-/// strategies don't collapse the target curve into intrinsic immediately.
+/// Days-to-expiry for a leg, actual/365.
+///
+/// Returns 0 for an expiry that is today or already past — on expiry day the
+/// target curve SHOULD collapse to intrinsic, because that is what the position
+/// is actually worth. (An earlier comment here claimed a 1-day floor; no such
+/// floor was ever implemented, and adding one would overstate the remaining
+/// time value of a 0-DTE position.) The literal 1 below is only the
+/// unparseable-date fallback, where assuming "expires today" would be worse.
 int days_to_expiry(const QString& expiry) {
     QDate exp = QDate::fromString(expiry, "dd-MMM-yy");
     if (!exp.isValid())
@@ -46,8 +52,7 @@ double leg_pnl_expiry(const StrategyLeg& leg, double S) {
 }
 
 /// Per-leg P/L at a given spot, target date — BSM-priced.
-double leg_pnl_target(const StrategyLeg& leg, double S, int days_remaining,
-                      double r, double sigma_fallback) {
+double leg_pnl_target(const StrategyLeg& leg, double S, int days_remaining, double r, double sigma_fallback) {
     const double signed_units = double(leg.lots) * double(leg.lot_size);
     if (days_remaining <= 0)
         return leg_pnl_expiry(leg, S);
@@ -86,7 +91,7 @@ double net_call_lots(const Strategy& s) {
     return n;
 }
 
-}  // namespace
+} // namespace
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -119,12 +124,21 @@ QVector<PayoffPoint> compute_payoff(const Strategy& s, const PayoffComputeOption
     // Pick the strategy's nearest-expiry leg as the BSM time-to-expiry anchor.
     // All single-expiry templates share a date; for hand-edited mixed-expiry
     // strategies we use the leg-specific expiry inside leg_pnl_target.
-    int dte_strategy = 0;
+    // Plain minimum over the ACTIVE legs. The previous form
+    //     if (dte_strategy == 0 || (d > 0 && d < dte_strategy))
+    // skipped any leg with d == 0 unless it happened to come first, so a
+    // 0-DTE leg in a multi-expiry strategy failed to clamp days_to_target —
+    // the target curve then priced an already-expired leg as if it still had
+    // time value. Inactive legs are excluded so a toggled-off leg can't drag
+    // the whole strategy's time anchor.
+    int dte_strategy = std::numeric_limits<int>::max();
     for (const auto& leg : s.legs) {
-        const int d = days_to_expiry(leg.expiry);
-        if (dte_strategy == 0 || (d > 0 && d < dte_strategy))
-            dte_strategy = d;
+        if (!leg.is_active)
+            continue;
+        dte_strategy = std::min(dte_strategy, days_to_expiry(leg.expiry));
     }
+    if (dte_strategy == std::numeric_limits<int>::max())
+        dte_strategy = 0; // no active legs — nothing to project forward
     const int days_target_capped = std::clamp(opts.days_to_target, 0, dte_strategy);
 
     out.reserve(n);
@@ -164,9 +178,12 @@ QVector<double> compute_breakevens(const QVector<PayoffPoint>& curve) {
             bes.append(curve[i].spot + t * (curve[i + 1].spot - curve[i].spot));
         }
     }
+    // The loop only looks at each sample as the LEFT edge of a segment, so a curve
+    // that touches zero exactly on its final sample would drop that breakeven.
+    if (curve.last().pnl_expiry == 0)
+        bes.append(curve.last().spot);
     std::sort(bes.begin(), bes.end());
-    bes.erase(std::unique(bes.begin(), bes.end(),
-                          [](double a, double b) { return std::abs(a - b) < 1e-3; }),
+    bes.erase(std::unique(bes.begin(), bes.end(), [](double a, double b) { return std::abs(a - b) < 1e-3; }),
               bes.end());
     return bes;
 }
@@ -183,14 +200,43 @@ MaxPnL compute_max_pnl(const QVector<PayoffPoint>& curve, const Strategy& s) {
         if (p.pnl_expiry < m.max_loss)
             m.max_loss = p.pnl_expiry;
     }
+    // The sampled curve only spans roughly spot ±30%, but the expiry payoff is
+    // piecewise linear with kinks ONLY at the leg strikes, so its true extremes sit
+    // at S = 0, at a strike, or at infinity (handled below). Evaluate the first two
+    // exactly and let them compete with the sampled min/max:
+    //   * S = 0 is where a net-short-put book bottoms out — reporting the value at
+    //     0.7*spot as "Max Loss" understates a short put badly, so a trader sizing
+    //     off the ribbon or the order-confirm dialog under-reserves margin;
+    //   * a strike outside the ±30% window (a far-OTM protective wing, a deep-ITM
+    //     leg) is a kink the sampling never lands on, so it could hide the true
+    //     max profit / max loss of a spread.
+    auto fold_exact = [&](double spot) {
+        double pnl = 0.0;
+        for (const auto& leg : s.legs) {
+            if (!leg.is_active || leg.lots == 0)
+                continue;
+            pnl += leg_pnl_expiry(leg, spot);
+        }
+        m.max_profit = std::max(m.max_profit, pnl);
+        m.max_loss = std::min(m.max_loss, pnl);
+    };
+    fold_exact(0.0);
+    for (const auto& leg : s.legs) {
+        if (leg.is_active && leg.lots != 0 && leg.strike > 0)
+            fold_exact(leg.strike);
+    }
+
     const double net_calls = net_call_lots(s);
     if (net_calls > 0) {
         m.profit_unbounded = true;
         m.max_profit = std::numeric_limits<double>::infinity();
     } else if (net_calls < 0) {
+        // Short calls: loss grows without bound as S -> infinity.
         m.loss_unbounded = true;
         m.max_loss = -std::numeric_limits<double>::infinity();
     }
+    // Note: net-short PUTS do NOT make the loss unbounded — the payoff floors
+    // at S = 0, which is exactly what pnl_at_zero above now captures.
     return m;
 }
 
@@ -277,7 +323,7 @@ OptionGreeks combined_greeks(const Strategy& s, const OptionChain& chain) {
                 g = &it.value();
         }
         if (!g)
-            continue;  // Greeks genuinely not available for this leg — skip
+            continue; // Greeks genuinely not available for this leg — skip
         const double signed_units = double(leg.lots) * double(leg.lot_size);
         combined.delta += signed_units * g->delta;
         combined.gamma += signed_units * g->gamma;
@@ -288,8 +334,7 @@ OptionGreeks combined_greeks(const Strategy& s, const OptionChain& chain) {
     return combined;
 }
 
-StrategyAnalytics compute_all(const Strategy& s, const OptionChain& chain,
-                              const PayoffComputeOptions& opts) {
+StrategyAnalytics compute_all(const Strategy& s, const OptionChain& chain, const PayoffComputeOptions& opts) {
     StrategyAnalytics out;
     if (s.legs.isEmpty())
         return out;
@@ -302,22 +347,31 @@ StrategyAnalytics compute_all(const Strategy& s, const OptionChain& chain,
     const MaxPnL pnl = compute_max_pnl(curve, s);
     const QVector<double> bes = compute_breakevens(curve);
 
-    // Pick a t for POP — use the strategy's nearest-leg expiry.
-    int dte = 0;
+    // Pick a t for POP — the strategy's nearest ACTIVE-leg expiry (same rule as
+    // compute_payoff). The old `dte == 0 || (d > 0 && d < dte)` form skipped any
+    // leg with d == 0 unless it was first, so a 0-DTE leg in a multi-expiry
+    // strategy never set the horizon, and toggled-off legs still did.
+    int dte = std::numeric_limits<int>::max();
     for (const auto& leg : s.legs) {
-        const int d = days_to_expiry(leg.expiry);
-        if (dte == 0 || (d > 0 && d < dte))
-            dte = d;
+        if (leg.is_active)
+            dte = std::min(dte, days_to_expiry(leg.expiry));
     }
+    if (dte == std::numeric_limits<int>::max())
+        dte = 0;
+    // On expiry day days_to_expiry() is 0 (correct for the payoff curve: intrinsic
+    // only), but compute_pop() returns 0 for t <= 0 — a strategy sitting deep in
+    // profit then read "POP 0.0%". Give the distribution the same one-calendar-day
+    // floor the chain's Greeks use (OptionChainService::compute_t_years).
+    const int dte_for_pop = std::max(dte, 1);
     const double sigma_for_pop = (o.fallback_iv > 0) ? o.fallback_iv : 0.20;
 
     out.combined = combined_greeks(s, chain);
     out.max_profit = pnl.max_profit;
     out.max_loss = pnl.max_loss;
     out.breakevens = bes;
-    out.pop = compute_pop(s, o.current_spot, t_years(dte), o.risk_free_rate, sigma_for_pop);
+    out.pop = compute_pop(s, o.current_spot, t_years(dte_for_pop), o.risk_free_rate, sigma_for_pop);
     out.premium_paid = net_premium(s);
-    out.margin_required = 0;       // Phase 6 wires IBroker::get_basket_margins
+    out.margin_required = 0; // Phase 6 wires IBroker::get_basket_margins
     out.margin_estimated = false;
     return out;
 }

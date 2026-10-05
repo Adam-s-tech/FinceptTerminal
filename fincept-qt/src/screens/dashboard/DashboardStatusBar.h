@@ -16,6 +16,8 @@ class NotifPanel;
 
 namespace fincept::screens {
 
+class PendingOrdersBadge;
+
 /// Bottom status bar — session uptime, feed indicators, system status,
 /// and notification bell with unread badge (right side).
 class DashboardStatusBar : public QWidget {
@@ -25,6 +27,12 @@ class DashboardStatusBar : public QWidget {
 
     void set_widget_count(int count);
     void set_connected(bool connected);
+
+  signals:
+    /// Emitted when the API health probe flips between reachable and
+    /// unreachable. DashboardScreen forwards it to the toolbar so the "LIVE"
+    /// badge stops claiming a live feed while the backend is down.
+    void connectivity_changed(bool connected);
 
   protected:
     void showEvent(QShowEvent* event) override;
@@ -50,10 +58,14 @@ class DashboardStatusBar : public QWidget {
     QLabel* layout_caption_lbl_ = nullptr;
     QLabel* feeds_caption_lbl_ = nullptr;
     QLabel* ready_lbl_ = nullptr;
-    int     layout_count_ = 0;
-    bool    feeds_connected_ = true;
-    int     last_latency_ms_ = -2; // -2 = uninitialised, -1 = error
+    int layout_count_ = 0;
+    bool feeds_connected_ = true;
+    int last_latency_ms_ = -2; // -2 = uninitialised, -1 = error
+    /// Last colour applied to mem_label_ — the probe ticks every 5s but the
+    /// colour bucket almost never changes, so skip the CSS reparse.
+    QString mem_color_applied_;
 
+    PendingOrdersBadge* pending_badge_ = nullptr;
     fincept::ui::NotifBell* notif_bell_ = nullptr;
     fincept::ui::NotifPanel* notif_panel_ = nullptr;
 
@@ -61,7 +73,6 @@ class DashboardStatusBar : public QWidget {
     QTimer ping_timer_;
     QTimer mem_timer_;
     QNetworkAccessManager* nam_ = nullptr;
-    QElapsedTimer ping_elapsed_;
 
     qint64 start_time_ = 0;
 };

@@ -6,8 +6,7 @@
 //
 // Part of the partial-class split of PortfolioScreen.cpp.
 
-#include "screens/portfolio/PortfolioScreen.h"
-
+#include "core/events/EventBus.h"
 #include "core/session/ScreenStateManager.h"
 #include "core/symbol/SymbolContext.h"
 #include "core/symbol/SymbolRef.h"
@@ -21,16 +20,19 @@
 #include "screens/portfolio/PortfolioOrderPanel.h"
 #include "screens/portfolio/PortfolioPanelHeader.h"
 #include "screens/portfolio/PortfolioPerfChart.h"
+#include "screens/portfolio/PortfolioScreen.h"
 #include "screens/portfolio/PortfolioSectorPanel.h"
 #include "screens/portfolio/PortfolioStatsRibbon.h"
 #include "screens/portfolio/PortfolioStatusBar.h"
 #include "screens/portfolio/PortfolioTxnPanel.h"
+#include "services/backtesting/BacktestingService.h"
 #include "services/file_manager/FileManagerService.h"
 #include "services/portfolio/PortfolioService.h"
 #include "storage/repositories/SettingsRepository.h"
 #include "ui/theme/Theme.h"
 
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
@@ -98,6 +100,21 @@ void PortfolioScreen::build_ui() {
         }
         update_content_state();
     });
+    connect(command_bar_, &PortfolioCommandBar::backtest_requested, this, [this]() {
+        if (current_summary_.holdings.isEmpty())
+            return;
+        QJsonArray symbols, weights;
+        for (const auto& h : current_summary_.holdings) {
+            symbols.append(h.symbol);
+            weights.append(h.weight / 100.0);
+        }
+        QJsonObject config;
+        config["symbols"] = symbols;
+        config["weights"] = weights;
+        config["initialCapital"] = current_summary_.total_market_value;
+        services::backtest::BacktestingService::instance().set_pending_portfolio_config(config);
+        fincept::EventBus::instance().publish("nav.switch_screen", {{"screen_id", QString("backtesting")}});
+    });
 
     // Stats ribbon
     stats_ribbon_ = new PortfolioStatsRibbon(this);
@@ -139,6 +156,18 @@ void PortfolioScreen::build_ui() {
         blotter_->set_sector_filter(matching);
     });
 
+    // PlanningView "Optimize for this return" → jump to the Optimization sub-tab,
+    // pre-set to the Target Return method at the return the plan needs. The target
+    // used to be dropped here, so the optimizer ran its default method instead.
+    connect(detail_wrapper_, &PortfolioDetailWrapper::optimize_requested, this, [this](double target) {
+        active_detail_ = portfolio::DetailView::Optimization;
+        detail_wrapper_->show_view(portfolio::DetailView::Optimization, current_summary_,
+                                   current_summary_.portfolio.currency);
+        detail_wrapper_->set_optimization_target(target);
+        command_bar_->set_detail_view(active_detail_);
+        update_content_state();
+    });
+
     // FFN view
     ffn_view_ = new PortfolioFFNView(this);
     connect(ffn_view_, &PortfolioFFNView::back_requested, this, [this]() {
@@ -168,9 +197,7 @@ void PortfolioScreen::build_ui() {
     insights_scrim_->hide();
 
     insights_panel_ = new PortfolioInsightsPanel(this);
-    connect(insights_panel_, &PortfolioInsightsPanel::close_requested, this, [this]() {
-        insights_scrim_->hide();
-    });
+    connect(insights_panel_, &PortfolioInsightsPanel::close_requested, this, [this]() { insights_scrim_->hide(); });
 
     // Wire export/import/AI/Agent signals from CommandBar
     connect(command_bar_, &PortfolioCommandBar::export_csv_requested, this, [this]() {
@@ -179,16 +206,19 @@ void PortfolioScreen::build_ui() {
         QString path = QFileDialog::getSaveFileName(this, tr("Export CSV"), "portfolio.csv", tr("CSV Files (*.csv)"));
         if (!path.isEmpty()) {
             services::PortfolioService::instance().export_csv(selected_id_, path);
-            services::FileManagerService::instance().import_file(path, "portfolio");
+            if (QFileInfo::exists(path)) // a failed export reports via export_failed
+                services::FileManagerService::instance().import_file(path, "portfolio");
         }
     });
     connect(command_bar_, &PortfolioCommandBar::export_json_requested, this, [this]() {
         if (selected_id_.isEmpty())
             return;
-        QString path = QFileDialog::getSaveFileName(this, tr("Export JSON"), "portfolio.json", tr("JSON Files (*.json)"));
+        QString path =
+            QFileDialog::getSaveFileName(this, tr("Export JSON"), "portfolio.json", tr("JSON Files (*.json)"));
         if (!path.isEmpty()) {
             services::PortfolioService::instance().export_json(selected_id_, path);
-            services::FileManagerService::instance().import_file(path, "portfolio");
+            if (QFileInfo::exists(path)) // a failed export reports via export_failed
+                services::FileManagerService::instance().import_file(path, "portfolio");
         }
     });
     connect(command_bar_, &PortfolioCommandBar::import_requested, this, [this]() {
@@ -217,28 +247,53 @@ void PortfolioScreen::build_ui() {
     connect(command_bar_, &PortfolioCommandBar::agent_run_requested, this,
             [open_insights]() { open_insights(PortfolioInsightsPanel::Tab::Agent); });
 
+    // Export failures used to be log-only: the save dialog closed and nothing
+    // happened. Tell the user (only when this screen is the one on display -
+    // the signal is service-wide).
+    connect(&services::PortfolioService::instance(), &services::PortfolioService::export_failed, this,
+            [this](const QString& file_path, const QString& error) {
+                if (!isVisible())
+                    return;
+                QMessageBox::warning(this, tr("Export Failed"),
+                                     tr("Could not export the portfolio to:\n%1\n\n%2").arg(file_path, error));
+            });
+
     // Wire import completion
     connect(&services::PortfolioService::instance(), &services::PortfolioService::import_complete, this,
             [this](portfolio::ImportResult result) {
                 if (result.portfolio_id.isEmpty()) {
-                    QString detail = result.errors.isEmpty()
-                                         ? tr("Import failed with no details.")
-                                         : result.errors.join("\n");
-                    QMessageBox::warning(this, tr("Portfolio Import Failed"),
-                                         tr("Could not import the portfolio.\n\n") + detail +
-                                             tr("\n\nExpected format:\n"
-                                                "{\n"
-                                                "  \"portfolio_name\": \"My Portfolio\",\n"
-                                                "  \"currency\": \"USD\",\n"
-                                                "  \"owner\": \"...\",\n"
-                                                "  \"transactions\": [\n"
-                                                "    {\"date\": \"YYYY-MM-DD\", \"symbol\": \"AAPL\", \"type\": \"BUY\",\n"
-                                                "     \"quantity\": 10, \"price\": 150.0}\n"
-                                                "  ]\n"
-                                                "}"));
+                    QString detail =
+                        result.errors.isEmpty() ? tr("Import failed with no details.") : result.errors.join("\n");
+                    QMessageBox::warning(
+                        this, tr("Portfolio Import Failed"),
+                        tr("Could not import the portfolio.\n\n") + detail +
+                            tr("\n\nExpected format:\n"
+                               "{\n"
+                               "  \"portfolio_name\": \"My Portfolio\",\n"
+                               "  \"currency\": \"USD\",\n"
+                               "  \"owner\": \"...\",\n"
+                               "  \"transactions\": [\n"
+                               "    {\"date\": \"YYYY-MM-DD\", \"symbol\": \"AAPL\", \"type\": \"BUY\",\n"
+                               "     \"quantity\": 10, \"price\": 150.0}\n"
+                               "  ]\n"
+                               "}"));
                     return;
                 }
                 on_portfolio_selected(result.portfolio_id);
+
+                // A partial import (e.g. a SELL with no matching position) used to be
+                // dropped on the floor: the new portfolio simply opened with fewer
+                // holdings than the file implied and no hint why.
+                if (!result.errors.isEmpty()) {
+                    QStringList shown = result.errors.mid(0, 10);
+                    if (result.errors.size() > 10)
+                        shown << tr("… and %1 more").arg(result.errors.size() - 10);
+                    QMessageBox::warning(this, tr("Import Completed With Warnings"),
+                                         tr("Imported %1 transaction(s), but %2 could not be applied:\n\n%3")
+                                             .arg(result.transactions_replayed)
+                                             .arg(result.errors.size())
+                                             .arg(shown.join(QLatin1Char('\n'))));
+                }
             });
 }
 
@@ -249,20 +304,19 @@ void PortfolioScreen::build_ui() {
 // they can be retranslated on QEvent::LanguageChange without reconstructing the
 // card.
 static QPushButton* make_cta_card(const QString& glyph, const QString& title, const QString& subtitle,
-                                  const QString& accent_hex, QWidget* parent,
-                                  QLabel** out_title = nullptr, QLabel** out_subtitle = nullptr) {
+                                  const QString& accent_hex, QWidget* parent, QLabel** out_title = nullptr,
+                                  QLabel** out_subtitle = nullptr) {
     auto* btn = new QPushButton(parent);
     btn->setCursor(Qt::PointingHandCursor);
     btn->setFixedSize(220, 140);
     btn->setObjectName("pfCtaCard");
     btn->setProperty("accent", accent_hex);
     // Square corners — DESIGN_SYSTEM rule 9.1 forbids border-radius.
-    btn->setStyleSheet(
-        QString("QPushButton#pfCtaCard { background:%1; color:%2; border:1px solid %3;"
-                "  text-align:left; padding:16px; }"
-                "QPushButton#pfCtaCard:hover { border-color:%4; background:%5; }")
-            .arg(ui::colors::BG_SURFACE(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM(), accent_hex,
-                 ui::colors::BG_HOVER()));
+    btn->setStyleSheet(QString("QPushButton#pfCtaCard { background:%1; color:%2; border:1px solid %3;"
+                               "  text-align:left; padding:16px; }"
+                               "QPushButton#pfCtaCard:hover { border-color:%4; background:%5; }")
+                           .arg(ui::colors::BG_SURFACE(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM(),
+                                accent_hex, ui::colors::BG_HOVER()));
 
     auto* v = new QVBoxLayout(btn);
     v->setContentsMargins(0, 0, 0, 0);
@@ -280,14 +334,16 @@ static QPushButton* make_cta_card(const QString& glyph, const QString& title, co
                              " background:transparent; border:none;")
                          .arg(ui::colors::TEXT_PRIMARY()));
     v->addWidget(h);
-    if (out_title) *out_title = h;
+    if (out_title)
+        *out_title = h;
 
     auto* p = new QLabel(subtitle);
     p->setWordWrap(true);
     p->setStyleSheet(QString("color:%1; font-size:11px; line-height:1.4; background:transparent; border:none;")
                          .arg(ui::colors::TEXT_TERTIARY()));
     v->addWidget(p);
-    if (out_subtitle) *out_subtitle = p;
+    if (out_subtitle)
+        *out_subtitle = p;
 
     v->addStretch(1);
 
@@ -331,7 +387,8 @@ QWidget* PortfolioScreen::build_empty_state() {
 
     empty_sub_label_ = new QLabel(tr("Create, import, or explore a sample portfolio to get started."));
     empty_sub_label_->setAlignment(Qt::AlignCenter);
-    empty_sub_label_->setStyleSheet(QString("color:%1; font-size:12px; letter-spacing:0.2px;").arg(ui::colors::TEXT_SECONDARY()));
+    empty_sub_label_->setStyleSheet(
+        QString("color:%1; font-size:12px; letter-spacing:0.2px;").arg(ui::colors::TEXT_SECONDARY()));
     layout->addWidget(empty_sub_label_);
 
     layout->addSpacing(24);
@@ -341,25 +398,25 @@ QWidget* PortfolioScreen::build_empty_state() {
     card_row->setAlignment(Qt::AlignCenter);
     card_row->setSpacing(14);
 
-    auto* create_card = make_cta_card("\u25A2", tr("CREATE NEW"),
-                                      tr("Start a fresh portfolio. Name it, pick a currency, "
-                                         "and add holdings one at a time."),
-                                      ui::colors::AMBER(), content,
-                                      &empty_create_card_.title, &empty_create_card_.subtitle);
+    auto* create_card =
+        make_cta_card("\u25A2", tr("CREATE NEW"),
+                      tr("Start a fresh portfolio. Name it, pick a currency, "
+                         "and add holdings one at a time."),
+                      ui::colors::AMBER(), content, &empty_create_card_.title, &empty_create_card_.subtitle);
     connect(create_card, &QPushButton::clicked, this, &PortfolioScreen::on_create_requested);
 
-    auto* import_card = make_cta_card("\u2913", tr("IMPORT JSON"),
-                                      tr("Load an existing portfolio from an exported JSON file. "
-                                         "Merge into an existing portfolio or create a new one."),
-                                      ui::colors::CYAN(), content,
-                                      &empty_import_card_.title, &empty_import_card_.subtitle);
+    auto* import_card =
+        make_cta_card("\u2913", tr("IMPORT JSON"),
+                      tr("Load an existing portfolio from an exported JSON file. "
+                         "Merge into an existing portfolio or create a new one."),
+                      ui::colors::CYAN(), content, &empty_import_card_.title, &empty_import_card_.subtitle);
     connect(import_card, &QPushButton::clicked, command_bar_, &PortfolioCommandBar::import_requested);
 
-    auto* demo_card = make_cta_card("\u25B6", tr("LOAD DEMO"),
-                                    tr("Preview the workspace with a sample diversified portfolio "
-                                       "of 12 major equities."),
-                                    ui::colors::POSITIVE(), content,
-                                    &empty_demo_card_.title, &empty_demo_card_.subtitle);
+    auto* demo_card =
+        make_cta_card("\u25B6", tr("LOAD DEMO"),
+                      tr("Preview the workspace with a sample diversified portfolio "
+                         "of 12 major equities."),
+                      ui::colors::POSITIVE(), content, &empty_demo_card_.title, &empty_demo_card_.subtitle);
     connect(demo_card, &QPushButton::clicked, this, [this]() { load_demo_portfolio(); });
 
     card_row->addWidget(create_card);
@@ -432,17 +489,21 @@ QWidget* PortfolioScreen::build_loading_state() {
     anim->setEndValue(1.0);
     anim->setLoopCount(-1);
     anim->setEasingCurve(QEasingCurve::InOutSine);
-    // Ping-pong: swap start/end each loop
-    connect(anim, &QPropertyAnimation::finished, anim, [anim]() {
+    // Ping-pong: swap start/end each loop. finished() never fires for an infinite
+    // loop (loopCount -1), so this swap was dead code and the pulse restarted
+    // abruptly each cycle; currentLoopChanged fires at every loop boundary.
+    connect(anim, &QAbstractAnimation::currentLoopChanged, anim, [anim](int) {
         auto s = anim->startValue();
         anim->setStartValue(anim->endValue());
         anim->setEndValue(s);
     });
-    anim->start();
+    // Not started here: an infinite animation ticks ~60x/s for the life of the
+    // screen even while hidden. update_loading_anim() runs it only while the
+    // skeleton page is actually showing (P3/P9).
+    loading_anim_ = anim;
 
     return w;
 }
-
 
 void PortfolioScreen::update_content_state() {
     bool has_portfolios = !portfolios_.isEmpty();
@@ -482,10 +543,20 @@ void PortfolioScreen::update_content_state() {
         command_bar_->setVisible(true);
         command_bar_->set_has_selection(true);
     }
+    update_loading_anim();
+}
+
+void PortfolioScreen::update_loading_anim() {
+    if (!loading_anim_ || !content_stack_)
+        return;
+    const bool want = isVisible() && content_stack_->currentIndex() == 1;
+    if (want && loading_anim_->state() != QAbstractAnimation::Running)
+        loading_anim_->start();
+    else if (!want && loading_anim_->state() == QAbstractAnimation::Running)
+        loading_anim_->stop();
 }
 
 // ── Lifecycle (P3) ───────────────────────────────────────────────────────────
-
 
 QWidget* PortfolioScreen::build_main_view() {
     auto* w = new QWidget(this);
@@ -512,12 +583,11 @@ QWidget* PortfolioScreen::build_main_view() {
     // Trigger backfill when the user clicks a period that needs more history
     // than we have cached. PortfolioService re-emits history_backfilled when
     // done, which routes back through the chart via load_snapshots.
-    connect(perf_chart_, &PortfolioPerfChart::backfill_period_requested, this,
-            [this](const QString& period) {
-                if (selected_id_.isEmpty())
-                    return;
-                services::PortfolioService::instance().backfill_history(selected_id_, period);
-            });
+    connect(perf_chart_, &PortfolioPerfChart::backfill_period_requested, this, [this](const QString& period) {
+        if (selected_id_.isEmpty())
+            return;
+        services::PortfolioService::instance().backfill_history(selected_id_, period);
+    });
 
     sector_panel_ = new PortfolioSectorPanel;
     connect(sector_panel_, &PortfolioSectorPanel::sector_selected, this, [this](const QString& sector) {
@@ -582,10 +652,9 @@ QWidget* PortfolioScreen::build_main_view() {
     filter_wrap->setFixedHeight(22);
     filter_wrap->setMinimumWidth(200);
     filter_wrap->setObjectName("pfFilterWrap");
-    filter_wrap->setStyleSheet(
-        QString("#pfFilterWrap { background:%1; border:1px solid %2; }"
-                "#pfFilterWrap:focus-within { border-color:%3; }")
-            .arg(ui::colors::BG_BASE(), ui::colors::BORDER_DIM(), ui::colors::AMBER()));
+    filter_wrap->setStyleSheet(QString("#pfFilterWrap { background:%1; border:1px solid %2; }"
+                                       "#pfFilterWrap:focus-within { border-color:%3; }")
+                                   .arg(ui::colors::BG_BASE(), ui::colors::BORDER_DIM(), ui::colors::AMBER()));
     auto* filter_hl = new QHBoxLayout(filter_wrap);
     filter_hl->setContentsMargins(8, 0, 8, 0);
     filter_hl->setSpacing(6);
@@ -597,11 +666,11 @@ QWidget* PortfolioScreen::build_main_view() {
 
     positions_filter_edit_ = new QLineEdit;
     positions_filter_edit_->setPlaceholderText(tr("Filter positions…"));
-    positions_filter_edit_->setStyleSheet(QString("QLineEdit { background:transparent; color:%1; border:none;"
-                                                  "  font-size:11px; font-family:%2; }"
-                                                  "QLineEdit:focus { color:%3; }")
-                                              .arg(ui::colors::TEXT_SECONDARY(), ui::fonts::DATA_FAMILY,
-                                                   ui::colors::TEXT_PRIMARY()));
+    positions_filter_edit_->setStyleSheet(
+        QString("QLineEdit { background:transparent; color:%1; border:none;"
+                "  font-size:11px; font-family:%2; }"
+                "QLineEdit:focus { color:%3; }")
+            .arg(ui::colors::TEXT_SECONDARY(), ui::fonts::DATA_FAMILY, ui::colors::TEXT_PRIMARY()));
     filter_hl->addWidget(positions_filter_edit_, 1);
 
     header_hl->addWidget(filter_wrap);
@@ -611,6 +680,15 @@ QWidget* PortfolioScreen::build_main_view() {
     // Bottom: positions blotter
     blotter_ = new PortfolioBlotter;
     connect(blotter_, &PortfolioBlotter::symbol_selected, this, &PortfolioScreen::on_symbol_selected);
+    // Double-click / context menu on a position -> Equity Research / News. The
+    // router constructs the target if needed and hands it the symbol.
+    connect(blotter_, &PortfolioBlotter::open_symbol_requested, this,
+            [](const QString& screen_id, const QString& symbol) {
+                if (symbol.isEmpty())
+                    return;
+                fincept::EventBus::instance().publish("nav.open_symbol",
+                                                      {{"screen_id", screen_id}, {"symbol", symbol}});
+            });
     connect(blotter_, &PortfolioBlotter::edit_transaction_requested, this, [this](const QString& symbol) {
         // Load transactions for this symbol, show edit dialog for the most recent one
         services::PortfolioService::instance().load_transactions(selected_id_, 100);
@@ -636,21 +714,41 @@ QWidget* PortfolioScreen::build_main_view() {
                 if (dlg.exec() == QDialog::Accepted) {
                     services::PortfolioService::instance().update_transaction(match->id, dlg.quantity(), dlg.price(),
                                                                               dlg.date(), dlg.notes());
+                    // update_transaction() emits nothing, so the history panel kept
+                    // showing the old numbers until the next 60 s poll.
+                    services::PortfolioService::instance().load_transactions(selected_id_, 50);
                 }
             },
             Qt::SingleShotConnection);
     });
     connect(blotter_, &PortfolioBlotter::delete_position_requested, this, [this](const QString& symbol) {
-        auto* h = find_holding(symbol);
+        const auto* h = find_holding(symbol);
         if (!h)
             return;
-        ConfirmDeleteDialog dlg(QString("%1 (%2 shares)").arg(symbol).arg(h->quantity, 0, 'f', 2), this);
-        if (dlg.exec() == QDialog::Accepted) {
-            services::PortfolioService::instance().sell_asset(selected_id_, symbol, h->quantity, h->current_price);
-        }
+        // `h` points into current_summary_, which the refresh timer replaces while a
+        // modal dialog is open - the old code read h->quantity AFTER exec(), i.e. from
+        // freed memory whenever a refresh landed in between. Copy what is needed first.
+        const double qty = h->quantity;
+        const double price = h->current_price;
+        const QString currency = current_summary_.portfolio.currency;
+        // Not ConfirmDeleteDialog: that one is worded for deleting a whole portfolio
+        // ("DELETE PORTFOLIO ... remove all holdings and transactions"), which is
+        // both wrong and alarming for closing a single position.
+        const auto answer = QMessageBox::question(
+            this, tr("Close Position"),
+            tr("Close the entire %1 position (%2 shares) at the last price of %3 %4?\n\n"
+               "A SELL transaction is recorded; the transaction history is kept.")
+                .arg(symbol, QString::number(qty, 'f', 4), currency, QString::number(price, 'f', 2)),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer == QMessageBox::Yes)
+            services::PortfolioService::instance().sell_asset(selected_id_, symbol, qty, price);
     });
     connect(positions_filter_edit_, &QLineEdit::textChanged, blotter_, &PortfolioBlotter::set_filter);
 
+    // Guarantee the positions table is tall enough to read several rows even on
+    // shorter windows (it still expands to fill the 60% stretch when space
+    // allows). The table itself shows a vertical scrollbar as-needed.
+    blotter_->setMinimumHeight(300);
     blotter_layout->addWidget(blotter_, 1);
 
     root_layout->addWidget(blotter_section, 60); // 60% of vertical space
@@ -659,12 +757,17 @@ QWidget* PortfolioScreen::build_main_view() {
     // Sits at the bottom of the main view, full-width. Defaults open at 140px;
     // user can collapse via the chevron in its header.
     txn_panel_ = new PortfolioTxnPanel;
-    txn_panel_->setFixedHeight(140);
+    txn_panel_->setFixedHeight(240);
     root_layout->addWidget(txn_panel_);
+    connect(txn_panel_, &PortfolioTxnPanel::symbol_activated, this, [](const QString& symbol) {
+        fincept::EventBus::instance().publish("nav.open_symbol",
+                                              {{"screen_id", QStringLiteral("equity_research")}, {"symbol", symbol}});
+    });
     connect(txn_panel_, &PortfolioTxnPanel::collapse_toggled, this, [this](bool collapsed) {
         // Header is 30px, table content is the rest. When collapsed, shrink
-        // to header height; when expanded, restore to 140px.
-        txn_panel_->setFixedHeight(collapsed ? 30 : 140);
+        // to header height; when expanded, restore to the full height (the
+        // table shows a vertical scrollbar as-needed for longer histories).
+        txn_panel_->setFixedHeight(collapsed ? 30 : 240);
     });
 
     // Order panel is a floating overlay (parented to PortfolioScreen, not in layout)
@@ -675,17 +778,26 @@ QWidget* PortfolioScreen::build_main_view() {
     connect(order_panel_, &PortfolioOrderPanel::close_requested, this, &PortfolioScreen::on_order_panel_close);
     connect(order_panel_, &PortfolioOrderPanel::buy_submitted, this, [this]() {
         AddAssetDialog dlg(this);
+        // The order panel always opens against a selected position — carry that
+        // ticker (and its live price) into the dialog instead of making the user
+        // retype a symbol the terminal is already showing.
+        if (const auto* h = find_holding(selected_symbol_))
+            dlg.preset(h->symbol, h->current_price);
         if (dlg.exec() == QDialog::Accepted) {
             services::PortfolioService::instance().add_asset(selected_id_, dlg.symbol(), dlg.quantity(), dlg.price());
         }
     });
     connect(order_panel_, &PortfolioOrderPanel::sell_submitted, this, [this]() {
-        auto* h = find_holding(selected_symbol_);
+        const auto* h = find_holding(selected_symbol_);
         if (!h)
             return;
-        SellAssetDialog dlg(h->symbol, h->quantity, this);
+        // Copy before exec(): a refresh during the modal loop replaces
+        // current_summary_ and would leave `h` dangling.
+        const QString symbol = h->symbol;
+        const double held = h->quantity;
+        SellAssetDialog dlg(symbol, held, this);
         if (dlg.exec() == QDialog::Accepted) {
-            services::PortfolioService::instance().sell_asset(selected_id_, h->symbol, dlg.quantity(), dlg.price());
+            services::PortfolioService::instance().sell_asset(selected_id_, symbol, dlg.quantity(), dlg.price());
         }
     });
 
@@ -712,16 +824,27 @@ void PortfolioScreen::update_main_view_data() {
     sector_panel_->set_currency(currency);
 
     blotter_->set_holdings(current_summary_.holdings);
+    // After set_holdings so the hub subscriptions already match the symbol set.
+    // Previously only showEvent() did this, with whatever summary existed then -
+    // nothing on first load, and the next holdings refresh dropped it again.
+    blotter_->hub_resubscribe_broker_quotes(current_summary_.portfolio.broker_account_id);
     if (positions_count_label_)
         positions_count_label_->setText(QString::number(current_summary_.holdings.size()));
 
     order_panel_->set_currency(currency);
 
-    // Re-select the current symbol
+    // Re-select the current symbol. find_holding() returns nullptr once the
+    // position is gone (sold out, portfolio emptied) — always push the result
+    // through so the order panel drops its stale copy instead of keeping a row
+    // that no longer exists.
     if (!selected_symbol_.isEmpty()) {
         heatmap_->set_selected_symbol(selected_symbol_);
         blotter_->set_selected_symbol(selected_symbol_);
         order_panel_->set_holding(find_holding(selected_symbol_));
+        if (!find_holding(selected_symbol_))
+            selected_symbol_.clear();
+    } else {
+        order_panel_->set_holding(nullptr);
     }
 }
 

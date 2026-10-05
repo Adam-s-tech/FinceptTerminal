@@ -1,22 +1,29 @@
 // src/screens/code_editor/CodeEditorScreen.h
-// Python Colab — Jupyter notebook with Obsidian design system.
-// Responsive cells, markdown rendering, keyboard shortcuts, collapsible output.
+// Fincept Notebook — two-view workspace (Library + Editor) on the Obsidian
+// design system. Library lists prebuilt finance notebooks as cards; the editor
+// runs responsive notebook cells with markdown rendering and collapsible output.
 #pragma once
 
 #include "screens/common/IStatefulScreen.h"
 
+#include <QEvent>
+#include <QGridLayout>
 #include <QHideEvent>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QShowEvent>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QTextBrowser>
 #include <QTextEdit>
 #include <QVBoxLayout>
+#include <QVector>
 #include <QWidget>
 
 namespace fincept::screens {
@@ -70,6 +77,10 @@ class CellWidget : public QWidget {
     void set_outputs(const QVector<CellOutput>& outputs, int exec_count);
     void set_selected(bool selected);
     void set_index(int index);
+    /// Keep the widget's copy of the custom cell name in step with a rename —
+    /// cell_data() reads it back, so without this a rename was overwritten by the
+    /// stale title on the next sync/save.
+    void set_title(const QString& title) { title_ = title; }
     QString cell_id() const { return cell_id_; }
 
   signals:
@@ -86,12 +97,19 @@ class CellWidget : public QWidget {
     void enterEvent(QEnterEvent* event) override;
     void leaveEvent(QEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
+    void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    /// Watches md_preview_ so a click on the rendered markdown drops back into
+    /// the source editor. The filter was installed but never implemented, so
+    /// the preview was a dead end for mouse users.
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
   private:
     void build_ui();
     void update_gutter();
     void adjust_editor_height();
     void render_markdown();
+    void retranslateUi();
 
     QString cell_id_;
     QString cell_type_;
@@ -102,6 +120,7 @@ class CellWidget : public QWidget {
     bool hovered_ = false;
     bool output_collapsed_ = false;
     bool md_editing_ = false;
+    bool adjusting_height_ = false; // guards adjust_editor_height re-entrancy
     QString title_;
 
     // Gutter
@@ -116,6 +135,11 @@ class CellWidget : public QWidget {
 
     // Hover toolbar
     QWidget* toolbar_ = nullptr;
+    QPushButton* run_btn_ = nullptr;
+    QPushButton* type_btn_ = nullptr;
+    QPushButton* up_btn_ = nullptr;
+    QPushButton* dn_btn_ = nullptr;
+    QPushButton* del_btn_ = nullptr;
 
     // Output area
     QWidget* output_area_ = nullptr;
@@ -140,8 +164,17 @@ class CellNavigator : public QWidget {
     void cell_selected(const QString& cell_id);
     void rename_requested(const QString& cell_id);
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private:
+    void retranslateUi();
+
     QListWidget* list_ = nullptr;
+    QLabel* header_title_ = nullptr;
+    // Cached so rebuild() can re-render after a language change.
+    QVector<NotebookCell> last_cells_;
+    QString last_selected_id_;
 };
 
 // -- Main screen --------------------------------------------------------------
@@ -151,6 +184,11 @@ class CodeEditorScreen : public QWidget, public IStatefulScreen {
   public:
     explicit CodeEditorScreen(QWidget* parent = nullptr);
 
+    /// Load a notebook (.ipynb) from disk into the editor and switch to the
+    /// editor view. Public entry point used by the File Manager and the
+    /// Library "OPEN" action. Returns true if the file was loaded.
+    bool open_notebook_path(const QString& path);
+
     void restore_state(const QVariantMap& state) override;
     QVariantMap save_state() const override;
     QString state_key() const override { return "code_editor"; }
@@ -159,6 +197,8 @@ class CodeEditorScreen : public QWidget, public IStatefulScreen {
   protected:
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
+    void changeEvent(QEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
   private slots:
     void on_add_cell();
@@ -178,11 +218,34 @@ class CodeEditorScreen : public QWidget, public IStatefulScreen {
     void on_toggle_sidebar();
     void on_rename_cell(const QString& cell_id);
 
+    // Header / Library
+    void on_view_changed(int index); // 0 = Library, 1 = Editor
+    void on_library_search(const QString& text);
+    void on_open_library_entry(int catalog_index);
+
   private:
     void build_ui();
+    QWidget* build_header();
+    QWidget* build_editor_page();
+    QWidget* build_library_page(); // CodeEditorScreen_Library.cpp
+    void populate_library();       // CodeEditorScreen_Library.cpp
+    void relayout_library_cards(); // CodeEditorScreen_Library.cpp
+    void set_view(int index);
+    bool load_notebook_from_path(const QString& path);
     QWidget* build_toolbar();
     QWidget* build_status_bar();
+    void retranslateUi();
     void rebuild_cells();
+
+    /// Copy every live CellWidget's editor text back into cells_. Anything that
+    /// tears down and re-creates the cell widgets must call this first or the
+    /// user's in-progress typing is silently discarded.
+    void sync_cells_from_widgets();
+    /// Canonical string used to detect unsaved edits (type + source per cell).
+    QString notebook_fingerprint() const;
+    /// True if the notebook has no unsaved changes, or the user agreed to
+    /// discard them. `action` names the operation in the prompt.
+    bool confirm_discard_changes(const QString& action);
     void add_cell_after(const QString& after_id, const QString& type);
     int find_cell_index(const QString& cell_id) const;
     CellWidget* find_cell_widget(const QString& cell_id) const;
@@ -195,6 +258,12 @@ class CodeEditorScreen : public QWidget, public IStatefulScreen {
     QVector<NotebookCell> cells_;
     int execution_counter_ = 0;
     QString notebook_path_;
+    /// Fingerprint at the last new/open/save — compared against the live one to
+    /// detect unsaved edits.
+    QString clean_fingerprint_;
+    /// Cells still waiting on a PythonRunner callback. RUN ALL queues several,
+    /// so a single bool would clear the "BUSY" badge on the first return.
+    int pending_runs_ = 0;
 
     // UI
     QSplitter* splitter_ = nullptr;
@@ -206,6 +275,43 @@ class CodeEditorScreen : public QWidget, public IStatefulScreen {
     QLabel* kernel_label_ = nullptr;
     QString selected_cell_id_;
     bool sidebar_visible_ = true;
+
+    // Toolbar / status-bar text widgets (cached for retranslateUi)
+    QPushButton* btn_new_ = nullptr;
+    QPushButton* btn_open_ = nullptr;
+    QPushButton* btn_save_ = nullptr;
+    QPushButton* btn_add_cell_ = nullptr;
+    QPushButton* btn_clear_out_ = nullptr;
+    QPushButton* btn_run_all_ = nullptr;
+    QPushButton* btn_sidebar_ = nullptr;
+    QLabel* py_label_ = nullptr;
+    QLabel* shortcuts_label_ = nullptr;
+
+    // Tracks whether the kernel is busy so retranslateUi can re-render the badge.
+    bool kernel_busy_ = false;
+    void refresh_kernel_label();
+
+    // ── Header + two-view stack ──────────────────────────────────────────────
+    QStackedWidget* view_stack_ = nullptr;
+    int active_view_ = 0; // 0 = Library, 1 = Editor
+    QLabel* header_title_ = nullptr;
+    QVector<QPushButton*> view_btns_; // [LIBRARY, EDITOR]
+    QLineEdit* lib_search_input_ = nullptr;
+    QPushButton* header_new_btn_ = nullptr;
+
+    // ── Library view ─────────────────────────────────────────────────────────
+    QWidget* library_page_ = nullptr;
+    QLabel* lib_toolbar_lbl_ = nullptr;
+    QLabel* lib_count_lbl_ = nullptr;
+    QScrollArea* lib_scroll_ = nullptr;
+    QWidget* cards_container_ = nullptr;
+    QGridLayout* cards_layout_ = nullptr;
+    QVector<QPushButton*> cat_chips_;
+    QVector<QPushButton*> diff_chips_;
+    QString lib_category_filter_ = "All";
+    QString lib_difficulty_filter_ = "All";
+    QString lib_search_text_;
+    int lib_columns_ = 0; // last computed column count (re-flow guard)
 };
 
 } // namespace fincept::screens

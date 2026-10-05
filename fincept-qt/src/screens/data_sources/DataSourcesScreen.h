@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPoint>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QShowEvent>
@@ -34,6 +35,7 @@ class DataSourcesScreen : public QWidget, public fincept::screens::IStatefulScre
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void changeEvent(QEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
 
   private slots:
@@ -69,7 +71,6 @@ class DataSourcesScreen : public QWidget, public fincept::screens::IStatefulScre
     void setup_ui();
     void apply_screen_styles();
     QWidget* build_screen_header();
-    QWidget* build_command_bar(); // stub — kept for compat
     QWidget* build_stats_strip();
     QWidget* build_tab_bar();
     QWidget* build_browse_page();
@@ -82,13 +83,21 @@ class DataSourcesScreen : public QWidget, public fincept::screens::IStatefulScre
     void build_category_ladder();
     void build_connector_table();
     void build_connections_table();
+    /// Single entry point for "the filter text changed" — rebuilds every view
+    /// that depends on it. Driven by `search_debounce_`, never called directly
+    /// from a textChanged signal.
+    void rebuild_all_views();
     void update_stats_strip();
     void update_provider_ladder();
     void update_detail_panel();
     void update_action_states();
+    void retranslateUi();
     void show_config_dialog(const ConnectorConfig& config, const QString& edit_id = "", bool duplicate = false);
     void update_connection_status_cell(const QString& conn_id, bool ok, const QString& msg);
     void apply_stat_filter(int stat_index);
+    /// Right-click menu for one saved connection: edit / duplicate / test / delete.
+    /// These slots existed but nothing in the UI could reach them.
+    void show_connection_menu(const QString& conn_id, const QPoint& global_pos);
 
     QVector<ConnectorConfig> filtered_connectors() const;
     QVector<DataSource> filtered_connection_rows() const;
@@ -141,12 +150,46 @@ class DataSourcesScreen : public QWidget, public fincept::screens::IStatefulScre
     // ── Connections table ─────────────────────────────────────────────────────
     QTableWidget* connections_table_ = nullptr;
 
+    // ── Static chrome cached for retranslateUi ──────────────────────────────────
+    QLabel* header_title_ = nullptr;
+    QLabel* header_subtitle_ = nullptr;
+    QPushButton* import_btn_ = nullptr;
+    QPushButton* export_btn_ = nullptr;
+    QPushButton* tpl_btn_ = nullptr;
+    QLabel* universe_stat_label_ = nullptr;
+    QLabel* configured_stat_label_ = nullptr;
+    QLabel* active_stat_label_ = nullptr;
+    QLabel* auth_stat_label_ = nullptr;
+    QPushButton* browse_tab_ = nullptr;
+    QPushButton* conns_tab_ = nullptr;
+    QLabel* category_hdr_title_ = nullptr;
+    QLabel* provider_hdr_title_ = nullptr;
+    QLabel* connector_panel_title_ = nullptr;
+    QLabel* inspector_hdr_title_ = nullptr;
+    QLabel* detail_category_label_ = nullptr;
+    QLabel* detail_transport_label_ = nullptr;
+    QLabel* detail_auth_label_ = nullptr;
+    QLabel* detail_test_label_ = nullptr;
+    QLabel* detail_fields_label_ = nullptr;
+    QLabel* detail_configured_label_ = nullptr;
+    QLabel* detail_enabled_label_ = nullptr;
+    QLabel* detail_last_status_label_ = nullptr;
+    QLabel* config_fields_label_ = nullptr;
+    QLabel* detail_saved_conns_label_ = nullptr;
+    QLabel* conns_page_title_ = nullptr;
+    QPushButton* conns_add_btn_ = nullptr;
+
     // ── Page stack ────────────────────────────────────────────────────────────
     QStackedWidget* page_stack_ = nullptr;
 
     // ── Timers ────────────────────────────────────────────────────────────────
     QTimer* clock_timer_ = nullptr;
     QTimer* poll_timer_ = nullptr;
+    /// Coalesces keystrokes in either search box into one rebuild. A full
+    /// rebuild walks ~380 connectors and tears down every connection row
+    /// (checkbox + label per row) — doing that per keystroke rebuilt the table
+    /// under the user's cursor mid-word.
+    QTimer* search_debounce_ = nullptr;
 
     // ── State ─────────────────────────────────────────────────────────────────
     enum class ViewMode { Gallery, Connections };
@@ -160,6 +203,10 @@ class DataSourcesScreen : public QWidget, public fincept::screens::IStatefulScre
     int stat_filter_ = -1; // -1 = none, 0-3 = stat box index
     QString conn_search_text_;
     QMap<QString, QPair<bool, QString>> live_status_cache_;
+    // Round-robin cursor into the enabled-connection list so on_poll_timer
+    // probes a bounded slice per tick instead of fanning out one blocking
+    // worker thread per connection.
+    int poll_cursor_ = 0;
 };
 
 } // namespace fincept::screens::datasources

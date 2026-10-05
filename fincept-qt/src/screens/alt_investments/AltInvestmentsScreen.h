@@ -3,6 +3,7 @@
 
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QEvent>
 #include <QFrame>
 #include <QJsonObject>
 #include <QLabel>
@@ -56,6 +57,7 @@ class AltInvestmentsScreen : public QWidget, public IStatefulScreen {
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* e) override;
 
   private slots:
     void on_category_changed(int index);
@@ -65,12 +67,16 @@ class AltInvestmentsScreen : public QWidget, public IStatefulScreen {
   private:
     // Setup
     void setup_ui();
+    void retranslateUi();
     QWidget* create_header();
     QWidget* create_left_panel();
     QWidget* create_center_panel();
     QWidget* create_right_panel();
     QWidget* create_status_bar();
     void rebuild_form(int cat, int ana);
+    /// Fill method_combo_ with the analysis methods of `analyzer_id` that the CLI can actually run
+    /// (hidden when there is only one).
+    void populate_methods(const QString& analyzer_id);
 
     // Data / execution
     void run_analysis(const QString& command, const QJsonObject& data);
@@ -89,6 +95,17 @@ class AltInvestmentsScreen : public QWidget, public IStatefulScreen {
     int active_analyzer_ = 0;
     bool loading_ = false;
 
+    // Fixed chrome labels (cached for retranslateUi)
+    QLabel* header_title_ = nullptr;
+    QLabel* header_sub_ = nullptr;
+    QLabel* header_badge_ = nullptr;
+    QLabel* left_title_ = nullptr;
+    QLabel* combo_label_ = nullptr;
+    QLabel* method_label_ = nullptr;
+    QLabel* form_title_ = nullptr;
+    QLabel* right_title_ = nullptr;
+    QLabel* status_left_ = nullptr;
+
     // Left panel
     QList<QPushButton*> cat_btns_;
 
@@ -96,6 +113,7 @@ class AltInvestmentsScreen : public QWidget, public IStatefulScreen {
     QLabel* center_title_ = nullptr;
     QLabel* center_desc_ = nullptr;
     QComboBox* analyzer_combo_ = nullptr;
+    QComboBox* method_combo_ = nullptr; // cli.py --method for the selected analyzer
     QWidget* form_container_ = nullptr; // holds dynamic form rows
     QVBoxLayout* form_layout_ = nullptr;
     QPushButton* analyze_btn_ = nullptr;

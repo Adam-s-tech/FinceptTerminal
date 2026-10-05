@@ -1,5 +1,6 @@
 #include "screens/news/NewsDetailPanel.h"
 
+#include "core/events/EventBus.h"
 #include "core/logging/Logger.h"
 #include "services/file_manager/FileManagerService.h"
 #include "storage/repositories/NewsArticleRepository.h"
@@ -12,17 +13,29 @@
 #include <QDesktopServices>
 #include <QFile>
 #include <QFileInfo>
+#include <QGridLayout>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSizePolicy>
 #include <QTextStream>
 #include <QTimer>
 #include <QUrl>
+#include <QtConcurrent>
 
 namespace fincept::screens {
 
+namespace {
+// Fixed width of the right-hand detail panel. The scroll content is capped to
+// this so word-wrapped labels wrap against it instead of reporting their full
+// unwrapped width — otherwise revealing the AI-analysis section balloons the
+// panel's size hint and pushes it past the screen edge.
+constexpr int kPanelWidth = 420;
+} // namespace
+
 NewsDetailPanel::NewsDetailPanel(QWidget* parent) : QWidget(parent) {
     setObjectName("newsDetailOverlay");
-    setFixedWidth(420);
+    setFixedWidth(kPanelWidth);
     hide(); // start hidden — shown on article click
 
     auto* root = new QVBoxLayout(this);
@@ -37,9 +50,9 @@ NewsDetailPanel::NewsDetailPanel(QWidget* parent) : QWidget(parent) {
     header_layout->setContentsMargins(10, 0, 6, 0);
     header_layout->setSpacing(0);
 
-    auto* title = new QLabel("ARTICLE DETAIL", header);
-    title->setObjectName("newsDetailHeaderTitle");
-    header_layout->addWidget(title);
+    header_title_ = new QLabel(tr("ARTICLE DETAIL"), header);
+    header_title_->setObjectName("newsDetailHeaderTitle");
+    header_layout->addWidget(header_title_);
     header_layout->addStretch();
 
     close_btn_ = new QPushButton("x", header);
@@ -63,7 +76,7 @@ NewsDetailPanel::NewsDetailPanel(QWidget* parent) : QWidget(parent) {
     analyze_timeout_->setInterval(30000);
     connect(analyze_timeout_, &QTimer::timeout, this, [this]() {
         if (analyze_btn_) {
-            analyze_btn_->setText("ANALYZE");
+            analyze_btn_->setText(tr("ANALYZE"));
             analyze_btn_->setEnabled(true);
         }
     });
@@ -73,10 +86,10 @@ QWidget* NewsDetailPanel::build_empty_state() {
     auto* empty = new QWidget(this);
     auto* layout = new QVBoxLayout(empty);
     layout->setAlignment(Qt::AlignCenter);
-    auto* label = new QLabel("Select an article", empty);
-    label->setObjectName("newsDetailEmpty");
-    label->setAlignment(Qt::AlignCenter);
-    layout->addWidget(label);
+    empty_label_ = new QLabel(tr("Select an article"), empty);
+    empty_label_->setObjectName("newsDetailEmpty");
+    empty_label_->setAlignment(Qt::AlignCenter);
+    layout->addWidget(empty_label_);
     return empty;
 }
 
@@ -88,14 +101,22 @@ QWidget* NewsDetailPanel::build_content_view() {
 
     auto* content = new QWidget(scroll);
     content->setObjectName("newsDetailContent");
+    // Cap the content to the panel width so word-wrapped labels wrap against it
+    // rather than reporting their full single-line width — without this, showing
+    // the AI-analysis section grows the panel beyond the screen edge.
+    content->setMaximumWidth(kPanelWidth);
     auto* layout = new QVBoxLayout(content);
     layout->setContentsMargins(12, 10, 12, 10);
     layout->setSpacing(8);
 
-    // Headline
+    // Headline. Feed-supplied text is untrusted: QLabel's default Qt::AutoText
+    // renders anything that looks like markup as rich text, so a publisher (or
+    // an injected item) could restyle/mangle the panel or hide content behind
+    // tags. Every label that carries feed or model text is pinned to PlainText.
     headline_label_ = new QLabel(content);
     headline_label_->setObjectName("newsDetailHeadline");
     headline_label_->setWordWrap(true);
+    headline_label_->setTextFormat(Qt::PlainText);
     layout->addWidget(headline_label_);
 
     // Badge row
@@ -134,10 +155,11 @@ QWidget* NewsDetailPanel::build_content_view() {
     source_layout->addStretch();
     layout->addWidget(source_row);
 
-    // Summary
+    // Summary (untrusted feed text — see the headline note).
     summary_label_ = new QLabel(content);
     summary_label_->setObjectName("newsDetailSummary");
     summary_label_->setWordWrap(true);
+    summary_label_->setTextFormat(Qt::PlainText);
     layout->addWidget(summary_label_);
 
     // Impact
@@ -145,59 +167,83 @@ QWidget* NewsDetailPanel::build_content_view() {
     impact_label_->setObjectName("newsDetailImpact");
     layout->addWidget(impact_label_);
 
-    // Tickers
+    // Tickers — each one is a link that opens the symbol in Equity Research
+    // (via the nav.open_symbol event, which also constructs the screen if it has
+    // not been opened yet). Tickers are A-Z tokens extracted by the parser, but
+    // the label is still built from escaped / percent-encoded parts.
     tickers_label_ = new QLabel(content);
     tickers_label_->setObjectName("newsDetailTickers");
+    tickers_label_->setTextFormat(Qt::RichText);
+    tickers_label_->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    tickers_label_->setOpenExternalLinks(false);
+    tickers_label_->setWordWrap(true);
+    tickers_label_->setToolTip(tr("Click a ticker to open it in Equity Research"));
+    connect(tickers_label_, &QLabel::linkActivated, this, [](const QString& link) {
+        // Only ever act on our own scheme.
+        if (!link.startsWith(QLatin1String("sym:")))
+            return;
+        const QString symbol = QUrl::fromPercentEncoding(link.mid(4).toUtf8());
+        if (symbol.isEmpty())
+            return;
+        EventBus::instance().publish("nav.open_symbol",
+                                     QVariantMap{{"screen_id", "equity_research"}, {"symbol", symbol}});
+    });
     layout->addWidget(tickers_label_);
 
-    // Action buttons — arranged in a flow
+    // Action buttons — a 3-column grid so the row wraps within the fixed
+    // 420px panel width instead of forcing a horizontal scrollbar.
     auto* actions = new QWidget(content);
-    auto* action_layout = new QHBoxLayout(actions);
+    auto* action_layout = new QGridLayout(actions);
     action_layout->setContentsMargins(0, 4, 0, 4);
-    action_layout->setSpacing(6);
+    action_layout->setHorizontalSpacing(6);
+    action_layout->setVerticalSpacing(6);
 
-    open_btn_ = new QPushButton("OPEN", content);
+    open_btn_ = new QPushButton(tr("OPEN"), content);
     open_btn_->setObjectName("newsDetailOpenBtn");
-    open_btn_->setFixedHeight(24);
-    copy_btn_ = new QPushButton("COPY URL", content);
+    copy_btn_ = new QPushButton(tr("COPY URL"), content);
     copy_btn_->setObjectName("newsDetailCopyBtn");
-    copy_btn_->setFixedHeight(24);
-    copy_title_btn_ = new QPushButton("COPY TITLE", content);
+    copy_title_btn_ = new QPushButton(tr("COPY TITLE"), content);
     copy_title_btn_->setObjectName("newsDetailCopyTitleBtn");
-    copy_title_btn_->setFixedHeight(24);
-    copy_title_btn_->setFixedWidth(copy_title_btn_->fontMetrics().horizontalAdvance("COPY TITLE") + 20);
-    copy_title_btn_->setToolTip("Copy article headline to clipboard");
-    analyze_btn_ = new QPushButton("ANALYZE", content);
+    copy_title_btn_->setToolTip(tr("Copy article headline to clipboard"));
+    analyze_btn_ = new QPushButton(tr("ANALYZE"), content);
     analyze_btn_->setObjectName("newsDetailAnalyzeBtn");
-    analyze_btn_->setFixedHeight(24);
-    save_btn_ = new QPushButton("SAVE", content);
+    save_btn_ = new QPushButton(tr("SAVE"), content);
     save_btn_->setObjectName("newsDetailSaveBtn");
-    save_btn_->setFixedHeight(24);
-    save_btn_->setToolTip("Save article to File Manager");
+    save_btn_->setToolTip(tr("Save article to File Manager"));
 
-    bookmark_btn_ = new QPushButton("BOOKMARK", content);
+    bookmark_btn_ = new QPushButton(tr("BOOKMARK"), content);
     bookmark_btn_->setObjectName("newsDetailSaveBtn");
-    bookmark_btn_->setFixedHeight(24);
-    bookmark_btn_->setToolTip("Bookmark article");
+    bookmark_btn_->setToolTip(tr("Bookmark article"));
     bookmark_btn_->setCheckable(true);
 
     // Translate button
-    translate_btn_ = new QPushButton("TRANSLATE", content);
+    translate_btn_ = new QPushButton(tr("TRANSLATE"), content);
     translate_btn_->setObjectName("newsDetailOpenBtn");
-    translate_btn_->setFixedHeight(24);
 
-    action_layout->addWidget(open_btn_);
-    action_layout->addWidget(copy_btn_);
-    action_layout->addWidget(copy_title_btn_);   // new
-    action_layout->addWidget(analyze_btn_);
-    action_layout->addWidget(save_btn_);
-    action_layout->addWidget(bookmark_btn_);
-    action_layout->addWidget(translate_btn_);
+    // All action buttons share a uniform height and expand to fill their grid
+    // cell — no fixed widths, so nothing can overflow the panel.
+    for (QPushButton* b :
+         {open_btn_, copy_btn_, copy_title_btn_, analyze_btn_, save_btn_, bookmark_btn_, translate_btn_}) {
+        b->setFixedHeight(24);
+        b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+
+    QPushButton* action_btns[] = {open_btn_, copy_btn_,     copy_title_btn_, analyze_btn_,
+                                  save_btn_, bookmark_btn_, translate_btn_};
+    constexpr int kCols = 3;
+    for (int i = 0; i < 7; ++i)
+        action_layout->addWidget(action_btns[i], i / kCols, i % kCols);
+    for (int c = 0; c < kCols; ++c)
+        action_layout->setColumnStretch(c, 1);
     layout->addWidget(actions);
 
     connect(open_btn_, &QPushButton::clicked, this, [this]() {
-        if (has_article_)
-            QDesktopServices::openUrl(QUrl(current_article_.link));
+        if (!has_article_)
+            return;
+        // Feed links are untrusted — never hand a non-web scheme to the shell.
+        const QUrl url(current_article_.link);
+        if (url.isValid() && (url.scheme() == QLatin1String("http") || url.scheme() == QLatin1String("https")))
+            QDesktopServices::openUrl(url);
     });
     connect(copy_btn_, &QPushButton::clicked, this, [this]() {
         if (has_article_)
@@ -209,15 +255,13 @@ QWidget* NewsDetailPanel::build_content_view() {
         QApplication::clipboard()->setText(current_article_.headline);
 
         // Brief visual confirmation — flip label for ~1 s, then revert.
-        copy_title_btn_->setText("COPIED");
-        QTimer::singleShot(1000, this, [this]() {
-            copy_title_btn_->setText("COPY TITLE");
-        });
+        copy_title_btn_->setText(tr("COPIED"));
+        QTimer::singleShot(1000, this, [this]() { copy_title_btn_->setText(tr("COPY TITLE")); });
     });
     connect(analyze_btn_, &QPushButton::clicked, this, [this]() {
         if (!has_article_)
             return;
-        analyze_btn_->setText("ANALYZING...");
+        analyze_btn_->setText(tr("ANALYZING..."));
         analyze_btn_->setEnabled(false);
         analyze_timeout_->start();
         emit analyze_requested(current_article_.link);
@@ -232,6 +276,8 @@ QWidget* NewsDetailPanel::build_content_view() {
         safe.replace(' ', '_');
         if (safe.length() > 60)
             safe = safe.left(60);
+        if (safe.isEmpty()) // non-Latin headlines are stripped to nothing above
+            safe = QStringLiteral("article");
         QString ts = QString::number(QDateTime::currentMSecsSinceEpoch());
         QString stored_name = "news_" + safe + "_" + ts + ".txt";
         QString dest = services::FileManagerService::instance().storage_dir() + "/" + stored_name;
@@ -247,7 +293,13 @@ QWidget* NewsDetailPanel::build_content_view() {
             services::FileManagerService::instance().register_file(stored_name, safe + ".txt", QFileInfo(dest).size(),
                                                                    "text/plain", "news");
             LOG_INFO("News", "Saved article: " + stored_name);
+            save_btn_->setText(tr("SAVED"));
+        } else {
+            LOG_WARN("News", "Could not save article to " + dest + ": " + f.errorString());
+            save_btn_->setText(tr("FAILED"));
         }
+        // Brief confirmation, then revert (parented to the button so it dies with it).
+        QTimer::singleShot(1500, save_btn_, [this]() { save_btn_->setText(tr("SAVE")); });
     });
     connect(bookmark_btn_, &QPushButton::clicked, this, [this]() {
         if (!has_article_)
@@ -257,15 +309,40 @@ QWidget* NewsDetailPanel::build_content_view() {
     connect(translate_btn_, &QPushButton::clicked, this, [this]() {
         if (!has_article_)
             return;
-        translate_btn_->setText("...");
+        translate_btn_->setText(tr("..."));
         translate_btn_->setEnabled(false);
+        // The service callback is not lifetime-bound to this widget, so a raw
+        // [this] capture would dangle if the panel is destroyed while the
+        // translation is in flight (P8). Guard with QPointer, and pin the
+        // article id so a late result can't overwrite a different article.
+        QPointer<NewsDetailPanel> self = this;
+        const QString for_article = current_article_.id;
+        const QString source_text = current_article_.headline + "\n\n" + current_article_.summary;
         services::NewsNlpService::instance().translate_text(
-            current_article_.headline + "\n\n" + current_article_.summary, "en",
-            [this](bool ok, QString translated, QString detected_lang) {
-                translate_btn_->setText("TRANSLATE");
-                translate_btn_->setEnabled(true);
-                if (ok && !translated.isEmpty()) {
-                    summary_label_->setText(QString("[%1 -> EN] %2").arg(detected_lang, translated));
+            source_text, "en", [self, for_article, source_text](bool ok, QString translated, QString detected_lang) {
+                if (!self)
+                    return;
+                self->translate_btn_->setEnabled(true);
+                if (self->current_article_.id != for_article) {
+                    self->translate_btn_->setText(self->tr("TRANSLATE"));
+                    return; // user moved on to another article
+                }
+                // Say what happened instead of silently resetting the button.
+                QString result_label = self->tr("TRANSLATE");
+                if (!ok || translated.isEmpty()) {
+                    result_label = self->tr("FAILED");
+                } else if (translated.trimmed() == source_text.trimmed()) {
+                    result_label = self->tr("ALREADY EN"); // nothing to translate
+                } else {
+                    self->summary_label_->setText(self->tr("[%1 -> EN] %2").arg(detected_lang, translated));
+                }
+                self->translate_btn_->setText(result_label);
+                if (result_label != self->tr("TRANSLATE")) {
+                    QPointer<NewsDetailPanel> guard = self;
+                    QTimer::singleShot(1500, self->translate_btn_, [guard]() {
+                        if (guard)
+                            guard->translate_btn_->setText(guard->tr("TRANSLATE"));
+                    });
                 }
             });
     });
@@ -284,29 +361,49 @@ QWidget* NewsDetailPanel::build_content_view() {
     analysis_layout->setContentsMargins(0, 4, 0, 4);
     analysis_layout->setSpacing(4);
 
-    auto* ai_title = new QLabel("AI ANALYSIS", analysis_section_);
-    ai_title->setObjectName("newsDetailSectionTitle");
-    analysis_layout->addWidget(ai_title);
+    ai_title_ = new QLabel(tr("AI ANALYSIS"), analysis_section_);
+    ai_title_->setObjectName("newsDetailSectionTitle");
+    analysis_layout->addWidget(ai_title_);
+
+    // Fetch-note banner — shown only when the publisher blocked content and
+    // the analysis is metadata-only, so the numbers aren't read as gospel.
+    ai_fetch_note_ = new QLabel(analysis_section_);
+    ai_fetch_note_->setObjectName("newsDetailAiFetchNote");
+    ai_fetch_note_->setWordWrap(true);
+    ai_fetch_note_->hide();
+    analysis_layout->addWidget(ai_fetch_note_);
 
     ai_summary_ = new QLabel(analysis_section_);
     ai_summary_->setObjectName("newsDetailAiSummary");
     ai_summary_->setWordWrap(true);
+    ai_summary_->setTextFormat(Qt::PlainText); // model output is untrusted text
     analysis_layout->addWidget(ai_summary_);
 
+    // Metric pills — laid out in a wrapping 2-column grid so a long urgency /
+    // prediction string can never push past the panel's fixed width.
     auto* ai_row = new QWidget(analysis_section_);
-    auto* ai_row_layout = new QHBoxLayout(ai_row);
+    auto* ai_row_layout = new QGridLayout(ai_row);
     ai_row_layout->setContentsMargins(0, 0, 0, 0);
-    ai_row_layout->setSpacing(8);
+    ai_row_layout->setHorizontalSpacing(6);
+    ai_row_layout->setVerticalSpacing(4);
     ai_sentiment_ = new QLabel(analysis_section_);
     ai_sentiment_->setObjectName("newsDetailAiSentiment");
+    ai_sentiment_->setWordWrap(true);
     ai_urgency_ = new QLabel(analysis_section_);
     ai_urgency_->setObjectName("newsDetailAiUrgency");
+    ai_urgency_->setWordWrap(true);
+    ai_prediction_ = new QLabel(analysis_section_);
+    ai_prediction_->setObjectName("newsDetailAiUrgency");
+    ai_prediction_->setWordWrap(true);
     ai_confidence_ = new QLabel(analysis_section_);
     ai_confidence_->setObjectName("newsDetailAiConfidence");
-    ai_row_layout->addWidget(ai_sentiment_);
-    ai_row_layout->addWidget(ai_urgency_);
-    ai_row_layout->addWidget(ai_confidence_);
-    ai_row_layout->addStretch();
+    ai_confidence_->setWordWrap(true);
+    ai_row_layout->addWidget(ai_sentiment_, 0, 0);
+    ai_row_layout->addWidget(ai_confidence_, 0, 1);
+    ai_row_layout->addWidget(ai_urgency_, 1, 0);
+    ai_row_layout->addWidget(ai_prediction_, 1, 1);
+    ai_row_layout->setColumnStretch(0, 1);
+    ai_row_layout->setColumnStretch(1, 1);
     analysis_layout->addWidget(ai_row);
 
     // Keywords row (populated in show_analysis).
@@ -316,9 +413,9 @@ QWidget* NewsDetailPanel::build_content_view() {
     ai_keywords_->hide();
     analysis_layout->addWidget(ai_keywords_);
 
-    auto* kp_title = new QLabel("KEY POINTS", analysis_section_);
-    kp_title->setObjectName("newsDetailSubTitle");
-    analysis_layout->addWidget(kp_title);
+    key_points_title_ = new QLabel(tr("KEY POINTS"), analysis_section_);
+    key_points_title_->setObjectName("newsDetailSubTitle");
+    analysis_layout->addWidget(key_points_title_);
 
     auto* kp_container = new QWidget(analysis_section_);
     key_points_layout_ = new QVBoxLayout(kp_container);
@@ -326,9 +423,9 @@ QWidget* NewsDetailPanel::build_content_view() {
     key_points_layout_->setSpacing(2);
     analysis_layout->addWidget(kp_container);
 
-    auto* risk_title = new QLabel("RISK SIGNALS", analysis_section_);
-    risk_title->setObjectName("newsDetailSubTitle");
-    analysis_layout->addWidget(risk_title);
+    risk_title_ = new QLabel(tr("RISK SIGNALS"), analysis_section_);
+    risk_title_->setObjectName("newsDetailSubTitle");
+    analysis_layout->addWidget(risk_title_);
 
     auto* risk_container = new QWidget(analysis_section_);
     risk_layout_ = new QVBoxLayout(risk_container);
@@ -336,15 +433,27 @@ QWidget* NewsDetailPanel::build_content_view() {
     risk_layout_->setSpacing(2);
     analysis_layout->addWidget(risk_container);
 
-    auto* topics_title = new QLabel("TOPICS", analysis_section_);
-    topics_title->setObjectName("newsDetailSubTitle");
-    analysis_layout->addWidget(topics_title);
+    topics_title_ = new QLabel(tr("TOPICS"), analysis_section_);
+    topics_title_->setObjectName("newsDetailSubTitle");
+    analysis_layout->addWidget(topics_title_);
 
     auto* topics_container = new QWidget(analysis_section_);
     topics_layout_ = new QVBoxLayout(topics_container);
     topics_layout_->setContentsMargins(0, 0, 0, 0);
     topics_layout_->setSpacing(2);
     analysis_layout->addWidget(topics_container);
+
+    // Entities extracted by the analyze endpoint (orgs / people / locations).
+    // Title hides itself when there are no entities (handled in show_analysis).
+    ai_entities_title_ = new QLabel(tr("ENTITIES"), analysis_section_);
+    ai_entities_title_->setObjectName("newsDetailSubTitle");
+    analysis_layout->addWidget(ai_entities_title_);
+
+    auto* ai_ent_container = new QWidget(analysis_section_);
+    ai_entities_layout_ = new QVBoxLayout(ai_ent_container);
+    ai_entities_layout_->setContentsMargins(0, 0, 0, 0);
+    ai_entities_layout_->setSpacing(2);
+    analysis_layout->addWidget(ai_ent_container);
 
     // Credits footer (e.g. "Credits used: 1 / remaining: 9").
     ai_credits_ = new QLabel(analysis_section_);
@@ -361,9 +470,9 @@ QWidget* NewsDetailPanel::build_content_view() {
     auto* mon_layout = new QVBoxLayout(monitor_section_);
     mon_layout->setContentsMargins(0, 4, 0, 4);
     mon_layout->setSpacing(2);
-    auto* mon_title = new QLabel("MONITOR MATCHES", monitor_section_);
-    mon_title->setObjectName("newsDetailSectionTitle");
-    mon_layout->addWidget(mon_title);
+    monitor_title_ = new QLabel(tr("MONITOR MATCHES"), monitor_section_);
+    monitor_title_->setObjectName("newsDetailSectionTitle");
+    mon_layout->addWidget(monitor_title_);
     auto* mon_container = new QWidget(monitor_section_);
     monitor_matches_layout_ = new QVBoxLayout(mon_container);
     monitor_matches_layout_->setContentsMargins(0, 0, 0, 0);
@@ -377,9 +486,9 @@ QWidget* NewsDetailPanel::build_content_view() {
     auto* rel_layout_outer = new QVBoxLayout(related_section_);
     rel_layout_outer->setContentsMargins(0, 4, 0, 4);
     rel_layout_outer->setSpacing(2);
-    auto* rel_title = new QLabel("RELATED", related_section_);
-    rel_title->setObjectName("newsDetailSectionTitle");
-    rel_layout_outer->addWidget(rel_title);
+    related_title_ = new QLabel(tr("RELATED"), related_section_);
+    related_title_->setObjectName("newsDetailSectionTitle");
+    rel_layout_outer->addWidget(related_title_);
     auto* rel_container = new QWidget(related_section_);
     related_layout_ = new QVBoxLayout(rel_container);
     related_layout_->setContentsMargins(0, 0, 0, 0);
@@ -393,9 +502,9 @@ QWidget* NewsDetailPanel::build_content_view() {
     auto* ent_layout_outer = new QVBoxLayout(entities_section_);
     ent_layout_outer->setContentsMargins(0, 4, 0, 4);
     ent_layout_outer->setSpacing(2);
-    auto* ent_title = new QLabel("ENTITIES", entities_section_);
-    ent_title->setObjectName("newsDetailSectionTitle");
-    ent_layout_outer->addWidget(ent_title);
+    entities_section_title_ = new QLabel(tr("ENTITIES"), entities_section_);
+    entities_section_title_->setObjectName("newsDetailSectionTitle");
+    ent_layout_outer->addWidget(entities_section_title_);
     auto* ent_container = new QWidget(entities_section_);
     entities_detail_layout_ = new QVBoxLayout(ent_container);
     entities_detail_layout_->setContentsMargins(0, 0, 0, 0);
@@ -409,9 +518,9 @@ QWidget* NewsDetailPanel::build_content_view() {
     auto* infra_layout_outer = new QVBoxLayout(infra_section_);
     infra_layout_outer->setContentsMargins(0, 4, 0, 4);
     infra_layout_outer->setSpacing(2);
-    auto* infra_title = new QLabel("NEARBY INFRASTRUCTURE", infra_section_);
-    infra_title->setObjectName("newsDetailSectionTitle");
-    infra_layout_outer->addWidget(infra_title);
+    infra_title_ = new QLabel(tr("NEARBY INFRASTRUCTURE"), infra_section_);
+    infra_title_->setObjectName("newsDetailSectionTitle");
+    infra_layout_outer->addWidget(infra_title_);
     auto* infra_container = new QWidget(infra_section_);
     infra_layout_ = new QVBoxLayout(infra_container);
     infra_layout_->setContentsMargins(0, 0, 0, 0);
@@ -486,7 +595,7 @@ void NewsDetailPanel::show_article(const services::NewsArticle& article) {
             QString("color: %1; font-weight: 700; background: transparent;").arg(ui::colors::CYAN()));
     }
 
-    summary_label_->setText(article.summary.isEmpty() ? "No summary available." : article.summary);
+    summary_label_->setText(article.summary.isEmpty() ? tr("No summary available.") : article.summary);
 
     // Impact + (optional) threat classification share the impact label.
     // Threat takes precedence when present so users see the more specific
@@ -494,68 +603,131 @@ void NewsDetailPanel::show_article(const services::NewsArticle& article) {
     if (article.threat.level != services::ThreatLevel::INFO) {
         const QString threat_text = services::threat_level_string(article.threat.level);
         const QString threat_color = services::threat_level_color(article.threat.level);
-        impact_label_->setText(QString("Impact: %1  •  Threat: %2 (%3, %4% conf)")
+        impact_label_->setText(tr("Impact: %1  •  Threat: %2 (%3, %4% conf)")
                                    .arg(services::impact_string(article.impact))
                                    .arg(threat_text, article.threat.category)
                                    .arg(static_cast<int>(article.threat.confidence * 100)));
         impact_label_->setStyleSheet(QString("color: %1; background: transparent;").arg(threat_color));
     } else {
-        impact_label_->setText(QString("Impact: %1").arg(services::impact_string(article.impact)));
+        impact_label_->setText(tr("Impact: %1").arg(services::impact_string(article.impact)));
         impact_label_->setStyleSheet("background: transparent;");
     }
 
-    if (!article.tickers.isEmpty())
-        tickers_label_->setText("$" + article.tickers.join("  $"));
-    else
+    if (!article.tickers.isEmpty()) {
+        QStringList links;
+        links.reserve(article.tickers.size());
+        for (const auto& t : article.tickers) {
+            links << QString("<a href=\"sym:%1\" style=\"color:%2;text-decoration:none;\">$%3</a>")
+                         .arg(QString::fromLatin1(QUrl::toPercentEncoding(t)), ui::colors::WARNING(),
+                              t.toHtmlEscaped());
+        }
+        tickers_label_->setText(links.join("&nbsp;&nbsp;"));
+    } else {
         tickers_label_->clear();
+    }
 
     // Reset analysis
     analysis_section_->hide();
-    analyze_btn_->setText("ANALYZE");
-    analyze_btn_->setEnabled(true);
+    analyze_btn_->setText(tr("ANALYZE"));
+    // Link-less items (the parser drops non-web links) have nothing to open,
+    // copy or send to the analysis endpoint.
+    const bool has_link = !article.link.isEmpty();
+    analyze_btn_->setEnabled(has_link);
+    open_btn_->setEnabled(has_link);
+    copy_btn_->setEnabled(has_link);
     analyze_timeout_->stop();
 
-    // Reflect saved state from DB
-    {
-        auto r = fincept::NewsArticleRepository::instance().load_saved();
-        bool is_saved = false;
-        if (r.is_ok()) {
-            for (const auto& a : r.value()) {
-                if (a.id == article.id) {
-                    is_saved = true;
-                    break;
-                }
-            }
-        }
-        bookmark_btn_->setChecked(is_saved);
-        bookmark_btn_->setText(is_saved ? "BOOKMARKED" : "BOOKMARK");
-    }
+    // Reflect saved state from DB. load_saved() is a SQLite read; running it
+    // synchronously here stuttered the UI on every article click (P1). Run it
+    // on a worker and post the answer back, guarded so a late result can't
+    // stamp the wrong article's bookmark state (P8).
+    bookmark_btn_->setChecked(false);
+    bookmark_btn_->setText(tr("BOOKMARK"));
+    refresh_bookmark_state();
 
     // Clear related and monitors
     show_related({});
     monitor_section_->hide();
 }
 
+void NewsDetailPanel::refresh_bookmark_state() {
+    if (!has_article_)
+        return;
+    QPointer<NewsDetailPanel> self = this;
+    const QString article_id = current_article_.id;
+    (void)QtConcurrent::run([self, article_id]() {
+        auto r = fincept::NewsArticleRepository::instance().load_saved();
+        bool is_saved = false;
+        if (r.is_ok()) {
+            for (const auto& a : r.value()) {
+                if (a.id == article_id) {
+                    is_saved = true;
+                    break;
+                }
+            }
+        }
+        if (!self)
+            return;
+        QMetaObject::invokeMethod(
+            self,
+            [self, article_id, is_saved]() {
+                if (!self || self->current_article_.id != article_id)
+                    return;
+                self->bookmark_btn_->setChecked(is_saved);
+                self->bookmark_btn_->setText(is_saved ? self->tr("BOOKMARKED") : self->tr("BOOKMARK"));
+            },
+            Qt::QueuedConnection);
+    });
+}
+
+void NewsDetailPanel::show_analysis_failed() {
+    analyze_timeout_->stop();
+    analyze_btn_->setEnabled(true);
+    analyze_btn_->setText(tr("FAILED - RETRY"));
+}
+
 void NewsDetailPanel::show_analysis(const services::NewsAnalysis& analysis) {
-    analyze_btn_->setText("ANALYZE");
+    analyze_btn_->setText(tr("ANALYZE"));
     analyze_btn_->setEnabled(true);
     analyze_timeout_->stop();
 
-    ai_summary_->setText(analysis.summary.isEmpty() ? "No AI summary available." : analysis.summary);
+    // Fetch-note banner — flag when the analysis is metadata-only.
+    if (!analysis.content.fetch_note.isEmpty()) {
+        ai_fetch_note_->setText("⚠  " + analysis.content.fetch_note);
+        ai_fetch_note_->show();
+    } else {
+        ai_fetch_note_->hide();
+    }
+
+    ai_summary_->setText(analysis.summary.isEmpty() ? tr("No AI summary available.") : analysis.summary);
 
     double score = std::clamp(analysis.sentiment.score, -1.0, 1.0);
     QString sent_color =
         score > 0.1 ? ui::colors::POSITIVE : (score < -0.1 ? ui::colors::NEGATIVE : ui::colors::WARNING);
-    ai_sentiment_->setText(QString("Sentiment: %1%2  •  int %3")
+    ai_sentiment_->setText(tr("Sentiment %1%2  •  int %3")
                                .arg(score >= 0 ? "+" : "")
                                .arg(score, 0, 'f', 2)
                                .arg(analysis.sentiment.intensity, 0, 'f', 2));
-    ai_sentiment_->setStyleSheet(QString("color: %1;").arg(sent_color));
+    ai_sentiment_->setStyleSheet(QString("color: %1; font-weight: 700;").arg(sent_color));
 
-    ai_urgency_->setText(QString("Urgency: %1").arg(analysis.market_impact.urgency));
+    // Urgency pill — color tracks severity.
+    const QString urg = analysis.market_impact.urgency.toUpper();
+    QString urg_color =
+        urg == "HIGH" ? ui::colors::NEGATIVE : (urg == "MEDIUM" ? ui::colors::WARNING : ui::colors::POSITIVE);
+    ai_urgency_->setText(tr("Urgency: %1").arg(urg.isEmpty() ? QStringLiteral("—") : urg));
+    ai_urgency_->setStyleSheet(QString("color: %1;").arg(urg_color));
 
-    ai_confidence_->setText(
-        QString("Conf: %1%").arg(static_cast<int>(analysis.sentiment.confidence * 100)));
+    // Prediction pill — directional market impact.
+    const QString pred = analysis.market_impact.prediction;
+    QString pred_color = pred.contains("positive")
+                             ? ui::colors::POSITIVE
+                             : (pred.contains("negative") ? ui::colors::NEGATIVE : ui::colors::WARNING);
+    // API sends snake_case (e.g. "moderate_positive"); show it as readable words.
+    QString pred_text = pred.isEmpty() ? tr("neutral") : QString(pred).replace('_', ' ');
+    ai_prediction_->setText(tr("Outlook: %1").arg(pred_text));
+    ai_prediction_->setStyleSheet(QString("color: %1;").arg(pred_color));
+
+    ai_confidence_->setText(tr("Confidence: %1%").arg(static_cast<int>(analysis.sentiment.confidence * 100)));
 
     // Key points
     while (key_points_layout_->count() > 0) {
@@ -565,50 +737,124 @@ void NewsDetailPanel::show_analysis(const services::NewsAnalysis& analysis) {
         delete item;
     }
     for (const auto& point : analysis.key_points) {
-        auto* lbl = new QLabel(QString("- %1").arg(point), analysis_section_);
+        auto* lbl = new QLabel(QString("•  %1").arg(point), analysis_section_);
         lbl->setObjectName("newsDetailKeyPoint");
         lbl->setWordWrap(true);
+        lbl->setTextFormat(Qt::PlainText);
         key_points_layout_->addWidget(lbl);
     }
+    // Hide the heading + container entirely when there's nothing to show, so
+    // the panel doesn't render a bare "KEY POINTS" label over empty space.
+    const bool has_key_points = !analysis.key_points.isEmpty();
+    key_points_title_->setVisible(has_key_points);
+    key_points_layout_->parentWidget()->setVisible(has_key_points);
 
-    // Risk signals
+    // Risk signals — each shows level (color-coded) plus the detail text
+    // inline (was tooltip-only before), wrapped so it never overflows.
     while (risk_layout_->count() > 0) {
         auto* item = risk_layout_->takeAt(0);
         if (item->widget())
             item->widget()->deleteLater();
         delete item;
     }
-    auto add_risk = [&](const QString& name, const services::RiskSignal& sig) {
-        if (sig.level.isEmpty() || sig.level == "none")
-            return;
-        auto* lbl = new QLabel(QString("%1: %2").arg(name, sig.level), analysis_section_);
-        lbl->setObjectName("newsDetailRisk");
-        lbl->setToolTip(sig.details);
-        risk_layout_->addWidget(lbl);
+    auto risk_color = [](const QString& level) -> QString {
+        const QString l = level.toLower();
+        if (l == "critical" || l == "high")
+            return ui::colors::NEGATIVE;
+        if (l == "medium" || l == "moderate")
+            return ui::colors::WARNING;
+        if (l == "low")
+            return ui::colors::POSITIVE;
+        return ui::colors::TEXT_TERTIARY; // "none" / unknown
     };
-    add_risk("Regulatory", analysis.regulatory);
-    add_risk("Geopolitical", analysis.geopolitical);
-    add_risk("Operational", analysis.operational);
-    add_risk("Market", analysis.market);
+    auto add_risk = [&](const QString& name, const services::RiskSignal& sig) {
+        if (sig.level.isEmpty() || sig.level.compare("none", Qt::CaseInsensitive) == 0)
+            return;
+        auto* row = new QWidget(analysis_section_);
+        auto* rl = new QVBoxLayout(row);
+        rl->setContentsMargins(0, 0, 0, 0);
+        rl->setSpacing(0);
+        auto* head = new QLabel(tr("%1 — %2").arg(name, sig.level.toUpper()), row);
+        head->setObjectName("newsDetailRisk");
+        head->setStyleSheet(QString("color: %1; font-weight: 700;").arg(risk_color(sig.level)));
+        rl->addWidget(head);
+        if (!sig.details.isEmpty()) {
+            auto* det = new QLabel(sig.details, row);
+            det->setObjectName("newsDetailRiskDetail");
+            det->setWordWrap(true);
+            det->setTextFormat(Qt::PlainText);
+            rl->addWidget(det);
+        }
+        risk_layout_->addWidget(row);
+    };
+    add_risk(tr("Regulatory"), analysis.regulatory);
+    add_risk(tr("Geopolitical"), analysis.geopolitical);
+    add_risk(tr("Operational"), analysis.operational);
+    add_risk(tr("Market"), analysis.market);
+    // add_risk skips "none"/empty levels, so an all-clear article adds no rows —
+    // hide the heading + container in that case.
+    const bool has_risks = risk_layout_->count() > 0;
+    risk_title_->setVisible(has_risks);
+    risk_layout_->parentWidget()->setVisible(has_risks);
 
-    // Topics
+    // Topics — wrapping grid of badges (a QHBoxLayout would overflow the
+    // panel's fixed width with no way to wrap).
     while (topics_layout_->count() > 0) {
         auto* item = topics_layout_->takeAt(0);
         if (item->widget())
             item->widget()->deleteLater();
         delete item;
     }
-    auto* topics_row = new QWidget(analysis_section_);
-    auto* topics_flow = new QHBoxLayout(topics_row);
-    topics_flow->setContentsMargins(0, 0, 0, 0);
-    topics_flow->setSpacing(4);
-    for (const auto& topic : analysis.topics) {
-        auto* badge = new QLabel(topic, analysis_section_);
-        badge->setObjectName("newsDetailTopicBadge");
-        topics_flow->addWidget(badge);
+    if (!analysis.topics.isEmpty()) {
+        auto* topics_row = new QWidget(analysis_section_);
+        auto* topics_grid = new QGridLayout(topics_row);
+        topics_grid->setContentsMargins(0, 0, 0, 0);
+        topics_grid->setHorizontalSpacing(4);
+        topics_grid->setVerticalSpacing(4);
+        constexpr int kTopicCols = 3;
+        for (int i = 0; i < analysis.topics.size(); ++i) {
+            auto* badge = new QLabel(analysis.topics[i], topics_row);
+            badge->setObjectName("newsDetailTopicBadge");
+            badge->setAlignment(Qt::AlignCenter);
+            topics_grid->addWidget(badge, i / kTopicCols, i % kTopicCols);
+        }
+        for (int c = 0; c < kTopicCols; ++c)
+            topics_grid->setColumnStretch(c, 1);
+        topics_layout_->addWidget(topics_row);
     }
-    topics_flow->addStretch();
-    topics_layout_->addWidget(topics_row);
+    const bool has_topics = !analysis.topics.isEmpty();
+    topics_title_->setVisible(has_topics);
+    topics_layout_->parentWidget()->setVisible(has_topics);
+
+    // Entities — organizations (with ticker/sector), people, locations.
+    while (ai_entities_layout_->count() > 0) {
+        auto* item = ai_entities_layout_->takeAt(0);
+        if (item->widget())
+            item->widget()->deleteLater();
+        delete item;
+    }
+    auto add_entity = [&](const QString& prefix, const services::AnalysisEntity& e) {
+        QString text = prefix + e.name;
+        if (!e.detail.isEmpty())
+            text += QString(" (%1)").arg(e.detail);
+        if (!e.sector.isEmpty())
+            text += QString(" · %1").arg(e.sector);
+        auto* lbl = new QLabel(text, analysis_section_);
+        lbl->setObjectName("newsDetailEntity");
+        lbl->setWordWrap(true);
+        lbl->setTextFormat(Qt::PlainText);
+        ai_entities_layout_->addWidget(lbl);
+    };
+    for (const auto& o : analysis.organizations)
+        add_entity(tr("ORG  "), o);
+    for (const auto& p : analysis.people)
+        add_entity(tr("PER  "), p);
+    for (const auto& l : analysis.locations)
+        add_entity(tr("LOC  "), l);
+    const bool has_entities =
+        !analysis.organizations.isEmpty() || !analysis.people.isEmpty() || !analysis.locations.isEmpty();
+    ai_entities_title_->setVisible(has_entities);
+    ai_entities_layout_->parentWidget()->setVisible(has_entities);
 
     // Keywords — show as a single hashtagged line under topics.
     if (!analysis.keywords.isEmpty()) {
@@ -628,9 +874,8 @@ void NewsDetailPanel::show_analysis(const services::NewsAnalysis& analysis) {
     // Credits footer — only shown when the backend reported a credit
     // count (zero/zero means the API didn't surface it).
     if (analysis.credits_used > 0 || analysis.credits_remaining > 0) {
-        ai_credits_->setText(QString("Credits used: %1  •  remaining: %2")
-                                 .arg(analysis.credits_used)
-                                 .arg(analysis.credits_remaining));
+        ai_credits_->setText(
+            tr("Credits used: %1  •  remaining: %2").arg(analysis.credits_used).arg(analysis.credits_remaining));
         ai_credits_->show();
     } else {
         ai_credits_->hide();
@@ -657,8 +902,11 @@ void NewsDetailPanel::show_related(const QVector<services::NewsArticle>& related
         auto* btn = new QPushButton(related_section_);
         btn->setObjectName("newsRelatedBtn");
         btn->setCursor(Qt::PointingHandCursor);
-        btn->setText(QString("%1 - %2").arg(article.source, article.headline.left(55)));
+        // Strip '&' so a headline containing one doesn't render as an
+        // accidental mnemonic underline (and swallow the character).
+        btn->setText(QString("%1 - %2").arg(article.source, article.headline.left(55)).replace('&', "&&"));
         btn->setToolTip(article.headline);
+        btn->setAccessibleName(tr("Related article: %1").arg(article.headline.left(80)));
 
         connect(btn, &QPushButton::clicked, this, [this, article]() { emit related_article_clicked(article); });
 
@@ -711,19 +959,19 @@ void NewsDetailPanel::show_entities(const services::EntityResult& entities) {
     bool has_data = false;
 
     for (const auto& [name, code] : entities.countries) {
-        auto* lbl = new QLabel(QString("Country: %1 (%2)").arg(name, code), entities_section_);
+        auto* lbl = new QLabel(tr("Country: %1 (%2)").arg(name, code), entities_section_);
         lbl->setObjectName("newsDetailKeyPoint");
         entities_detail_layout_->addWidget(lbl);
         has_data = true;
     }
     for (const auto& org : entities.organizations) {
-        auto* lbl = new QLabel(QString("Org: %1").arg(org), entities_section_);
+        auto* lbl = new QLabel(tr("Org: %1").arg(org), entities_section_);
         lbl->setObjectName("newsDetailKeyPoint");
         entities_detail_layout_->addWidget(lbl);
         has_data = true;
     }
     for (const auto& person : entities.people) {
-        auto* lbl = new QLabel(QString("Person: %1").arg(person), entities_section_);
+        auto* lbl = new QLabel(tr("Person: %1").arg(person), entities_section_);
         lbl->setObjectName("newsDetailKeyPoint");
         entities_detail_layout_->addWidget(lbl);
         has_data = true;
@@ -747,15 +995,70 @@ void NewsDetailPanel::show_infrastructure(const QVector<services::Infrastructure
     infra_section_->show();
 
     for (const auto& inf : items) {
-        QString type_icon = inf.type == "airport"
-                                ? "AIR"
-                                : (inf.type == "military" ? "MIL" : (inf.type == "power_plant" ? "PWR" : "PRT"));
-        auto* lbl =
-            new QLabel(QString("[%1] %2 — %3 km").arg(type_icon, inf.name.left(20)).arg(inf.distance_km, 0, 'f', 1),
-                       infra_section_);
+        QString type_icon =
+            inf.type == "airport"
+                ? tr("AIR")
+                : (inf.type == "military" ? tr("MIL") : (inf.type == "power_plant" ? tr("PWR") : tr("PRT")));
+        auto* lbl = new QLabel(tr("[%1] %2 — %3 km").arg(type_icon, inf.name.left(20)).arg(inf.distance_km, 0, 'f', 1),
+                               infra_section_);
         lbl->setObjectName("newsDetailKeyPoint");
         infra_layout_->addWidget(lbl);
     }
+}
+
+void NewsDetailPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void NewsDetailPanel::retranslateUi() {
+    // Static header / empty-state / section titles.
+    if (header_title_)
+        header_title_->setText(tr("ARTICLE DETAIL"));
+    if (empty_label_)
+        empty_label_->setText(tr("Select an article"));
+    if (ai_title_)
+        ai_title_->setText(tr("AI ANALYSIS"));
+    if (key_points_title_)
+        key_points_title_->setText(tr("KEY POINTS"));
+    if (risk_title_)
+        risk_title_->setText(tr("RISK SIGNALS"));
+    if (topics_title_)
+        topics_title_->setText(tr("TOPICS"));
+    if (ai_entities_title_)
+        ai_entities_title_->setText(tr("ENTITIES"));
+    if (monitor_title_)
+        monitor_title_->setText(tr("MONITOR MATCHES"));
+    if (related_title_)
+        related_title_->setText(tr("RELATED"));
+    if (entities_section_title_)
+        entities_section_title_->setText(tr("ENTITIES"));
+    if (infra_title_)
+        infra_title_->setText(tr("NEARBY INFRASTRUCTURE"));
+
+    // Always-static action buttons (tooltips + labels).
+    if (open_btn_)
+        open_btn_->setText(tr("OPEN"));
+    if (copy_btn_)
+        copy_btn_->setText(tr("COPY URL"));
+    if (copy_title_btn_) {
+        copy_title_btn_->setText(tr("COPY TITLE"));
+        copy_title_btn_->setToolTip(tr("Copy article headline to clipboard"));
+    }
+    if (save_btn_) {
+        save_btn_->setText(tr("SAVE"));
+        save_btn_->setToolTip(tr("Save article to File Manager"));
+    }
+    if (translate_btn_)
+        translate_btn_->setText(tr("TRANSLATE"));
+    if (bookmark_btn_)
+        bookmark_btn_->setToolTip(tr("Bookmark article"));
+    if (tickers_label_)
+        tickers_label_->setToolTip(tr("Click a ticker to open it in Equity Research"));
+    // analyze_btn_ / bookmark_btn_ labels are state-dependent and refresh when
+    // the next article is shown — intentionally not forced here. Per-row dynamic
+    // content (badges, metrics, entities) re-renders from live data.
 }
 
 void NewsDetailPanel::clear() {

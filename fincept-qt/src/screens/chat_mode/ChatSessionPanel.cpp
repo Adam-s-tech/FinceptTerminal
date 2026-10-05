@@ -10,6 +10,8 @@
 #include <QJsonDocument>
 #include <QListWidgetItem>
 #include <QMessageBox>
+#include <QPointer>
+#include <QSet>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -17,7 +19,11 @@ namespace fincept::chat_mode {
 
 ChatSessionPanel::ChatSessionPanel(QWidget* parent) : QWidget(parent) {
     build_ui();
-    refresh_sessions();
+    // No refresh_sessions() here (§P3). WindowFrame builds ChatModeScreen
+    // eagerly at startup, so this GET fired before first paint and before
+    // login — an empty X-API-Key that could only 401. ChatModeScreen::showEvent
+    // already calls session_panel_->refresh_sessions() on every entry into chat
+    // mode, which is the only moment the list is actually looked at.
 }
 
 void ChatSessionPanel::build_ui() {
@@ -32,18 +38,18 @@ void ChatSessionPanel::build_ui() {
     // Header row
     auto* header_row = new QHBoxLayout;
     header_row->setSpacing(4);
-    auto* title_lbl = new QLabel("CONVERSATIONS");
-    title_lbl->setStyleSheet(QString("color:%1;font-size:11px;font-weight:700;"
-                                     "font-family:'Consolas','Courier New',monospace;"
-                                     "background:transparent;letter-spacing:1px;")
-                                 .arg(ui::colors::AMBER()));
-    header_row->addWidget(title_lbl);
+    title_lbl_ = new QLabel(tr("CONVERSATIONS"));
+    title_lbl_->setStyleSheet(QString("color:%1;font-size:11px;font-weight:700;"
+                                      "font-family:'Consolas','Courier New',monospace;"
+                                      "background:transparent;letter-spacing:1px;")
+                                  .arg(ui::colors::AMBER()));
+    header_row->addWidget(title_lbl_);
     header_row->addStretch();
 
-    exit_btn_ = new QPushButton("TERMINAL");
+    exit_btn_ = new QPushButton(tr("TERMINAL"));
     exit_btn_->setFixedHeight(20);
     exit_btn_->setCursor(Qt::PointingHandCursor);
-    exit_btn_->setToolTip("Switch to Terminal Mode (F9)");
+    exit_btn_->setToolTip(tr("Switch to Terminal Mode (F9)"));
     exit_btn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     exit_btn_->setStyleSheet(QString("QPushButton{background:transparent;color:%1;border:1px solid %2;"
                                      "padding:0 8px;font-weight:700;font-size:10px;"
@@ -56,14 +62,14 @@ void ChatSessionPanel::build_ui() {
 
     // Search
     search_edit_ = new QLineEdit;
-    search_edit_->setPlaceholderText("Search...");
+    search_edit_->setPlaceholderText(tr("Search..."));
     search_edit_->setFixedHeight(28);
-    search_edit_->setStyleSheet(
-        QString("QLineEdit{background:%1;color:%2;border:1px solid %3;"
-                "border-radius:0px;padding:4px 8px;font-size:12px;"
-                "font-family:'Consolas','Courier New',monospace;}"
-                "QLineEdit:focus{border:1px solid %4;}")
-            .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM(), ui::colors::BORDER_BRIGHT()));
+    search_edit_->setStyleSheet(QString("QLineEdit{background:%1;color:%2;border:1px solid %3;"
+                                        "border-radius:0px;padding:4px 8px;font-size:12px;"
+                                        "font-family:'Consolas','Courier New',monospace;}"
+                                        "QLineEdit:focus{border:1px solid %4;}")
+                                    .arg(ui::colors::BG_RAISED(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM(),
+                                         ui::colors::BORDER_BRIGHT()));
     connect(search_edit_, &QLineEdit::textChanged, this, &ChatSessionPanel::on_search_changed);
     vl->addWidget(search_edit_);
 
@@ -117,8 +123,8 @@ void ChatSessionPanel::build_ui() {
     // Row 1: New + Rename
     auto* row1 = new QHBoxLayout;
     row1->setSpacing(4);
-    new_btn_ = mk_btn("+ New", "New conversation");
-    rename_btn_ = mk_btn("Rename", "Rename selected");
+    new_btn_ = mk_btn(tr("+ New"), tr("New conversation"));
+    rename_btn_ = mk_btn(tr("Rename"), tr("Rename selected"));
     rename_btn_->setEnabled(false);
     row1->addWidget(new_btn_);
     row1->addWidget(rename_btn_);
@@ -127,8 +133,8 @@ void ChatSessionPanel::build_ui() {
     // Row 2: Delete + Export
     auto* row2 = new QHBoxLayout;
     row2->setSpacing(4);
-    delete_btn_ = mk_btn("Delete", "Delete selected");
-    export_btn_ = mk_btn("Export", "Export conversations");
+    delete_btn_ = mk_btn(tr("Delete"), tr("Delete selected"));
+    export_btn_ = mk_btn(tr("Export"), tr("Export conversations"));
     delete_btn_->setEnabled(false);
     row2->addWidget(delete_btn_);
     row2->addWidget(export_btn_);
@@ -141,13 +147,21 @@ void ChatSessionPanel::build_ui() {
 }
 
 void ChatSessionPanel::refresh_sessions() {
-    ChatModeService::instance().list_sessions([this](bool ok, QVector<ChatSession> sessions, QString err) {
+    // P8: the callback is owned by the ChatModeService singleton, which outlives
+    // this panel. Guard so a window closed mid-request doesn't touch a dead
+    // widget (refresh_sessions fires on every stream finish + session mutation).
+    QPointer<ChatSessionPanel> self = this;
+    ChatModeService::instance().list_sessions([this, self](bool ok, QVector<ChatSession> sessions, QString err) {
+        if (!self)
+            return;
         if (!ok) {
             LOG_WARN("ChatSessionPanel", "Failed to load sessions: " + err);
             return;
         }
         sessions_ = std::move(sessions);
-        populate_list(sessions_);
+        // Through the filter, not around it: every stream finish refreshes the list, and
+        // populating from the full set dropped whatever the user had typed in the search box.
+        apply_filter(search_edit_->text());
     });
 }
 
@@ -155,10 +169,12 @@ void ChatSessionPanel::populate_list(const QVector<ChatSession>& sessions) {
     session_list_->clear();
     for (const auto& s : sessions) {
         auto* item = new QListWidgetItem(session_list_);
-        const QString display = s.title.isEmpty() ? "(Untitled)" : s.title;
-        item->setText(display + QString("\n%1 msg").arg(s.message_count));
+        const QString display = s.title.isEmpty() ? tr("(Untitled)") : s.title;
+        item->setText(display + "\n" + tr("%1 msg").arg(s.message_count));
         item->setData(Qt::UserRole, s.uuid);
         item->setData(Qt::UserRole + 1, s.title);
+        if (search_hits_.contains(s.uuid))
+            item->setForeground(QColor(ui::colors::AMBER()));
         if (s.uuid == active_uuid_) {
             item->setSelected(true);
             session_list_->setCurrentItem(item);
@@ -176,7 +192,7 @@ void ChatSessionPanel::apply_filter(const QString& text) {
     }
     QVector<ChatSession> filtered;
     for (const auto& s : sessions_) {
-        if (s.title.contains(text, Qt::CaseInsensitive))
+        if (s.title.contains(text, Qt::CaseInsensitive) || search_hits_.contains(s.uuid))
             filtered.append(s);
     }
     populate_list(filtered);
@@ -196,7 +212,8 @@ void ChatSessionPanel::set_active_session(const QString& uuid) {
 }
 
 void ChatSessionPanel::update_stats(const ChatStats& stats) {
-    stats_lbl_->setText(QString("%1 sessions | %2 messages").arg(stats.total_sessions).arg(stats.total_messages));
+    last_stats_ = stats;
+    stats_lbl_->setText(tr("%1 sessions | %2 messages").arg(stats.total_sessions).arg(stats.total_messages));
 }
 
 // ── Slots ─────────────────────────────────────────────────────────────────────
@@ -226,9 +243,9 @@ void ChatSessionPanel::on_delete_clicked() {
             break;
         }
     }
-    const QString confirm_name = title.isEmpty() ? "(Untitled)" : title;
+    const QString confirm_name = title.isEmpty() ? tr("(Untitled)") : title;
 
-    if (QMessageBox::question(this, "Delete Conversation", QString("Delete \"%1\"?").arg(confirm_name),
+    if (QMessageBox::question(this, tr("Delete Conversation"), tr("Delete \"%1\"?").arg(confirm_name),
                               QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
         return;
 
@@ -249,7 +266,7 @@ void ChatSessionPanel::on_rename_clicked() {
 
     bool ok = false;
     const QString new_title =
-        QInputDialog::getText(this, "Rename Conversation", "New title:", QLineEdit::Normal, current_title, &ok);
+        QInputDialog::getText(this, tr("Rename Conversation"), tr("New title:"), QLineEdit::Normal, current_title, &ok);
     if (ok && !new_title.trimmed().isEmpty())
         emit rename_session_requested(active_uuid_, new_title.trimmed());
 }
@@ -261,37 +278,44 @@ void ChatSessionPanel::on_export_clicked() {
         uuids.append(s.uuid);
 
     if (uuids.isEmpty()) {
-        QMessageBox::information(this, "Export", "No conversations to export.");
+        QMessageBox::information(this, tr("Export"), tr("No conversations to export."));
         return;
     }
 
+    // Default file name is a stable artifact name, not translated; the dialog
+    // caption and filter are user-facing.
     const QString path =
-        QFileDialog::getSaveFileName(this, "Export Conversations", "fincept_chat_export.json", "JSON (*.json)");
+        QFileDialog::getSaveFileName(this, tr("Export Conversations"), "fincept_chat_export.json", tr("JSON (*.json)"));
     if (path.isEmpty())
         return;
 
     export_btn_->setEnabled(false);
     export_btn_->setText("...");
 
-    ChatModeService::instance().export_sessions(uuids, [this, path](bool ok, QJsonArray payload, QString err) {
+    QPointer<ChatSessionPanel> self = this;
+    ChatModeService::instance().export_sessions(uuids, [this, self, path](bool ok, QJsonArray payload, QString err) {
+        if (!self)
+            return;
         export_btn_->setEnabled(true);
-        export_btn_->setText("Export");
+        export_btn_->setText(tr("Export"));
         if (!ok) {
-            QMessageBox::warning(this, "Export Failed", err);
+            QMessageBox::warning(this, tr("Export Failed"), err);
             return;
         }
         QFile file(path);
         if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QMessageBox::warning(this, "Export Failed", "Could not write file.");
+            QMessageBox::warning(this, tr("Export Failed"), tr("Could not write file."));
             return;
         }
         file.write(QJsonDocument(payload).toJson(QJsonDocument::Indented));
         file.close();
-        QMessageBox::information(this, "Export", QString("Exported %1 conversations.").arg(payload.size()));
+        QMessageBox::information(this, tr("Export"), tr("Exported %1 conversations.").arg(payload.size()));
     });
 }
 
 void ChatSessionPanel::on_search_changed(const QString& text) {
+    // Hits belong to the previous text; the debounced server search below refills them.
+    search_hits_.clear();
     // Local filter immediately
     apply_filter(text);
     // Debounce server-side search for better results
@@ -306,25 +330,67 @@ void ChatSessionPanel::on_search_server() {
     if (query.length() < 2)
         return;
 
-    ChatModeService::instance().search_messages(query, [this](bool ok, QVector<ChatMessage> results, QString) {
-        if (!ok || results.isEmpty())
+    QPointer<ChatSessionPanel> self = this;
+    ChatModeService::instance().search_messages(query, [this, self, query](bool ok, QVector<ChatMessage> results, QString) {
+        if (!self || !ok || results.isEmpty())
             return;
-        // Highlight sessions that have matching messages
-        for (int i = 0; i < session_list_->count(); ++i) {
-            auto* item = session_list_->item(i);
-            bool has_match = false;
-            for (const auto& r : results) {
-                // Check if this message's content matches any session
-                if (item->text().contains(r.content.left(20), Qt::CaseInsensitive)) {
-                    has_match = true;
-                    break;
-                }
-            }
-            if (has_match && !item->isSelected()) {
-                item->setForeground(QColor(ui::colors::AMBER()));
-            }
+        // The box moved on while the request was out (a newer query has its own search
+        // in flight) — don't mark the list for text that is no longer typed.
+        if (search_edit_->text().trimmed() != query)
+            return;
+        // Sessions that have a matching MESSAGE. The old test looked for the first 20
+        // characters of the message inside the sidebar row's text (title + "N msg"), which
+        // can never be true, so server-side search highlighted nothing.
+        QSet<QString> hit_sessions;
+        for (const auto& r : results) {
+            if (!r.session_uuid.isEmpty())
+                hit_sessions.insert(r.session_uuid);
         }
+        if (hit_sessions.isEmpty())
+            return;
+        // Re-filter so sessions matched only by message content join the list (the title
+        // filter had already hidden them) and get the highlight from populate_list().
+        search_hits_ = hit_sessions;
+        apply_filter(search_edit_->text());
     });
+}
+
+void ChatSessionPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void ChatSessionPanel::retranslateUi() {
+    if (title_lbl_)
+        title_lbl_->setText(tr("CONVERSATIONS"));
+    if (exit_btn_) {
+        exit_btn_->setText(tr("TERMINAL"));
+        exit_btn_->setToolTip(tr("Switch to Terminal Mode (F9)"));
+    }
+    if (search_edit_)
+        search_edit_->setPlaceholderText(tr("Search..."));
+    if (new_btn_) {
+        new_btn_->setText(tr("+ New"));
+        new_btn_->setToolTip(tr("New conversation"));
+    }
+    if (rename_btn_) {
+        rename_btn_->setText(tr("Rename"));
+        rename_btn_->setToolTip(tr("Rename selected"));
+    }
+    if (delete_btn_) {
+        delete_btn_->setText(tr("Delete"));
+        delete_btn_->setToolTip(tr("Delete selected"));
+    }
+    if (export_btn_) {
+        export_btn_->setText(tr("Export"));
+        export_btn_->setToolTip(tr("Export conversations"));
+    }
+    if (stats_lbl_)
+        stats_lbl_->setText(
+            tr("%1 sessions | %2 messages").arg(last_stats_.total_sessions).arg(last_stats_.total_messages));
+    // Re-render the session list so "(Untitled)" / "%1 msg" pick up the language.
+    apply_filter(search_edit_ ? search_edit_->text() : QString());
 }
 
 } // namespace fincept::chat_mode

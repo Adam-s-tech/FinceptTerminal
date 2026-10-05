@@ -31,7 +31,7 @@ QColor color_for_pct(double v) {
     return QColor(colors::TEXT_SECONDARY());
 }
 
-}  // namespace
+} // namespace
 
 // ── Model ──────────────────────────────────────────────────────────────────
 
@@ -63,21 +63,31 @@ OIBuildupModel::Buildup OIBuildupModel::classify(double price_chg, double oi_chg
 
 QString OIBuildupModel::class_str(Buildup b) {
     switch (b) {
-        case Buildup::LongBuildup:    return QStringLiteral("Long Build-up");
-        case Buildup::ShortBuildup:   return QStringLiteral("Short Build-up");
-        case Buildup::ShortCovering:  return QStringLiteral("Short Covering");
-        case Buildup::LongUnwinding:  return QStringLiteral("Long Unwinding");
-        default:                      return QStringLiteral("—");
+        case Buildup::LongBuildup:
+            return tr("Long Build-up");
+        case Buildup::ShortBuildup:
+            return tr("Short Build-up");
+        case Buildup::ShortCovering:
+            return tr("Short Covering");
+        case Buildup::LongUnwinding:
+            return tr("Long Unwinding");
+        default:
+            return QStringLiteral("—");
     }
 }
 
 QColor OIBuildupModel::class_color(Buildup b) {
     switch (b) {
-        case Buildup::LongBuildup:    return QColor(colors::POSITIVE());
-        case Buildup::ShortBuildup:   return QColor(colors::NEGATIVE());
-        case Buildup::ShortCovering:  return QColor(colors::AMBER());
-        case Buildup::LongUnwinding:  return QColor(colors::AMBER());
-        default:                      return QColor(colors::TEXT_SECONDARY());
+        case Buildup::LongBuildup:
+            return QColor(colors::POSITIVE());
+        case Buildup::ShortBuildup:
+            return QColor(colors::NEGATIVE());
+        case Buildup::ShortCovering:
+            return QColor(colors::AMBER());
+        case Buildup::LongUnwinding:
+            return QColor(colors::AMBER());
+        default:
+            return QColor(colors::TEXT_SECONDARY());
     }
 }
 
@@ -98,10 +108,14 @@ QVariant OIBuildupModel::data(const QModelIndex& index, int role) const {
                 return class_color(classify(r.ce_quote.change_pct, r.ce_quote.oi_change_pct));
             case ColPeClass:
                 return class_color(classify(r.pe_quote.change_pct, r.pe_quote.oi_change_pct));
-            case ColCeChgPct:    return color_for_pct(r.ce_quote.change_pct);
-            case ColCeOiChgPct:  return color_for_pct(r.ce_quote.oi_change_pct);
-            case ColPeChgPct:    return color_for_pct(r.pe_quote.change_pct);
-            case ColPeOiChgPct:  return color_for_pct(r.pe_quote.oi_change_pct);
+            case ColCeChgPct:
+                return color_for_pct(r.ce_quote.change_pct);
+            case ColCeOiChgPct:
+                return color_for_pct(r.ce_quote.oi_change_pct);
+            case ColPeChgPct:
+                return color_for_pct(r.pe_quote.change_pct);
+            case ColPeOiChgPct:
+                return color_for_pct(r.pe_quote.oi_change_pct);
         }
         if (col == ColStrike && r.is_atm)
             return QColor(colors::AMBER());
@@ -111,15 +125,19 @@ QVariant OIBuildupModel::data(const QModelIndex& index, int role) const {
 
     switch (col) {
         case ColStrike:
-            return QString::number(r.strike, 'f', r.strike < 100 ? 2 : 0);
+            return fincept::services::options::format_strike(r.strike);
         case ColCeClass:
             return class_str(classify(r.ce_quote.change_pct, r.ce_quote.oi_change_pct));
-        case ColCeChgPct:    return fmt_signed_pct(r.ce_quote.change_pct);
-        case ColCeOiChgPct:  return fmt_signed_pct(r.ce_quote.oi_change_pct);
+        case ColCeChgPct:
+            return fmt_signed_pct(r.ce_quote.change_pct);
+        case ColCeOiChgPct:
+            return fmt_signed_pct(r.ce_quote.oi_change_pct);
         case ColPeClass:
             return class_str(classify(r.pe_quote.change_pct, r.pe_quote.oi_change_pct));
-        case ColPeChgPct:    return fmt_signed_pct(r.pe_quote.change_pct);
-        case ColPeOiChgPct:  return fmt_signed_pct(r.pe_quote.oi_change_pct);
+        case ColPeChgPct:
+            return fmt_signed_pct(r.pe_quote.change_pct);
+        case ColPeOiChgPct:
+            return fmt_signed_pct(r.pe_quote.oi_change_pct);
     }
     return {};
 }
@@ -127,14 +145,13 @@ QVariant OIBuildupModel::data(const QModelIndex& index, int role) const {
 QVariant OIBuildupModel::headerData(int section, Qt::Orientation orient, int role) const {
     if (orient != Qt::Horizontal || role != Qt::DisplayRole)
         return {};
-    static const char* kHeaders[ColCount] = {
-        "Strike",
-        "CE Action", "CE Δ%", "CE ΔOI%",
-        "PE Action", "PE Δ%", "PE ΔOI%",
+    // tr() per-call — owning QHeaderView re-polls on QEvent::LanguageChange.
+    const QString headers[ColCount] = {
+        tr("Strike"), tr("CE Action"), tr("CE Δ%"), tr("CE ΔOI%"), tr("PE Action"), tr("PE Δ%"), tr("PE ΔOI%"),
     };
     if (section < 0 || section >= ColCount)
         return {};
-    return QString::fromLatin1(kHeaders[section]);
+    return headers[section];
 }
 
 void OIBuildupModel::set_chain(const OptionChain& chain) {
@@ -163,13 +180,15 @@ OIBuildupTable::OIBuildupTable(QWidget* parent) : QTableView(parent) {
     verticalHeader()->setVisible(false);
     verticalHeader()->setDefaultSectionSize(22);
 
-    setStyleSheet(QStringLiteral(
-        "QTableView { background:%1; color:%2; border:1px solid %3; gridline-color:%3; selection-background-color:%4; }"
-        "QHeaderView::section { background:%5; color:%6; border:none; border-bottom:1px solid %3; padding:4px 6px; "
-        "                       font-size:9px; font-weight:700; letter-spacing:0.4px; }"
-        "QTableView::item { padding:0 6px; }")
-                      .arg(colors::BG_BASE(), colors::TEXT_PRIMARY(), colors::BORDER_DIM(),
-                           colors::BG_HOVER(), colors::BG_RAISED(), colors::TEXT_SECONDARY()));
+    setStyleSheet(
+        QStringLiteral(
+            "QTableView { background:%1; color:%2; border:1px solid %3; gridline-color:%3; "
+            "selection-background-color:%4; }"
+            "QHeaderView::section { background:%5; color:%6; border:none; border-bottom:1px solid %3; padding:4px 6px; "
+            "                       font-size:9px; font-weight:700; letter-spacing:0.4px; }"
+            "QTableView::item { padding:0 6px; }")
+            .arg(colors::BG_BASE(), colors::TEXT_PRIMARY(), colors::BORDER_DIM(), colors::BG_HOVER(),
+                 colors::BG_RAISED(), colors::TEXT_SECONDARY()));
 }
 
 } // namespace fincept::screens::fno

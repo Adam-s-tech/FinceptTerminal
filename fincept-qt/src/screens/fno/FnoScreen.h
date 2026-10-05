@@ -1,23 +1,20 @@
 #pragma once
 // FnoScreen — Sensibull-style F&O analytics tab.
 //
-// Top-level shell. Six sub-tabs hosted in a QStackedWidget; each sub-tab
+// Top-level shell. Seven sub-tabs hosted in a QStackedWidget; each sub-tab
 // is lazy-constructed on first reveal (P2 spirit — chain assembly + WS
 // subscriptions for the OI sub-tab don't fire until the user navigates
-// there).
+// there). Only Chain is built eagerly, so the screen shows data immediately.
 //
-// Phase 2 ships the Chain sub-tab fully wired. The other five render a
-// ComingSoon placeholder until their phase lands:
-//   - Chain         (Phase 2)  ✅
-//   - Builder       (Phase 5)
-//   - OI Analytics  (Phase 7)
-//   - Multi-Stra    (Phase 9)
-//   - FII / DII     (Phase 8)
-//   - Screener      (Phase 9)
+// All seven are implemented: Chain, Builder, OI Analytics, Multi-Straddle,
+// FII/DII, Screener, Positions. The QStackedWidget is seeded with placeholder
+// widgets purely so slot indices map 1:1 onto SubTab values; each is swapped
+// for the real widget before it can ever be shown.
 
 #include "core/symbol/IGroupLinked.h"
 #include "screens/common/IStatefulScreen.h"
 
+#include <QEvent>
 #include <QHash>
 #include <QPointer>
 #include <QPushButton>
@@ -28,14 +25,16 @@
 
 #include <functional>
 
+namespace fincept::screens::common {
+class PaperBlotterPanel;
+}
+
 namespace fincept::screens::fno {
 
 class BuilderSubTab;
 class ChainSubTab;
 
-class FnoScreen : public QWidget,
-                  public fincept::screens::IStatefulScreen,
-                  public fincept::IGroupLinked {
+class FnoScreen : public QWidget, public fincept::screens::IStatefulScreen, public fincept::IGroupLinked {
     Q_OBJECT
     Q_INTERFACES(fincept::IGroupLinked)
   public:
@@ -56,6 +55,7 @@ class FnoScreen : public QWidget,
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   public:
     enum SubTab : int {
@@ -65,6 +65,7 @@ class FnoScreen : public QWidget,
         TabMultiStraddle = 3,
         TabFiiDii = 4,
         TabScreener = 5,
+        TabPositions = 6,
         TabCount
     };
 
@@ -76,6 +77,13 @@ class FnoScreen : public QWidget,
     QWidget* build_tab_bar();
     QWidget* build_placeholder(const QString& tab_name, const QString& detail);
 
+    /// Re-apply tr() lookups to the tab-bar buttons on QEvent::LanguageChange.
+    void retranslateUi();
+
+    /// Translated tab label / detail for the given slot index.
+    static QString tab_label_for(int index);
+    static QString tab_detail_for(int index);
+
     /// Lazy-construct the requested sub-tab and insert it into the stack at
     /// its slot index. No-op if already present.
     void ensure_tab_built(SubTab which);
@@ -86,7 +94,7 @@ class FnoScreen : public QWidget,
     SubTab active_tab_ = TabChain;
     QStackedWidget* stack_ = nullptr;
     QVector<QPushButton*> tab_btns_;
-    QHash<int, QWidget*> tabs_;  // slot index → widget
+    QHash<int, QWidget*> tabs_; // slot index → widget
 
     // Direct pointer to the chain sub-tab so showEvent can poke its
     // visibility-driven subscription path.
@@ -96,6 +104,7 @@ class FnoScreen : public QWidget,
     QPointer<class FiiDiiSubTab> fii_dii_tab_;
     QPointer<class MultiStraddleSubTab> multi_straddle_tab_;
     QPointer<class ScreenerSubTab> screener_tab_;
+    QPointer<fincept::screens::common::PaperBlotterPanel> positions_tab_;
 
     // Group G is the "yellow" slot in the default palette (per SymbolGroup.h
     // line 16). Plan called for Yellow as the F&O default — that's slot G.

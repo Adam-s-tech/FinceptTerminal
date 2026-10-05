@@ -2,6 +2,7 @@
 
 #include "services/prediction/PredictionTypes.h"
 
+#include <QEvent>
 #include <QLabel>
 #include <QMutex>
 #include <QPixmap>
@@ -29,13 +30,19 @@ class PolymarketOrderBook : public QWidget {
     void mousePressEvent(QMouseEvent* event) override;
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     void rebuild_cache();
+    // Number of ask/bid levels actually painted, derived from the current widget
+    // height. Both the painter and the click hit-test MUST use this so a click
+    // maps to the same level that was drawn. Caller must hold mutex_.
+    void visible_row_counts(int& ask_rows, int& bid_rows) const;
 
     QVector<fincept::services::prediction::OrderLevel> bids_;
     QVector<fincept::services::prediction::OrderLevel> asks_;
     double spread_ = 0.0;
+    int price_decimals_ = 2; // follows the book's tick size (0.001-tick markets need 3 dp)
     QMutex mutex_;
     QPixmap cache_;
     bool cache_dirty_ = true;

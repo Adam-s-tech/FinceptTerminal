@@ -1,8 +1,11 @@
 // Per-provider model-list discovery. Async GET on the GUI thread; emits models_fetched.
 
-#include "services/llm/LlmService.h"
-
+#include "auth/AuthManager.h"
+#include "core/config/AppConfig.h"
 #include "core/logging/Logger.h"
+#include "services/llm/LlmContentExtractors.h"
+#include "services/llm/LlmService.h"
+#include "services/llm/ProviderCatalog.h"
 #include "storage/repositories/SettingsRepository.h"
 
 #include <QByteArray>
@@ -27,6 +30,11 @@ QString LlmService::get_models_url(const QString& provider, const QString& api_k
     Q_UNUSED(api_key) // Auth in headers, not URL.
     const QString p = provider.toLower();
 
+    // Blocked provider (AtlasCloud, removed) — no models URL, so the Fetch button
+    // can never reach it even if base_url was hand-pointed at the host.
+    if (ProviderCatalog::is_blocked(p, base_url))
+        return {};
+
     // Ollama uses /api/tags, not /v1/models — must short-circuit before the custom-base_url branch
     // or a user with base_url=http://localhost:11434 hits the wrong path and parses a 404 page.
     if (p == "ollama") {
@@ -42,8 +50,7 @@ QString LlmService::get_models_url(const QString& provider, const QString& api_k
         while (base.endsWith('/'))
             base.chop(1);
 
-        const QString suffix = (p == "anthropic") ? QStringLiteral("/models?limit=1000")
-                                                  : QStringLiteral("/models");
+        const QString suffix = (p == "anthropic") ? QStringLiteral("/models?limit=1000") : QStringLiteral("/models");
 
         // Already a full endpoint — use verbatim.
         if (base.contains(QStringLiteral("/models")))
@@ -57,17 +64,28 @@ QString LlmService::get_models_url(const QString& provider, const QString& api_k
         return base + QStringLiteral("/v1") + suffix;
     }
 
-    if (p == "openai")     return "https://api.openai.com/v1/models";
-    if (p == "anthropic")  return "https://api.anthropic.com/v1/models?limit=1000";
+    if (p == "openai")
+        return "https://api.openai.com/v1/models";
+    if (p == "anthropic")
+        return "https://api.anthropic.com/v1/models?limit=1000";
     if (p == "gemini" || p == "google") {
         return "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100";
     }
-    if (p == "groq")       return "https://api.groq.com/openai/v1/models";
-    if (p == "deepseek")   return "https://api.deepseek.com/models";
-    if (p == "openrouter") return "https://openrouter.ai/api/v1/models";
-    if (p == "xai")     return "https://api.x.ai/v1/models";
-    if (p == "kimi")    return "https://api.moonshot.ai/v1/models";
-    if (p == "fincept") return "https://api.fincept.in/research/llm/models";
+    if (p == "groq")
+        return "https://api.groq.com/openai/v1/models";
+    if (p == "deepseek")
+        return "https://api.deepseek.com/models";
+    if (p == "openrouter")
+        return "https://openrouter.ai/api/v1/models";
+    if (p == "xai")
+        return "https://api.x.ai/v1/models";
+    if (p == "kimi")
+        return "https://api.moonshot.ai/v1/models";
+    if (p == "aihubmix")
+        return "https://aihubmix.com/v1/models"; // fallback if prefilled base_url was cleared
+    // fincept publishes no models endpoint — /research/llm/models is a 404, and
+    // /research/llm/async takes no `model` field at all (the backend picks).
+    // fetch_models() short-circuits to the known list before reaching here.
     // minimax has no public /v1/models — caller falls back to known models.
     return {};
 }
@@ -86,13 +104,11 @@ QMap<QString, QString> LlmService::get_models_headers(const QString& provider, c
     } else if (p == "ollama") {
         // No auth.
     } else if (p == "fincept") {
-        // Same fallback as ensure_config.
+        // Same fallback as ensure_config — resolve via AuthManager
+        // (session → SecureStorage), never the plaintext settings row (CR-08).
         QString resolved_key = api_key;
-        if (resolved_key.isEmpty()) {
-            auto stored = SettingsRepository::instance().get("fincept_api_key");
-            if (stored.is_ok() && !stored.value().isEmpty())
-                resolved_key = stored.value();
-        }
+        if (resolved_key.isEmpty())
+            resolved_key = fincept::auth::AuthManager::instance().fincept_api_key();
         if (!resolved_key.isEmpty())
             h["X-API-Key"] = resolved_key;
     } else {
@@ -222,10 +238,19 @@ void LlmService::fetch_models(const QString& provider, const QString& api_key, c
                 if (error.isEmpty())
                     error = QString("HTTP %1").arg(status);
             }
+            // Logged before the provider's message is folded in: that text is for the
+            // user (it can echo a masked key fragment), not for the log file.
             LOG_WARN(TAG, QString("fetch_models %1 failed: %2 (status=%3 qt_error=%4)")
                               .arg(p, error)
                               .arg(status)
                               .arg(static_cast<int>(reply->error())));
+            // Qt's "server replied: Unauthorized" says nothing about WHY — the provider's
+            // JSON body usually does ("API key not valid", "model access denied", …).
+            if (reply->error() != QNetworkReply::OperationCanceledError) {
+                const QString server_msg = parse_server_error_message(reply->readAll());
+                if (!server_msg.isEmpty())
+                    error = status > 0 ? QString("HTTP %1: %2").arg(status).arg(server_msg) : server_msg;
+            }
         } else {
             models = parse_models_response(p, reply->readAll());
             if (models.isEmpty())

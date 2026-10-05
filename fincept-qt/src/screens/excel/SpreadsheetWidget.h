@@ -22,6 +22,14 @@ class SpreadsheetItem : public QTableWidgetItem {
     QVariant data(int role) const override;
     void setData(int role, const QVariant& value) override;
 
+    /// Qt clones the table's item prototype whenever the model has to
+    /// materialise a cell that has no item yet (typing into an empty cell,
+    /// pasting past the filled range, drag & drop). The base implementation
+    /// slices back to a plain QTableWidgetItem, which would silently disable
+    /// formula evaluation for that cell — the grid is no longer pre-populated,
+    /// so this is now the common path, not an edge case.
+    QTableWidgetItem* clone() const override;
+
     /// The raw text (may be a formula starting with '=')
     QString raw_text() const { return raw_text_; }
 
@@ -74,7 +82,19 @@ class SpreadsheetWidget : public QWidget {
     void delete_selected_rows();
     void delete_selected_cols();
 
+    /// Clipboard over the whole selected range (TSV, Excel-compatible).
+    /// Copies the RAW cell text (formulas included), matching Excel semantics.
+    void copy_selection(bool cut = false);
+    void paste_clipboard();
+    /// Blank every cell in the selection (Delete key).
+    void clear_selection();
+    /// Prompt for text and select the next matching cell (Ctrl+F / F3).
+    void find_next(bool prompt = true);
+
   signals:
+    /// Emitted on any mutation of sheet content or structure — cell edits,
+    /// paste, clear, and row/column insert/delete. ExcelScreen uses it to drive
+    /// the dirty marker and the unsaved-changes guard.
     void data_changed();
 
   private slots:
@@ -86,6 +106,10 @@ class SpreadsheetWidget : public QWidget {
   private:
     void build_ui(int rows, int cols);
     void setup_headers(int cols);
+    /// Size each column to its widest value (clamped). Measured from the source
+    /// text so formulas don't have to be evaluated just to lay the grid out.
+    void autofit_columns(const QVector<QVector<QString>>& cells);
+    void install_shortcuts();
     static QString column_label(int col);
 
     QTableWidget* table_ = nullptr;
@@ -94,6 +118,7 @@ class SpreadsheetWidget : public QWidget {
     QString sheet_name_;
 
     bool updating_formula_bar_ = false;
+    QString last_find_; // remembered Ctrl+F term so F3 can repeat it
 };
 
 } // namespace fincept::screens

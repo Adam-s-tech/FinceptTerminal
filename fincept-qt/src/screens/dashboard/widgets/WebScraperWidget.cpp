@@ -41,23 +41,24 @@ namespace {
 
 constexpr qsizetype kMaxRowsRendered = 5000; // safety cap for very large tables
 constexpr qsizetype kMaxHtmlBytes = 10 * 1024 * 1024;
+// The URL is user-configured and the body is buffered whole, so bound both the
+// wait and the size. kMaxHtmlBytes is reused deliberately: a response we would
+// refuse to parse is not worth finishing the download for.
+constexpr int kFetchTimeoutMs = 15000;
 const char* kDefaultUA = "FinceptTerminal/1.0 (compatible; WebScraperWidget)";
 
 // Decode common HTML entities + numeric char refs. Not exhaustive but covers
 // the overwhelming majority of real-world tables.
 QString decode_html_entities(QString s) {
     static const QHash<QString, QString> kNamed = {
-        {"amp", "&"},    {"lt", "<"},     {"gt", ">"},    {"quot", "\""},
-        {"apos", "'"},   {"nbsp", " "},   {"ndash", "–"}, {"mdash", "—"},
-        {"hellip", "…"}, {"laquo", "«"},  {"raquo", "»"}, {"copy", "©"},
-        {"reg", "®"},    {"trade", "™"},  {"euro", "€"},  {"pound", "£"},
-        {"yen", "¥"},    {"cent", "¢"},   {"deg", "°"},   {"plusmn", "±"},
-        {"times", "×"},  {"divide", "÷"}, {"middot", "·"}, {"bull", "•"},
-        {"larr", "←"},   {"rarr", "→"},   {"uarr", "↑"},  {"darr", "↓"},
-        {"lsquo", "'"},  {"rsquo", "'"},  {"ldquo", "“"}, {"rdquo", "”"},
+        {"amp", "&"},   {"lt", "<"},     {"gt", ">"},     {"quot", "\""},  {"apos", "'"},   {"nbsp", " "},
+        {"ndash", "–"}, {"mdash", "—"},  {"hellip", "…"}, {"laquo", "«"},  {"raquo", "»"},  {"copy", "©"},
+        {"reg", "®"},   {"trade", "™"},  {"euro", "€"},   {"pound", "£"},  {"yen", "¥"},    {"cent", "¢"},
+        {"deg", "°"},   {"plusmn", "±"}, {"times", "×"},  {"divide", "÷"}, {"middot", "·"}, {"bull", "•"},
+        {"larr", "←"},  {"rarr", "→"},   {"uarr", "↑"},   {"darr", "↓"},   {"lsquo", "'"},  {"rsquo", "'"},
+        {"ldquo", "“"}, {"rdquo", "”"},
     };
-    static const QRegularExpression kEntity(
-        QStringLiteral("&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+[0-9]*);"));
+    static const QRegularExpression kEntity(QStringLiteral("&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+[0-9]*);"));
     QString out;
     out.reserve(s.size());
     int pos = 0;
@@ -91,12 +92,12 @@ QString decode_html_entities(QString s) {
 
 // Strip tags and collapse whitespace within a single table cell.
 QString strip_tags(const QString& frag) {
-    static const QRegularExpression kScript(
-        QStringLiteral("<script[^>]*>.*?</script>"),
-        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
-    static const QRegularExpression kStyle(
-        QStringLiteral("<style[^>]*>.*?</style>"),
-        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression kScript(QStringLiteral("<script[^>]*>.*?</script>"),
+                                            QRegularExpression::CaseInsensitiveOption |
+                                                QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression kStyle(QStringLiteral("<style[^>]*>.*?</style>"),
+                                           QRegularExpression::CaseInsensitiveOption |
+                                               QRegularExpression::DotMatchesEverythingOption);
     static const QRegularExpression kBr(QStringLiteral("<br\\s*/?>|</(p|div|li|tr)>"),
                                         QRegularExpression::CaseInsensitiveOption);
     static const QRegularExpression kTag(QStringLiteral("<[^>]+>"));
@@ -114,8 +115,7 @@ QString strip_tags(const QString& frag) {
 
 // Guess encoding: 1) explicit override, 2) charset in Content-Type,
 // 3) <meta charset=…> sniff, 4) utf-8.
-QString detect_charset(const QByteArray& head_bytes, const QString& content_type,
-                       const QString& override_enc) {
+QString detect_charset(const QByteArray& head_bytes, const QString& content_type, const QString& override_enc) {
     if (!override_enc.isEmpty())
         return override_enc;
     static const QRegularExpression kCT(QStringLiteral("charset\\s*=\\s*([\\w\\-]+)"),
@@ -123,9 +123,8 @@ QString detect_charset(const QByteArray& head_bytes, const QString& content_type
     if (const auto m = kCT.match(content_type); m.hasMatch())
         return m.captured(1);
     const QString head = QString::fromLatin1(head_bytes.left(2048));
-    static const QRegularExpression kMeta(
-        QStringLiteral("<meta[^>]+charset\\s*=\\s*[\"']?([\\w\\-]+)"),
-        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression kMeta(QStringLiteral("<meta[^>]+charset\\s*=\\s*[\"']?([\\w\\-]+)"),
+                                          QRegularExpression::CaseInsensitiveOption);
     if (const auto m = kMeta.match(head); m.hasMatch())
         return m.captured(1);
     return QStringLiteral("utf-8");
@@ -175,8 +174,7 @@ QJsonValue walk_json_path(const QJsonValue& root, const QString& dotted) {
 
 // ─── ctor / dtor ──────────────────────────────────────────────────────────
 
-WebScraperWidget::WebScraperWidget(const QJsonObject& cfg, QWidget* parent)
-    : BaseWidget(tr("WEB SCRAPER"), parent) {
+WebScraperWidget::WebScraperWidget(const QJsonObject& cfg, QWidget* parent) : BaseWidget(tr("WEB SCRAPER"), parent) {
     net_ = new QNetworkAccessManager(this);
     connect(net_, &QNetworkAccessManager::finished, this, &WebScraperWidget::handle_reply);
 
@@ -194,9 +192,15 @@ WebScraperWidget::WebScraperWidget(const QJsonObject& cfg, QWidget* parent)
 }
 
 WebScraperWidget::~WebScraperWidget() {
-    if (pending_reply_) {
-        pending_reply_->abort();
-        pending_reply_->deleteLater();
+    // Detach BEFORE aborting. abort() emits finished() synchronously, which runs
+    // handle_reply() on this very stack; that slot clears pending_reply_, so the
+    // old `pending_reply_->deleteLater()` here dereferenced a null QPointer.
+    // Clearing first also makes handle_reply() early-return instead of calling
+    // set_loading()/set_status() on a half-destroyed widget.
+    if (QNetworkReply* r = pending_reply_.data()) {
+        pending_reply_.clear();
+        r->abort();
+        r->deleteLater();
     }
 }
 
@@ -239,7 +243,7 @@ void WebScraperWidget::build_ui() {
 
 void WebScraperWidget::apply_styles() {
     const QString badge_css = QString("color:%1;background:%2;border-radius:3px;"
-                                       "padding:2px 6px;font-size:10px;font-weight:700;")
+                                      "padding:2px 6px;font-size:10px;font-weight:700;")
                                   .arg(ui::colors::TEXT_ON_ACCENT())
                                   .arg(ui::colors::AMBER());
     if (format_badge_)
@@ -340,20 +344,31 @@ void WebScraperWidget::on_auto_refresh_tick() {
 
 void WebScraperWidget::start_fetch() {
     const QUrl url(url_);
-    if (!url.isValid() || url.scheme().isEmpty()) {
+    // Web pages only. QNetworkAccessManager will also happily serve file:// and
+    // qrc:// URLs, and this URL is free text (also settable via the MCP
+    // add-widget tool), which would let a tile render arbitrary local files.
+    const bool web_scheme = url.scheme() == QLatin1String("http") || url.scheme() == QLatin1String("https");
+    if (!url.isValid() || !web_scheme) {
         set_status(tr("Invalid URL"), true);
         return;
     }
-    if (pending_reply_) {
-        pending_reply_->abort();
-        pending_reply_->deleteLater();
+    // Same detach-before-abort ordering as the destructor: abort() delivers
+    // finished() synchronously and handle_reply() clears pending_reply_, so
+    // touching it after the abort was a null dereference.
+    if (QNetworkReply* r = pending_reply_.data()) {
         pending_reply_.clear();
+        r->abort();
+        r->deleteLater();
     }
 
     set_loading(true);
     set_status(tr("Fetching…"));
 
     QNetworkRequest req(url);
+    // Without a timeout a slow or half-open endpoint leaves pending_reply_ set
+    // forever, and on_auto_refresh_tick() skips while it is set — so one stuck
+    // fetch permanently disables this widget's auto-refresh.
+    req.setTransferTimeout(kFetchTimeoutMs);
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     req.setHeader(QNetworkRequest::UserAgentHeader,
                   user_agent_.isEmpty() ? QString::fromLatin1(kDefaultUA) : user_agent_);
@@ -363,7 +378,20 @@ void WebScraperWidget::start_fetch() {
     for (auto it = headers_.cbegin(); it != headers_.cend(); ++it)
         req.setRawHeader(it.key().toUtf8(), it.value().toUtf8());
 
-    pending_reply_ = net_->get(req);
+    QNetworkReply* reply = net_->get(req);
+    pending_reply_ = reply;
+
+    // The whole body is buffered in memory, and the URL is user-configured, so
+    // an oversized endpoint would inflate process RSS without bound. Abort as
+    // soon as either the advertised or the received size crosses the cap.
+    connect(reply, &QNetworkReply::downloadProgress, reply,
+            [reply](qint64 received, qint64 total) {
+                if (received > kMaxHtmlBytes || total > kMaxHtmlBytes) {
+                    LOG_WARN("WebScraper", QString("Response exceeds %1 bytes — aborting")
+                                               .arg(kMaxHtmlBytes));
+                    reply->abort();
+                }
+            });
 }
 
 void WebScraperWidget::handle_reply(QNetworkReply* reply) {
@@ -399,8 +427,8 @@ void WebScraperWidget::parse_payload(const QByteArray& body, const QString& cont
     auto try_html = [&]() {
         const QString enc = detect_charset(body, content_type, encoding_);
         auto decoder = QStringDecoder(enc.toUtf8().constData());
-        QString text = decoder.isValid() ? decoder.decode(body.left(kMaxHtmlBytes))
-                                          : QString::fromUtf8(body.left(kMaxHtmlBytes));
+        QString text =
+            decoder.isValid() ? decoder.decode(body.left(kMaxHtmlBytes)) : QString::fromUtf8(body.left(kMaxHtmlBytes));
         tables_ = parse_html_tables(text);
         if (!tables_.isEmpty())
             detected_fmt = "HTML";
@@ -453,8 +481,7 @@ void WebScraperWidget::parse_payload(const QByteArray& body, const QString& cont
             const QByteArray head = body.left(256).trimmed();
             if (head.startsWith('{') || head.startsWith('['))
                 try_json();
-            else if (head.startsWith("<?xml") || head.startsWith("<rss") ||
-                     head.startsWith("<feed"))
+            else if (head.startsWith("<?xml") || head.startsWith("<rss") || head.startsWith("<feed"))
                 try_xml();
             else if (head.contains("<table") || head.contains("<TABLE") || head.contains("<html") ||
                      head.contains("<!DOCTYPE"))
@@ -476,15 +503,13 @@ void WebScraperWidget::parse_payload(const QByteArray& body, const QString& cont
     table_combo_->clear();
     for (int i = 0; i < tables_.size(); ++i)
         table_combo_->addItem(tr("%1 (%2 rows)")
-                                  .arg(tables_[i].label.isEmpty() ? tr("Table %1").arg(i + 1)
-                                                                   : tables_[i].label)
+                                  .arg(tables_[i].label.isEmpty() ? tr("Table %1").arg(i + 1) : tables_[i].label)
                                   .arg(tables_[i].rows.size()));
     if (tables_.isEmpty()) {
         table_combo_->setEnabled(false);
         table_->clear_data();
         table_->set_headers({});
-        set_status(tr("No tabular data found — site may require JavaScript. Try its JSON API URL instead."),
-                   true);
+        set_status(tr("No tabular data found — site may require JavaScript. Try its JSON API URL instead."), true);
         return;
     }
     table_combo_->setEnabled(tables_.size() > 1);
@@ -525,8 +550,7 @@ void WebScraperWidget::set_status(const QString& msg, bool error) {
         return;
     status_label_->setText(msg);
     const QColor c = error ? ui::colors::NEGATIVE() : ui::colors::TEXT_TERTIARY();
-    status_label_->setStyleSheet(
-        QString("color:%1;font-size:11px;background:transparent;").arg(c.name()));
+    status_label_->setStyleSheet(QString("color:%1;font-size:11px;background:transparent;").arg(c.name()));
 }
 
 // ─── HTML parser ──────────────────────────────────────────────────────────
@@ -534,20 +558,20 @@ void WebScraperWidget::set_status(const QString& msg, bool error) {
 QVector<ScrapedTable> WebScraperWidget::parse_html_tables(const QString& html) const {
     QVector<ScrapedTable> out;
 
-    static const QRegularExpression kTableRe(
-        QStringLiteral("<table\\b[^>]*>(.*?)</table>"),
-        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
-    static const QRegularExpression kRowRe(
-        QStringLiteral("<tr\\b[^>]*>(.*?)</tr>"),
-        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
-    static const QRegularExpression kCellRe(
-        QStringLiteral("<(t[hd])\\b([^>]*)>(.*?)</\\1>"),
-        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression kTableRe(QStringLiteral("<table\\b[^>]*>(.*?)</table>"),
+                                             QRegularExpression::CaseInsensitiveOption |
+                                                 QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression kRowRe(QStringLiteral("<tr\\b[^>]*>(.*?)</tr>"),
+                                           QRegularExpression::CaseInsensitiveOption |
+                                               QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression kCellRe(QStringLiteral("<(t[hd])\\b([^>]*)>(.*?)</\\1>"),
+                                            QRegularExpression::CaseInsensitiveOption |
+                                                QRegularExpression::DotMatchesEverythingOption);
     static const QRegularExpression kColspanRe(QStringLiteral("colspan\\s*=\\s*\"?(\\d+)\"?"),
-                                                QRegularExpression::CaseInsensitiveOption);
-    static const QRegularExpression kCaptionRe(
-        QStringLiteral("<caption[^>]*>(.*?)</caption>"),
-        QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
+                                               QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression kCaptionRe(QStringLiteral("<caption[^>]*>(.*?)</caption>"),
+                                               QRegularExpression::CaseInsensitiveOption |
+                                                   QRegularExpression::DotMatchesEverythingOption);
 
     int table_idx = 0;
     auto tit = kTableRe.globalMatch(html);
@@ -925,8 +949,7 @@ QDialog* WebScraperWidget::make_config_dialog(QWidget* parent) {
 
     auto* fmt_combo = new QComboBox(dlg);
     fmt_combo->addItems({tr("Auto-detect"), "HTML", "JSON", "CSV", "TSV", "XML"});
-    const QMap<QString, int> fmt_idx = {{"", 0},    {"html", 1}, {"json", 2},
-                                         {"csv", 3}, {"tsv", 4},  {"xml", 5}};
+    const QMap<QString, int> fmt_idx = {{"", 0}, {"html", 1}, {"json", 2}, {"csv", 3}, {"tsv", 4}, {"xml", 5}};
     fmt_combo->setCurrentIndex(fmt_idx.value(force_format_.toLower(), 0));
     form->addRow(tr("Format"), fmt_combo);
 
@@ -949,9 +972,8 @@ QDialog* WebScraperWidget::make_config_dialog(QWidget* parent) {
     headers_edit->setMaximumHeight(100);
     form->addRow(tr("Extra headers"), headers_edit);
 
-    auto* help = new QLabel(
-        tr("Auto-detects HTML tables, JSON arrays/objects, CSV/TSV, XML/RSS/Atom. "
-           "If the page renders tables via JavaScript, use its underlying API URL instead."));
+    auto* help = new QLabel(tr("Auto-detects HTML tables, JSON arrays/objects, CSV/TSV, XML/RSS/Atom. "
+                               "If the page renders tables via JavaScript, use its underlying API URL instead."));
     help->setWordWrap(true);
     help->setStyleSheet(QString("color:%1;font-size:11px;").arg(ui::colors::TEXT_TERTIARY()));
     form->addRow(help);
@@ -959,46 +981,51 @@ QDialog* WebScraperWidget::make_config_dialog(QWidget* parent) {
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dlg);
     form->addRow(buttons);
 
-    connect(buttons, &QDialogButtonBox::accepted, dlg, [this, dlg, url_edit, refresh_spin, ua_edit,
-                                                         fmt_combo, enc_edit, json_path_edit,
-                                                         headers_edit]() {
-        QJsonObject cfg;
-        cfg.insert("url", url_edit->text().trimmed());
-        cfg.insert("refresh_sec", refresh_spin->value());
-        cfg.insert("table_index", 0); // reset on URL change
-        if (!ua_edit->text().isEmpty())
-            cfg.insert("user_agent", ua_edit->text());
+    connect(buttons, &QDialogButtonBox::accepted, dlg,
+            [this, dlg, url_edit, refresh_spin, ua_edit, fmt_combo, enc_edit, json_path_edit, headers_edit]() {
+                QJsonObject cfg;
+                cfg.insert("url", url_edit->text().trimmed());
+                cfg.insert("refresh_sec", refresh_spin->value());
+                cfg.insert("table_index", 0); // reset on URL change
+                if (!ua_edit->text().isEmpty())
+                    cfg.insert("user_agent", ua_edit->text());
 
-        const QStringList fmts = {"", "html", "json", "csv", "tsv", "xml"};
-        const int fi = fmt_combo->currentIndex();
-        if (fi > 0 && fi < fmts.size())
-            cfg.insert("force_format", fmts[fi]);
+                const QStringList fmts = {"", "html", "json", "csv", "tsv", "xml"};
+                const int fi = fmt_combo->currentIndex();
+                if (fi > 0 && fi < fmts.size())
+                    cfg.insert("force_format", fmts[fi]);
 
-        if (!enc_edit->text().isEmpty())
-            cfg.insert("encoding", enc_edit->text());
-        if (!json_path_edit->text().isEmpty())
-            cfg.insert("json_path", json_path_edit->text());
+                if (!enc_edit->text().isEmpty())
+                    cfg.insert("encoding", enc_edit->text());
+                if (!json_path_edit->text().isEmpty())
+                    cfg.insert("json_path", json_path_edit->text());
 
-        QJsonObject hdrs;
-        const QStringList lines = headers_edit->toPlainText().split('\n', Qt::SkipEmptyParts);
-        for (const QString& l : lines) {
-            const int colon = l.indexOf(':');
-            if (colon <= 0)
-                continue;
-            const QString k = l.left(colon).trimmed();
-            const QString v = l.mid(colon + 1).trimmed();
-            if (!k.isEmpty())
-                hdrs.insert(k, v);
-        }
-        if (!hdrs.isEmpty())
-            cfg.insert("headers", hdrs);
+                QJsonObject hdrs;
+                const QStringList lines = headers_edit->toPlainText().split('\n', Qt::SkipEmptyParts);
+                for (const QString& l : lines) {
+                    const int colon = l.indexOf(':');
+                    if (colon <= 0)
+                        continue;
+                    const QString k = l.left(colon).trimmed();
+                    const QString v = l.mid(colon + 1).trimmed();
+                    if (!k.isEmpty())
+                        hdrs.insert(k, v);
+                }
+                if (!hdrs.isEmpty())
+                    cfg.insert("headers", hdrs);
 
-        apply_config(cfg);
-        emit config_changed(cfg);
-        dlg->accept();
-    });
+                apply_config(cfg);
+                emit config_changed(cfg);
+                dlg->accept();
+            });
     connect(buttons, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
     return dlg;
+}
+
+void WebScraperWidget::retranslateUi() {
+    BaseWidget::retranslateUi();
+    set_title(tr("WEB SCRAPER"));
+    render_selected_table(); // re-renders status / format badge / "no data" labels
 }
 
 } // namespace fincept::screens::widgets

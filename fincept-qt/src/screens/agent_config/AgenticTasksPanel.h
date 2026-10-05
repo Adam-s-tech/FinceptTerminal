@@ -8,6 +8,7 @@
 // controls and an editable plan view (read-only in Phase 1; editable in Phase 2).
 
 #pragma once
+#include <QEvent>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QWidget>
@@ -21,6 +22,7 @@ class QListWidgetItem;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
+class QTimer;
 
 namespace fincept::screens {
 
@@ -31,6 +33,7 @@ class AgenticTasksPanel : public QWidget {
 
   protected:
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void refresh_list();
@@ -42,6 +45,7 @@ class AgenticTasksPanel : public QWidget {
     void on_delete_clicked();
     void on_reply_clicked();
     void on_schedule_clicked();
+    void on_schedules_clicked();
     void on_libraries_clicked();
 
   private:
@@ -53,24 +57,39 @@ class AgenticTasksPanel : public QWidget {
     void render_budget(const QJsonObject& budget);
     void render_question(const QString& question);
     void clear_question();
+    /// Rate-limited refresh_list(): task events arrive in bursts and every list
+    /// refresh spawns a Python process. Defers while the tab is hidden.
+    void request_refresh();
     static QString status_color_for(const QString& status);
 
+    /// Re-apply tr() lookups to every widget whose text we keep a handle to.
+    /// Called from changeEvent() on QEvent::LanguageChange.
+    void retranslateUi();
+
+    QLabel* filter_title_ = nullptr;
     QComboBox* filter_combo_ = nullptr;
     QPushButton* refresh_btn_ = nullptr;
     QListWidget* task_list_ = nullptr;
     QLabel* detail_header_ = nullptr;
     QLabel* detail_meta_ = nullptr;
+    QLabel* plan_title_ = nullptr;
     QPlainTextEdit* plan_view_ = nullptr;
+    QLabel* step_log_title_ = nullptr;
     QPlainTextEdit* step_log_ = nullptr;
     QPushButton* pause_btn_ = nullptr;
     QPushButton* resume_btn_ = nullptr;
     QPushButton* cancel_btn_ = nullptr;
     QPushButton* delete_btn_ = nullptr;
     QPushButton* schedule_btn_ = nullptr;
+    QPushButton* schedules_btn_ = nullptr;
     QPushButton* libraries_btn_ = nullptr;
 
     // Budget meter (per-task, updated from task_event.budget snapshot).
     QLabel* budget_label_ = nullptr;
+    QLabel* budget_tokens_label_ = nullptr;
+    QLabel* budget_cost_label_ = nullptr;
+    QLabel* budget_wall_label_ = nullptr;
+    QLabel* budget_steps_label_ = nullptr;
     QProgressBar* budget_tokens_bar_ = nullptr;
     QProgressBar* budget_cost_bar_ = nullptr;
     QProgressBar* budget_wall_bar_ = nullptr;
@@ -78,12 +97,15 @@ class AgenticTasksPanel : public QWidget {
 
     // HITL banner: only visible when task.status == paused_for_input.
     QFrame* question_banner_ = nullptr;
+    QLabel* question_title_ = nullptr;
     QLabel* question_label_ = nullptr;
     QLineEdit* reply_edit_ = nullptr;
     QPushButton* reply_btn_ = nullptr;
 
     QString selected_task_id_;
     bool first_show_ = true;
+    bool stale_ = false;                 // events arrived while hidden — refresh on next show
+    QTimer* refresh_throttle_ = nullptr; // single-shot, armed by request_refresh()
 };
 
 } // namespace fincept::screens

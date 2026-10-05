@@ -18,17 +18,16 @@ namespace fincept::ui {
 QuickCommandBar::QuickCommandBar(QWidget* parent) : QFrame(parent) {
     setObjectName("QuickCommandBar");
     setFrameShape(QFrame::NoFrame);
-    setStyleSheet(
-        "QFrame#QuickCommandBar {"
-        "  background: #0f172a;"
-        "  border-top: 1px solid #374151;"
-        "}"
-        "QLineEdit {"
-        "  background: #111827; color: #e5e7eb;"
-        "  border: 1px solid #374151; padding: 4px 8px;"
-        "  font-family: 'Consolas', monospace;"
-        "}"
-        "QLabel { color: #9ca3af; }");
+    setStyleSheet("QFrame#QuickCommandBar {"
+                  "  background: #0f172a;"
+                  "  border-top: 1px solid #374151;"
+                  "}"
+                  "QLineEdit {"
+                  "  background: #111827; color: #e5e7eb;"
+                  "  border: 1px solid #374151; padding: 4px 8px;"
+                  "  font-family: 'Consolas', monospace;"
+                  "}"
+                  "QLabel { color: #9ca3af; }");
     setFixedHeight(28);
 
     auto* hl = new QHBoxLayout(this);
@@ -40,7 +39,7 @@ QuickCommandBar::QuickCommandBar(QWidget* parent) : QFrame(parent) {
     hl->addWidget(prompt);
 
     input_ = new QLineEdit(this);
-    input_->setPlaceholderText("Type a command (e.g. 'layout switch \"Morning\"', AAPL, ?). Esc to dismiss.");
+    input_->setPlaceholderText(tr("Type a command (e.g. 'layout switch \"Morning\"', AAPL, ?). Esc to dismiss."));
     connect(input_, &QLineEdit::returnPressed, this, &QuickCommandBar::on_submit);
     hl->addWidget(input_, /*stretch=*/1);
 
@@ -49,6 +48,20 @@ QuickCommandBar::QuickCommandBar(QWidget* parent) : QFrame(parent) {
     hl->addWidget(hint_);
 
     hide(); // toggle to show
+}
+
+void QuickCommandBar::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QFrame::changeEvent(event);
+}
+
+void QuickCommandBar::retranslateUi() {
+    // Only the persistent placeholder is re-applied here. Hint text is transient
+    // (set by show_hint in response to user actions) and picks up the new locale
+    // the next time it is shown.
+    if (input_)
+        input_->setPlaceholderText(tr("Type a command (e.g. 'layout switch \"Morning\"', AAPL, ?). Esc to dismiss."));
 }
 
 void QuickCommandBar::toggle_visible() {
@@ -69,10 +82,10 @@ void QuickCommandBar::surface() {
 }
 
 void QuickCommandBar::show_hint(const QString& text, bool is_error) {
-    if (!hint_) return;
+    if (!hint_)
+        return;
     hint_->setText(text);
-    hint_->setStyleSheet(is_error ? "color: #dc2626; font-size: 10px;"
-                                  : "color: #9ca3af; font-size: 10px;");
+    hint_->setStyleSheet(is_error ? "color: #dc2626; font-size: 10px;" : "color: #9ca3af; font-size: 10px;");
 }
 
 void QuickCommandBar::on_submit() {
@@ -85,7 +98,7 @@ void QuickCommandBar::on_submit() {
         case ParsedCommand::Kind::Empty:
             return;
         case ParsedCommand::Kind::Help:
-            show_hint("Help: type any verb (e.g. 'layout switch') or a ticker (AAPL).", false);
+            show_hint(tr("Help: type any verb (e.g. 'layout switch') or a ticker (AAPL)."), false);
             return;
         case ParsedCommand::Kind::Symbol: {
             // Route to link.publish_to_group with the first enabled group
@@ -102,7 +115,7 @@ void QuickCommandBar::on_submit() {
             if (r.is_err()) {
                 show_hint(QString::fromStdString(r.error()), true);
             } else {
-                show_hint(QString("Published %1 to group A").arg(parsed.args.value("symbol").toString()), false);
+                show_hint(tr("Published %1 to group A").arg(parsed.args.value("symbol").toString()), false);
                 input_->clear();
             }
             return;
@@ -115,10 +128,8 @@ void QuickCommandBar::on_submit() {
             auto r = ActionRegistry::instance().invoke(parsed.action_id, ctx);
             if (r.is_err()) {
                 show_hint(QString::fromStdString(r.error()), true);
-                ToastService::instance().post(
-                    ToastService::Severity::Warning,
-                    QString::fromStdString(r.error()),
-                    "command_bar");
+                ToastService::instance().post(ToastService::Severity::Warning, QString::fromStdString(r.error()),
+                                              "command_bar");
             } else {
                 show_hint(QString("✓ %1").arg(parsed.action_id), false);
                 input_->clear();
@@ -126,7 +137,7 @@ void QuickCommandBar::on_submit() {
             return;
         }
         case ParsedCommand::Kind::Unknown:
-            show_hint(parsed.error.isEmpty() ? "Unknown command" : parsed.error, true);
+            show_hint(parsed.error.isEmpty() ? tr("Unknown command") : parsed.error, true);
             return;
     }
 }

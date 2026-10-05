@@ -25,7 +25,7 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
         return l;
     };
 
-    hl->addWidget(mk("v4.0.3", "sbVersion"));
+    hl->addWidget(mk("v" FINCEPT_VERSION_STRING, "sbVersion"));
     hl->addWidget(mk("  |  ", "sbSep"));
     const char* feeds[] = {"EQ", "FX", "CM", "FI", "CR"};
     for (auto& f : feeds) {
@@ -119,20 +119,16 @@ void StatusBar::update_link_label(fincept::SymbolGroup g, const fincept::SymbolR
     if (g == fincept::SymbolGroup::None) {
         text = ref.display();
     } else {
-        text = QString("%1 · %2")
-                   .arg(QChar(fincept::symbol_group_letter(g)))
-                   .arg(ref.display());
+        text = QString("%1 · %2").arg(QChar(fincept::symbol_group_letter(g))).arg(ref.display());
     }
     link_label_->setText(text);
     link_label_->setVisible(true);
 
     // Tint the label with the group's colour so it visually echoes the
     // GroupBadge in the panel tab. Falls back to TEXT_DIM for unlinked.
-    const QColor tint = (g == fincept::SymbolGroup::None)
-                            ? QColor(colors::TEXT_DIM())
-                            : SymbolGroupRegistry::instance().color(g);
-    link_label_->setStyleSheet(QString("color:%1;background:transparent;font-weight:600;")
-                                   .arg(tint.name()));
+    const QColor tint =
+        (g == fincept::SymbolGroup::None) ? QColor(colors::TEXT_DIM()) : SymbolGroupRegistry::instance().color(g);
+    link_label_->setStyleSheet(QString("color:%1;background:transparent;font-weight:600;").arg(tint.name()));
 }
 
 void StatusBar::refresh_theme() {

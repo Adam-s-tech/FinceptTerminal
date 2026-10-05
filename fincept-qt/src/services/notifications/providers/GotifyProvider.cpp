@@ -1,4 +1,4 @@
-#include "services/notifications/providers/GotifyProvider.h"
+﻿#include "services/notifications/providers/GotifyProvider.h"
 
 #include "network/http/HttpClient.h"
 
@@ -8,12 +8,12 @@ namespace fincept::notifications {
 
 void GotifyProvider::load_fields(SettingsRepository& r, const QString& cat) {
     server_url_ = get_str(r, cat + ".server_url");
-    app_token_ = get_str(r, cat + ".app_token");
+    app_token_ = get_secret(r, cat + ".app_token");
 }
 
 void GotifyProvider::save_fields(SettingsRepository& r, const QString& cat) {
     r.set(cat + ".server_url", server_url_, cat);
-    r.set(cat + ".app_token", app_token_, cat);
+    set_secret(r, cat + ".app_token", app_token_, cat);
 }
 
 void GotifyProvider::send(const NotificationRequest& req, std::function<void(bool, QString)> cb) {
@@ -36,20 +36,27 @@ void GotifyProvider::send(const NotificationRequest& req, std::function<void(boo
     }();
 
     const QString base = server_url_.endsWith('/') ? server_url_.chopped(1) : server_url_;
-    const QString url = QString("%1/message?token=%2").arg(base, app_token_);
+    // The app token rides in X-Gotify-Key, not the query string, so it can never
+    // end up in a URL log line.
+    const QString url = QString("%1/message").arg(base);
 
     QJsonObject body;
     body["title"] = req.title;
     body["message"] = req.message;
     body["priority"] = priority;
 
-    HttpClient::instance().post(url, body, [cb](Result<QJsonDocument> res) {
-        if (res.is_err()) {
-            cb(false, QString::fromStdString(res.error()));
-            return;
-        }
-        cb(true, {});
-    });
+    HttpClient::Headers headers;
+    headers.insert("X-Gotify-Key", app_token_.toUtf8());
+    HttpClient::instance().post(
+        url, body,
+        [cb](Result<QJsonDocument> res) {
+            if (res.is_err()) {
+                cb(false, QString::fromStdString(res.error()));
+                return;
+            }
+            cb(true, {});
+        },
+        nullptr, headers);
 }
 
 } // namespace fincept::notifications

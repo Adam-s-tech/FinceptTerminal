@@ -3,6 +3,7 @@
 #include "core/result/Result.h"
 #include "services/wallet/WalletTypes.h"
 
+#include <QEvent>
 #include <QHash>
 #include <QString>
 #include <QVariant>
@@ -57,10 +58,12 @@ class SwapPanel : public QWidget {
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     void build_ui();
     void apply_theme();
+    void retranslateUi();
 
     void on_wallet_connected(const QString& pubkey, const QString& label);
     void on_wallet_disconnected();
@@ -116,6 +119,17 @@ class SwapPanel : public QWidget {
     QPushButton* swap_button_ = nullptr;
     QLabel* status_label_ = nullptr;
 
+    // Fixed UI captions / chrome (cached for retranslateUi)
+    QLabel* head_title_ = nullptr;       // "SWAP"
+    QLabel* head_status_ = nullptr;      // "via PumpPortal · pool=auto"
+    QLabel* pay_caption_ = nullptr;      // "YOU PAY"
+    QLabel* from_caption_ = nullptr;     // "FROM"
+    QLabel* receive_caption_ = nullptr;  // "YOU RECEIVE (EST.)"
+    QLabel* to_caption_ = nullptr;       // "TO"
+    QLabel* route_caption_ = nullptr;    // "ROUTE"
+    QLabel* impact_caption_ = nullptr;   // "PRICE IMPACT"
+    QLabel* slippage_caption_ = nullptr; // "MAX SLIPPAGE"
+
     // Debounce for estimate recompute on every keystroke.
     QTimer* debounce_timer_ = nullptr;
 
@@ -129,10 +143,16 @@ class SwapPanel : public QWidget {
     /// switched to a specific mint that may not be present in the combo yet.
     /// Cleared once applied.
     QString pending_from_mint_;
-    QHash<QString, double> price_usd_;     ///< mint → USD per 1 token
-    QHash<QString, double> price_sol_;     ///< mint → SOL per 1 token
-    QHash<QString, QString> price_topic_;  ///< mint → topic (for unsubscribe)
+    QHash<QString, double> price_usd_;    ///< mint → USD per 1 token
+    QHash<QString, double> price_sol_;    ///< mint → SOL per 1 token
+    QHash<QString, qint64> price_ts_;     ///< mint → unix ms of the last valid quote
+    QHash<QString, QString> price_topic_; ///< mint → topic (for unsubscribe)
     bool busy_ = false;
+
+    /// Age (ms) of the oldest leg price used by the last `recompute_estimate`.
+    /// Surfaced in the ticket and repeated in the confirm dialog so the user
+    /// never sizes a swap on a silently-frozen quote. -1 = unknown.
+    qint64 last_quote_age_ms_ = -1;
 };
 
 } // namespace fincept::screens::panels

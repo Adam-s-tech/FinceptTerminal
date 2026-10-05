@@ -14,9 +14,9 @@ namespace fincept::trading::hyperliquid {
 
 namespace {
 const QString kMainnetRest = QStringLiteral("https://api.hyperliquid.xyz");
-const QString kMainnetWs   = QStringLiteral("wss://api.hyperliquid.xyz/ws");
+const QString kMainnetWs = QStringLiteral("wss://api.hyperliquid.xyz/ws");
 const QString kTestnetRest = QStringLiteral("https://api.hyperliquid-testnet.xyz");
-const QString kTestnetWs   = QStringLiteral("wss://api.hyperliquid-testnet.xyz/ws");
+const QString kTestnetWs = QStringLiteral("wss://api.hyperliquid-testnet.xyz/ws");
 } // namespace
 
 class HyperliquidClient::WsHolder : public QObject {
@@ -24,25 +24,27 @@ class HyperliquidClient::WsHolder : public QObject {
     explicit WsHolder(HyperliquidClient* parent) : QObject(parent), owner_(parent) {
         connect(&socket_, &QWebSocket::connected, this, [this]() {
             owner_->emit ws_state_changed(static_cast<int>(QAbstractSocket::ConnectedState));
-            for (const auto& s : pending_subs_) socket_.sendTextMessage(s);
+            for (const auto& s : pending_subs_)
+                socket_.sendTextMessage(s);
             pending_subs_.clear();
         });
-        connect(&socket_, &QWebSocket::disconnected, this, [this]() {
-            owner_->emit ws_state_changed(static_cast<int>(QAbstractSocket::UnconnectedState));
+        connect(&socket_, &QWebSocket::disconnected, this,
+                [this]() { owner_->emit ws_state_changed(static_cast<int>(QAbstractSocket::UnconnectedState)); });
+        connect(&socket_, &QWebSocket::textMessageReceived, this, [this](const QString& s) {
+            auto doc = QJsonDocument::fromJson(s.toUtf8());
+            if (doc.isObject())
+                emit owner_->ws_message(doc.object());
         });
-        connect(&socket_, &QWebSocket::textMessageReceived, this,
-                [this](const QString& s) {
-                    auto doc = QJsonDocument::fromJson(s.toUtf8());
-                    if (doc.isObject()) emit owner_->ws_message(doc.object());
-                });
     }
 
     void open(const QString& url) { socket_.open(QUrl(url)); }
     void close() { socket_.close(); }
     bool is_open() const { return socket_.state() == QAbstractSocket::ConnectedState; }
     void send_or_queue(const QString& text) {
-        if (is_open()) socket_.sendTextMessage(text);
-        else pending_subs_.append(text);
+        if (is_open())
+            socket_.sendTextMessage(text);
+        else
+            pending_subs_.append(text);
     }
 
   private:
@@ -52,17 +54,29 @@ class HyperliquidClient::WsHolder : public QObject {
 };
 
 HyperliquidClient::HyperliquidClient(QObject* parent) : QObject(parent) {}
-HyperliquidClient::~HyperliquidClient() { disconnect_ws(); }
+HyperliquidClient::~HyperliquidClient() {
+    disconnect_ws();
+}
 
-void HyperliquidClient::set_testnet(bool testnet) { testnet_ = testnet; }
+void HyperliquidClient::set_testnet(bool testnet) {
+    testnet_ = testnet;
+}
 
-QString HyperliquidClient::rest_base() const { return testnet_ ? kTestnetRest : kMainnetRest; }
-QString HyperliquidClient::ws_base() const { return testnet_ ? kTestnetWs : kMainnetWs; }
+QString HyperliquidClient::rest_base() const {
+    return testnet_ ? kTestnetRest : kMainnetRest;
+}
+QString HyperliquidClient::ws_base() const {
+    return testnet_ ? kTestnetWs : kMainnetWs;
+}
 
 void HyperliquidClient::post_json(const QString& url, const QJsonObject& body, JsonCallback cb) {
     static QNetworkAccessManager s_nam;
     QNetworkRequest req(QUrl{url});
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    // 30s transfer timeout so a stalled connection errors instead of hanging a
+    // round forever. Safe for the live venue too: HL REST normally replies in
+    // well under a second, and a timed-out order surfaces as a venue error.
+    req.setTransferTimeout(30000);
     QPointer<HyperliquidClient> self(this);
     auto* reply = s_nam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [reply, cb]() {
@@ -92,12 +106,14 @@ void HyperliquidClient::exchange(const QJsonObject& signed_envelope, JsonCallbac
 }
 
 void HyperliquidClient::connect_ws() {
-    if (!ws_) ws_ = new WsHolder(this);
+    if (!ws_)
+        ws_ = new WsHolder(this);
     ws_->open(ws_base());
 }
 
 void HyperliquidClient::disconnect_ws() {
-    if (ws_) ws_->close();
+    if (ws_)
+        ws_->close();
 }
 
 bool HyperliquidClient::ws_connected() const {
@@ -105,7 +121,8 @@ bool HyperliquidClient::ws_connected() const {
 }
 
 void HyperliquidClient::subscribe(const QJsonObject& subscription) {
-    if (!ws_) connect_ws();
+    if (!ws_)
+        connect_ws();
     QJsonObject env;
     env[QStringLiteral("method")] = QStringLiteral("subscribe");
     env[QStringLiteral("subscription")] = subscription;
@@ -113,7 +130,8 @@ void HyperliquidClient::subscribe(const QJsonObject& subscription) {
 }
 
 void HyperliquidClient::unsubscribe(const QJsonObject& subscription) {
-    if (!ws_) return;
+    if (!ws_)
+        return;
     QJsonObject env;
     env[QStringLiteral("method")] = QStringLiteral("unsubscribe");
     env[QStringLiteral("subscription")] = subscription;

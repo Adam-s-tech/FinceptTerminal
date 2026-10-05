@@ -44,7 +44,7 @@ QColor color_for(double v) {
     return QColor(colors::TEXT_SECONDARY());
 }
 
-}  // namespace
+} // namespace
 
 FiiDiiSubTab::FiiDiiSubTab(QWidget* parent) : QWidget(parent) {
     setObjectName("fnoFiiDiiTab");
@@ -59,13 +59,13 @@ FiiDiiSubTab::FiiDiiSubTab(QWidget* parent) : QWidget(parent) {
                           "QHeaderView::section { background:%2; color:%4; border:none; "
                           "                       border-bottom:1px solid %3; padding:5px 8px; "
                           "                       font-size:9px; font-weight:700; letter-spacing:0.4px; }")
-                      .arg(colors::BG_BASE(),         // %1
-                           colors::BG_RAISED(),       // %2
-                           colors::BORDER_DIM(),      // %3
-                           colors::TEXT_SECONDARY(),  // %4
-                           colors::AMBER(),           // %5
-                           colors::TEXT_PRIMARY(),    // %6
-                           colors::BG_HOVER()));      // %7
+                      .arg(colors::BG_BASE(),        // %1
+                           colors::BG_RAISED(),      // %2
+                           colors::BORDER_DIM(),     // %3
+                           colors::TEXT_SECONDARY(), // %4
+                           colors::AMBER(),          // %5
+                           colors::TEXT_PRIMARY(),   // %6
+                           colors::BG_HOVER()));     // %7
 
     setup_ui();
     connect(refresh_btn_, &QPushButton::clicked, this, &FiiDiiSubTab::on_refresh_clicked);
@@ -86,9 +86,9 @@ void FiiDiiSubTab::setup_ui() {
     auto* hlay = new QHBoxLayout(header);
     hlay->setContentsMargins(12, 8, 12, 8);
     hlay->setSpacing(8);
-    lbl_status_ = new QLabel(QStringLiteral("FII / DII flows — fetching…"), header);
+    lbl_status_ = new QLabel(tr("FII / DII flows — fetching…"), header);
     lbl_status_->setObjectName("fnoFiiStatus");
-    refresh_btn_ = new QPushButton(QStringLiteral("REFRESH"), header);
+    refresh_btn_ = new QPushButton(tr("REFRESH"), header);
     refresh_btn_->setObjectName("fnoFiiRefresh");
     refresh_btn_->setCursor(Qt::PointingHandCursor);
     hlay->addWidget(lbl_status_);
@@ -103,7 +103,9 @@ void FiiDiiSubTab::setup_ui() {
 
     table_ = new QTableWidget(split);
     table_->setColumnCount(7);
-    table_->setHorizontalHeaderLabels({"Date", "FII Buy", "FII Sell", "FII Net", "DII Buy", "DII Sell", "DII Net"});
+    table_->setHorizontalHeaderLabels(
+        {tr("Date"), tr("FII Buy"), tr("FII Sell"), tr("FII Net (₹ Cr)"), tr("DII Buy"), tr("DII Sell"),
+         tr("DII Net (₹ Cr)")});
     table_->verticalHeader()->setVisible(false);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -123,7 +125,9 @@ void FiiDiiSubTab::setup_ui() {
     root->addWidget(split, 1);
 }
 
-QVariantMap FiiDiiSubTab::save_state() const { return {}; }
+QVariantMap FiiDiiSubTab::save_state() const {
+    return {};
+}
 void FiiDiiSubTab::restore_state(const QVariantMap& /*state*/) {}
 
 void FiiDiiSubTab::showEvent(QShowEvent* e) {
@@ -133,12 +137,14 @@ void FiiDiiSubTab::showEvent(QShowEvent* e) {
     auto& hub = fincept::datahub::DataHub::instance();
     QPointer<FiiDiiSubTab> self = this;
     hub.subscribe(this, kTopic, [self](const QVariant& v) {
-        if (!self) return;
+        if (!self)
+            return;
         self->on_data_arrived(v);
     });
     hub.subscribe_errors(this, kTopic, [self](const QString& err) {
-        if (!self) return;
-        self->lbl_status_->setText(QStringLiteral("FII / DII flows — error: ") + err);
+        if (!self)
+            return;
+        self->lbl_status_->setText(FiiDiiSubTab::tr("FII / DII flows — error: %1").arg(err));
     });
     hub.request(kTopic, /*force*/ false);
     subscribed_ = true;
@@ -155,7 +161,21 @@ void FiiDiiSubTab::hideEvent(QHideEvent* e) {
 
 void FiiDiiSubTab::on_refresh_clicked() {
     fincept::datahub::DataHub::instance().request(kTopic, /*force*/ true);
-    lbl_status_->setText(QStringLiteral("FII / DII flows — refreshing…"));
+    lbl_status_->setText(tr("FII / DII flows — refreshing…"));
+}
+
+void FiiDiiSubTab::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void FiiDiiSubTab::retranslateUi() {
+    if (refresh_btn_)
+        refresh_btn_->setText(tr("REFRESH"));
+    if (table_)
+        table_->setHorizontalHeaderLabels({tr("Date"), tr("FII Buy"), tr("FII Sell"), tr("FII Net (₹ Cr)"),
+                                           tr("DII Buy"), tr("DII Sell"), tr("DII Net (₹ Cr)")});
 }
 
 void FiiDiiSubTab::on_data_arrived(const QVariant& v) {
@@ -166,6 +186,18 @@ void FiiDiiSubTab::on_data_arrived(const QVariant& v) {
 
 void FiiDiiSubTab::apply_data(const QVector<FiiDiiDay>& rows) {
     chart_->set_data(rows);
+
+    // The upstream feed publishes only the NET figure per day, so the Buy / Sell columns
+    // were a wall of dashes. Show them only when some row actually carries a value.
+    bool any_gross = false;
+    for (const FiiDiiDay& d : rows) {
+        if (d.fii_buy != 0 || d.fii_sell != 0 || d.dii_buy != 0 || d.dii_sell != 0) {
+            any_gross = true;
+            break;
+        }
+    }
+    for (int col : {1, 2, 4, 5})
+        table_->setColumnHidden(col, !any_gross);
 
     table_->setRowCount(rows.size());
     auto put = [&](int r, int c, const QString& txt, const QColor& fg = QColor()) {
@@ -188,12 +220,10 @@ void FiiDiiSubTab::apply_data(const QVector<FiiDiiDay>& rows) {
     }
 
     if (rows.isEmpty()) {
-        lbl_status_->setText(
-            QStringLiteral("FII / DII flows — no data yet. Try refreshing after 6 PM IST."));
+        lbl_status_->setText(tr("FII / DII flows — no data yet. Try refreshing after 6 PM IST."));
     } else {
-        lbl_status_->setText(QStringLiteral("FII / DII flows — last update: %1   ·   %2 days cached")
-                                  .arg(rows.last().date_iso)
-                                  .arg(rows.size()));
+        lbl_status_->setText(
+            tr("FII / DII flows — last update: %1   ·   %2 days cached").arg(rows.last().date_iso).arg(rows.size()));
     }
 }
 

@@ -1,6 +1,9 @@
 // CryptoWatchlist.cpp — compact watchlist, 3-column, no horizontal scroll
 #include "screens/crypto_trading/CryptoWatchlist.h"
 
+#include "core/symbol/SymbolDragSource.h"
+#include "core/symbol/SymbolRef.h"
+#include "screens/crypto_trading/CryptoTypes.h"
 #include "ui/theme/Theme.h"
 
 #include <QHBoxLayout>
@@ -59,9 +62,9 @@ CryptoWatchlist::CryptoWatchlist(QWidget* parent) : QWidget(parent) {
     auto* header_layout = new QHBoxLayout(header_widget);
     header_layout->setContentsMargins(8, 0, 8, 0);
 
-    auto* header = new QLabel("WATCHLIST");
-    header->setObjectName("cryptoWatchlistTitle");
-    header_layout->addWidget(header);
+    title_label_ = new QLabel(tr("WATCHLIST"));
+    title_label_->setObjectName("cryptoWatchlistTitle");
+    header_layout->addWidget(title_label_);
     header_layout->addStretch();
 
     count_label_ = new QLabel("0/0");
@@ -72,17 +75,22 @@ CryptoWatchlist::CryptoWatchlist(QWidget* parent) : QWidget(parent) {
     // Search
     filter_edit_ = new QLineEdit;
     filter_edit_->setObjectName("cryptoWatchlistSearch");
-    filter_edit_->setPlaceholderText("Search...");
+    filter_edit_->setPlaceholderText(tr("Search..."));
     filter_edit_->setFixedHeight(24);
     connect(filter_edit_, &QLineEdit::textChanged, this, &CryptoWatchlist::on_filter_changed);
     layout->addWidget(filter_edit_);
+
+    search_timer_ = new QTimer(this); // UI-only debounce, not a data-refresh timer
+    search_timer_->setSingleShot(true);
+    search_timer_->setInterval(250);
+    connect(search_timer_, &QTimer::timeout, this, [this]() { emit search_requested(pending_search_); });
 
     // Table — 3 columns: Symbol | Price | Chg%
     // No horizontal scrollbar — all 3 columns fit the watchlist width.
     table_ = new QTableWidget;
     table_->setObjectName("cryptoWatchlistTable");
     table_->setColumnCount(3);
-    table_->setHorizontalHeaderLabels({"Symbol", "Price", "%"});
+    table_->setHorizontalHeaderLabels({tr("Symbol"), tr("Price"), tr("%")});
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
@@ -98,6 +106,44 @@ CryptoWatchlist::CryptoWatchlist(QWidget* parent) : QWidget(parent) {
 
     connect(table_, &QTableWidget::cellClicked, this, &CryptoWatchlist::on_cell_clicked);
     layout->addWidget(table_, 1);
+
+    // Drag-out: hold-and-drag a pair row to ship it to any drop target — drop
+    // it on the pushpin bar at the top to pin + broadcast it, matching the
+    // standalone Watchlist tab and the equity watchlist. The ref MUST carry
+    // asset_class="crypto", or CryptoTradingScreen::on_group_symbol_changed
+    // drops it as a non-crypto symbol. The provider reads the row under the
+    // cursor at drag-start (the mouse press selects it first); the symbol is
+    // the cell text (col 0), like on_cell_clicked. Group None: the pushpin chip
+    // owns the broadcast group, so the source group is irrelevant here.
+    symbol_dnd::installDragSource(table_->viewport(), [this]() -> SymbolRef {
+        if (!table_)
+            return {};
+        const int r = table_->currentRow();
+        if (r < 0)
+            return {};
+        auto* item = table_->item(r, 0);
+        if (!item || item->text().isEmpty())
+            return {};
+        SymbolRef ref;
+        ref.symbol = item->text();
+        ref.asset_class = QStringLiteral("crypto");
+        return ref;
+    });
+}
+
+void CryptoWatchlist::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void CryptoWatchlist::retranslateUi() {
+    if (title_label_)
+        title_label_->setText(tr("WATCHLIST"));
+    if (filter_edit_)
+        filter_edit_->setPlaceholderText(tr("Search..."));
+    if (table_)
+        table_->setHorizontalHeaderLabels({tr("Symbol"), tr("Price"), tr("%")});
 }
 
 void CryptoWatchlist::set_symbols(const QStringList& symbols) {
@@ -176,16 +222,9 @@ void CryptoWatchlist::update_prices(const QVector<trading::TickerData>& tickers)
         if (!sym_item || !price_item || !chg_item)
             continue;
 
-        // Format price — fewer decimals for large prices to save width
-        QString price_str;
-        if (e.price >= 1000.0)
-            price_str = QString::number(e.price, 'f', 2);
-        else if (e.price >= 1.0)
-            price_str = QString::number(e.price, 'f', 4);
-        else
-            price_str = QString::number(e.price, 'f', 6);
-
-        price_item->setText(price_str);
+        // Magnitude-scaled precision (same as the rest of the screen) — the old
+        // fixed 6 dp rendered a 0.0000085 pair as "0.000009".
+        price_item->setText(format_price_plain(e.price));
         price_item->setForeground(kColorPrimary());
 
         chg_item->setText(QString("%1%").arg(e.change_pct, 0, 'f', 2));
@@ -225,8 +264,12 @@ void CryptoWatchlist::on_cell_clicked(int row, int /*col*/) {
 void CryptoWatchlist::on_filter_changed(const QString& text) {
     const QString filter = text.trimmed().toUpper();
     showing_search_ = (filter.length() >= 2);
-    if (showing_search_)
-        emit search_requested(filter);
+    if (showing_search_) {
+        pending_search_ = filter;
+        search_timer_->start(); // restarts the debounce window on every keystroke
+    } else {
+        search_timer_->stop();
+    }
     rebuild_table();
 }
 
@@ -312,14 +355,8 @@ void CryptoWatchlist::rebuild_table() {
 
         // Price — adaptive decimal places
         QString price_str = "--";
-        if (e.has_data) {
-            if (e.price >= 1000.0)
-                price_str = QString::number(e.price, 'f', 2);
-            else if (e.price >= 1.0)
-                price_str = QString::number(e.price, 'f', 4);
-            else
-                price_str = QString::number(e.price, 'f', 6);
-        }
+        if (e.has_data)
+            price_str = format_price_plain(e.price);
         ensure(1, price_str, e.has_data ? kColorPrimary() : kColorDim(), Qt::AlignRight | Qt::AlignVCenter);
 
         ensure(2, e.has_data ? QString("%1%").arg(e.change_pct, 0, 'f', 2) : QString("--"),

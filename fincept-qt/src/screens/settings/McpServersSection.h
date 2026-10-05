@@ -1,9 +1,11 @@
 #pragma once
 // McpServersSection.h — MCP external server management panel
 
+#include <QEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QTableWidget>
 #include <QWidget>
@@ -17,6 +19,14 @@ class McpServersSection : public QWidget {
 
     void reload();
 
+  protected:
+    void changeEvent(QEvent* event) override;
+    /// Refresh the server list (and, on the Tools tab, the tool table) each
+    /// time the section becomes visible. SettingsScreen's MCP event sync
+    /// re-shows the current section to trigger exactly this; reload() was
+    /// previously public but had no caller, so the panel never refreshed.
+    void showEvent(QShowEvent* e) override;
+
   private slots:
     void on_server_selected(int row);
     void on_add_server();
@@ -28,7 +38,16 @@ class McpServersSection : public QWidget {
   private:
     QStackedWidget* tab_stack_ = nullptr;
 
+    // Title bar
+    QLabel* title_lbl_ = nullptr;
+    QLabel* tools_badge_ = nullptr;
+
+    // Tab buttons
+    QPushButton* servers_tab_btn_ = nullptr;
+    QPushButton* tools_tab_btn_ = nullptr;
+
     // Servers tab
+    QLabel* server_list_lbl_ = nullptr;
     QListWidget* server_list_ = nullptr;
     QPushButton* add_btn_ = nullptr;
     QPushButton* remove_btn_ = nullptr;
@@ -38,17 +57,21 @@ class McpServersSection : public QWidget {
     QLabel* status_lbl_ = nullptr;
 
     // Tools tab
+    QLabel* tools_info_lbl_ = nullptr;
     QTableWidget* tools_table_ = nullptr;
 
     void build_ui();
     QWidget* build_servers_tab();
     QWidget* build_tools_tab();
-    QWidget* build_add_server_form();
 
     void load_servers();
     void load_tools();
     void refresh_server_detail(const QString& server_id);
     void show_status(const QString& msg, bool error = false);
+
+    /// Re-apply tr() lookups to every widget whose text we keep a handle to.
+    /// Called from changeEvent() on QEvent::LanguageChange.
+    void retranslateUi();
 
     QString selected_server_id_;
 };

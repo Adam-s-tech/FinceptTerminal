@@ -6,12 +6,14 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QEvent>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStringList>
@@ -29,6 +31,14 @@ class LlmConfigSection : public QWidget {
 
   signals:
     void config_changed(); // emitted when user saves — AiChatScreen reloads
+
+  protected:
+    void changeEvent(QEvent* event) override;
+    /// Re-reads providers + profiles every time the section becomes visible.
+    /// SettingsScreen's MCP-driven sync works by hiding and re-showing the
+    /// current section, so without this override an `llm.provider_changed`
+    /// event left this panel showing stale rows.
+    void showEvent(QShowEvent* e) override;
 
   private slots:
     // Provider tab
@@ -50,12 +60,19 @@ class LlmConfigSection : public QWidget {
   private:
     // ── Tab widget ────────────────────────────────────────────────────────────
     QTabWidget* tab_widget_ = nullptr;
+    QLabel* title_lbl_ = nullptr; // "LLM CONFIGURATION" title-bar label
 
     // ── Provider tab widgets ──────────────────────────────────────────────────
     QListWidget* provider_list_ = nullptr;
+    QLabel* provider_list_title_ = nullptr; // "Providers"
     QPushButton* add_btn_ = nullptr;
     QPushButton* delete_btn_ = nullptr;
     QStackedWidget* form_stack_ = nullptr; // 0=empty, 1=form, 2=fincept
+    QLabel* form_title_ = nullptr;         // "Provider Configuration"
+    QLabel* provider_field_lbl_ = nullptr;
+    QLabel* api_key_field_lbl_ = nullptr;
+    QLabel* model_field_lbl_ = nullptr;
+    QLabel* base_url_field_lbl_ = nullptr;
     QLineEdit* provider_edit_ = nullptr;
     QLineEdit* api_key_edit_ = nullptr;
     QLineEdit* base_url_edit_ = nullptr;
@@ -67,6 +84,11 @@ class LlmConfigSection : public QWidget {
     QLabel* status_lbl_ = nullptr;
 
     // Global settings (lives at bottom of provider tab)
+    QLabel* global_title_ = nullptr; // "GLOBAL SETTINGS"
+    QLabel* temp_lbl_ = nullptr;
+    QLabel* tokens_lbl_ = nullptr;
+    QLabel* tool_rounds_lbl_ = nullptr;
+    QLabel* system_prompt_lbl_ = nullptr;
     QDoubleSpinBox* temp_spin_ = nullptr;
     QSpinBox* tokens_spin_ = nullptr;
     QSpinBox* tool_rounds_spin_ = nullptr;
@@ -75,6 +97,17 @@ class LlmConfigSection : public QWidget {
 
     // ── Profiles tab widgets ──────────────────────────────────────────────────
     QListWidget* profile_list_ = nullptr;
+    QLabel* profile_list_title_ = nullptr; // "PROFILES"
+    QLabel* profile_list_hint_ = nullptr;
+    QPushButton* profile_add_btn_ = nullptr; // "+ New"
+    QLabel* profile_name_field_lbl_ = nullptr;
+    QLabel* profile_provider_field_lbl_ = nullptr;
+    QLabel* profile_model_field_lbl_ = nullptr;
+    QLabel* profile_api_key_field_lbl_ = nullptr;
+    QLabel* profile_base_url_field_lbl_ = nullptr;
+    QLabel* profile_temp_field_lbl_ = nullptr;
+    QLabel* profile_tokens_field_lbl_ = nullptr;
+    QLabel* profile_prompt_field_lbl_ = nullptr;
     QLineEdit* profile_name_edit_ = nullptr;
     QComboBox* profile_provider_combo_ = nullptr;
     QComboBox* profile_model_combo_ = nullptr;
@@ -93,6 +126,12 @@ class LlmConfigSection : public QWidget {
 
     // ── Builders ──────────────────────────────────────────────────────────────
     void build_ui();
+
+    /// Re-apply tr() lookups to every widget whose text we keep a handle to.
+    /// Called from changeEvent() on QEvent::LanguageChange. Covers widgets built
+    /// across all three TUs (this file + _Providers + _Profiles).
+    void retranslateUi();
+
     QWidget* build_providers_tab();
     QWidget* build_provider_list_panel();
     QWidget* build_form_panel();
@@ -115,6 +154,11 @@ class LlmConfigSection : public QWidget {
     static const QStringList KNOWN_PROVIDERS;
     static QString default_base_url(const QString& provider);
     static QStringList fallback_models(const QString& provider);
+
+    // Human-readable label for a provider id (e.g. "aihubmix" → "AIHubMix").
+    static QString provider_display_name(const QString& provider_id);
+    // KNOWN_PROVIDERS ids sorted alphabetically by their display name.
+    static QStringList providers_sorted();
 };
 
 } // namespace fincept::screens

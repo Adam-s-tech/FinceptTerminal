@@ -1,10 +1,16 @@
 #include "screens/news/NewsFeedPanel.h"
 
+#include "core/events/EventBus.h"
 #include "core/logging/Logger.h"
+
 #include <QApplication>
+#include <QClipboard>
 #include <QDateTime>
+#include <QDesktopServices>
+#include <QMenu>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QUrl>
 
 #if defined(Q_OS_WIN)
 #    include <windows.h>
@@ -52,17 +58,15 @@ NewsFeedPanel::NewsFeedPanel(QWidget* parent) : QWidget(parent) {
         layout->setContentsMargins(24, 24, 24, 24);
         layout->setSpacing(8);
         layout->addStretch();
-        auto* title = new QLabel(QStringLiteral("No articles available"), empty_state_);
-        title->setObjectName("newsEmptyStateTitle");
-        title->setAlignment(Qt::AlignCenter);
-        auto* hint = new QLabel(
-            QStringLiteral("Check your network connection and click Refresh to retry."),
-            empty_state_);
-        hint->setObjectName("newsEmptyStateHint");
-        hint->setAlignment(Qt::AlignCenter);
-        hint->setWordWrap(true);
-        layout->addWidget(title);
-        layout->addWidget(hint);
+        empty_state_title_ = new QLabel(tr("No articles available"), empty_state_);
+        empty_state_title_->setObjectName("newsEmptyStateTitle");
+        empty_state_title_->setAlignment(Qt::AlignCenter);
+        empty_state_hint_ = new QLabel(tr("Check your network connection and click Refresh to retry."), empty_state_);
+        empty_state_hint_->setObjectName("newsEmptyStateHint");
+        empty_state_hint_->setAlignment(Qt::AlignCenter);
+        empty_state_hint_->setWordWrap(true);
+        layout->addWidget(empty_state_title_);
+        layout->addWidget(empty_state_hint_);
         layout->addStretch();
     }
 
@@ -74,8 +78,27 @@ NewsFeedPanel::NewsFeedPanel(QWidget* parent) : QWidget(parent) {
 
     root->addWidget(stack, 1);
 
+    // Accessibility — a news reader is exactly the surface a screen reader
+    // user needs named, and the list must be reachable by keyboard.
+    list_view_->setAccessibleName(tr("News feed"));
+    list_view_->setAccessibleDescription(
+        tr("Article list. Use the arrow keys to move, Enter to open the article in a browser."));
+    list_view_->setFocusPolicy(Qt::StrongFocus);
+    empty_state_->setAccessibleName(tr("Empty news feed"));
+    banner_widget_->setAccessibleName(tr("Breaking news banner"));
+
+    // Right-click: open the story / open or filter by one of its tickers.
+    list_view_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(list_view_, &QWidget::customContextMenuRequested, this, &NewsFeedPanel::show_context_menu);
+
     // Connect clicks
     connect(list_view_, &QListView::clicked, this, &NewsFeedPanel::on_item_clicked);
+    // Keyboard: Enter/Return on the highlighted row opens it, same as a click.
+    connect(list_view_, &QListView::activated, this, &NewsFeedPanel::on_item_clicked);
+
+    // Preserve the reading position across model resets (see the header note).
+    connect(model_, &QAbstractItemModel::modelAboutToBeReset, this, &NewsFeedPanel::capture_scroll_anchor);
+    connect(model_, &QAbstractItemModel::modelReset, this, &NewsFeedPanel::restore_scroll_anchor);
 
     // Scroll-to-bottom detection for lazy loading
     connect(list_view_->verticalScrollBar(), &QScrollBar::valueChanged, this, &NewsFeedPanel::check_scroll_position);
@@ -96,16 +119,20 @@ void NewsFeedPanel::build_breaking_banner() {
     layout->setContentsMargins(8, 0, 8, 0);
     layout->setSpacing(8);
 
-    banner_tag_ = new QLabel("FLASH", banner_widget_);
+    banner_tag_ = new QLabel(tr("FLASH"), banner_widget_);
     banner_tag_->setObjectName("newsBreakingTag");
     banner_tag_->setFixedWidth(48);
     banner_tag_->setAlignment(Qt::AlignCenter);
 
+    // Headline and source come straight from the feed: pin them to plain text so
+    // a headline that looks like markup can't be rendered as rich text.
     banner_headline_ = new QLabel(banner_widget_);
     banner_headline_->setObjectName("newsBreakingHeadline");
+    banner_headline_->setTextFormat(Qt::PlainText);
 
     banner_source_ = new QLabel(banner_widget_);
     banner_source_->setObjectName("newsBreakingSource");
+    banner_source_->setTextFormat(Qt::PlainText);
     banner_source_->setFixedWidth(80);
     banner_source_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
@@ -138,7 +165,7 @@ void NewsFeedPanel::show_breaking(const QVector<services::NewsCluster>& breaking
         return;
 
     // Show banner
-    QString tag = lead.priority == services::Priority::FLASH ? "FLASH" : "BREAKING";
+    QString tag = lead.priority == services::Priority::FLASH ? tr("FLASH") : tr("BREAKING");
     banner_tag_->setText(tag);
     banner_headline_->setText(lead.headline);
     banner_source_->setText(lead.source.toUpper());
@@ -242,6 +269,45 @@ void NewsFeedPanel::set_empty_state(bool empty) {
     }
 }
 
+void NewsFeedPanel::capture_scroll_anchor() {
+    anchor_article_id_.clear();
+    current_article_id_.clear();
+    anchor_was_at_top_ = true;
+    if (!list_view_ || !model_)
+        return;
+    auto* sb = list_view_->verticalScrollBar();
+    anchor_was_at_top_ = !sb || sb->value() <= 0;
+
+    // Anchor on whatever row is currently at the top of the viewport. Doing
+    // this by article id (not pixel offset) keeps the anchor correct even when
+    // rows are inserted above it by the refresh.
+    const QModelIndex top = list_view_->indexAt(QPoint(4, 4));
+    if (top.isValid())
+        anchor_article_id_ = model_->article_at(top.row()).id;
+
+    const QModelIndex cur = list_view_->currentIndex();
+    if (cur.isValid())
+        current_article_id_ = model_->article_at(cur.row()).id;
+}
+
+void NewsFeedPanel::restore_scroll_anchor() {
+    if (!list_view_ || !model_)
+        return;
+    // Restore the keyboard cursor first — setCurrentIndex() ensure-visible
+    // scrolls, so doing it after the anchor scroll would undo it.
+    if (!current_article_id_.isEmpty()) {
+        const auto cur = model_->index_for_article(current_article_id_);
+        if (cur.isValid())
+            list_view_->setCurrentIndex(cur);
+    }
+    // At the very top the user wants to see the newest items — leave it there.
+    if (anchor_was_at_top_ || anchor_article_id_.isEmpty())
+        return;
+    const auto anchor = model_->index_for_article(anchor_article_id_);
+    if (anchor.isValid())
+        list_view_->scrollTo(anchor, QAbstractItemView::PositionAtTop);
+}
+
 void NewsFeedPanel::scroll_to(const QString& article_id) {
     auto idx = model_->index_for_article(article_id);
     if (idx.isValid())
@@ -291,6 +357,46 @@ void NewsFeedPanel::on_item_clicked(const QModelIndex& index) {
     }
 }
 
+void NewsFeedPanel::show_context_menu(const QPoint& pos) {
+    const QModelIndex index = list_view_->indexAt(pos);
+    if (!index.isValid())
+        return;
+    const auto article = model_->article_at(index.row());
+    if (article.id.isEmpty())
+        return;
+
+    // Feed links are untrusted (cached/DB rows may predate link validation):
+    // only offer web URLs.
+    const QUrl url(article.link);
+    const bool has_link =
+        url.isValid() && (url.scheme() == QLatin1String("http") || url.scheme() == QLatin1String("https"));
+
+    QMenu menu(this);
+    auto* open_act = menu.addAction(tr("Open article in browser"));
+    open_act->setEnabled(has_link);
+    connect(open_act, &QAction::triggered, this, [url]() { QDesktopServices::openUrl(url); });
+    auto* copy_act = menu.addAction(tr("Copy link"));
+    copy_act->setEnabled(has_link);
+    connect(copy_act, &QAction::triggered, this, [link = article.link]() { QApplication::clipboard()->setText(link); });
+
+    if (!article.tickers.isEmpty()) {
+        menu.addSeparator();
+        for (const QString& ticker : article.tickers) {
+            auto* eq_act = menu.addAction(tr("Open $%1 in Equity Research").arg(ticker));
+            connect(eq_act, &QAction::triggered, this, [ticker]() {
+                EventBus::instance().publish("nav.open_symbol",
+                                             QVariantMap{{"screen_id", "equity_research"}, {"symbol", ticker}});
+            });
+        }
+        menu.addSeparator();
+        for (const QString& ticker : article.tickers) {
+            auto* filter_act = menu.addAction(tr("Filter feed by $%1").arg(ticker));
+            connect(filter_act, &QAction::triggered, this, [this, ticker]() { emit ticker_filter_requested(ticker); });
+        }
+    }
+    menu.exec(list_view_->viewport()->mapToGlobal(pos));
+}
+
 void NewsFeedPanel::check_scroll_position() {
     auto* sb = list_view_->verticalScrollBar();
     if (!sb)
@@ -298,6 +404,21 @@ void NewsFeedPanel::check_scroll_position() {
     int remaining = sb->maximum() - sb->value();
     if (remaining < 200 && sb->maximum() > 0)
         emit near_bottom();
+}
+
+void NewsFeedPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void NewsFeedPanel::retranslateUi() {
+    if (empty_state_title_)
+        empty_state_title_->setText(tr("No articles available"));
+    if (empty_state_hint_)
+        empty_state_hint_->setText(tr("Check your network connection and click Refresh to retry."));
+    // banner_tag_ reflects the live FLASH/BREAKING priority of the current
+    // banner and refreshes on the next show_breaking() — not forced here.
 }
 
 } // namespace fincept::screens

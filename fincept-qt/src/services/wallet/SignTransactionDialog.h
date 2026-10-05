@@ -4,6 +4,7 @@
 
 #include <QByteArray>
 #include <QDialog>
+#include <QEvent>
 #include <QString>
 
 class QCloseEvent;
@@ -42,9 +43,7 @@ class SignTransactionDialog : public QDialog {
     /// `title`:     dialog window title, e.g. "Sign swap" / "Sign burn".
     /// `lede`:      one-liner shown above the status message, e.g.
     ///              "Sign the swap in Phantom to complete the trade."
-    SignTransactionDialog(const QString& tx_base64,
-                          const QString& title,
-                          const QString& lede,
+    SignTransactionDialog(const QString& tx_base64, const QString& title, const QString& lede,
                           QWidget* parent = nullptr);
     ~SignTransactionDialog() override;
 
@@ -59,17 +58,22 @@ class SignTransactionDialog : public QDialog {
   protected:
     void showEvent(QShowEvent* e) override;
     void closeEvent(QCloseEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     void start_signing();
     void on_signature_resolved(Result<QString> r);
+    void retranslateUi();
 
     WalletTxBridge* bridge_ = nullptr;
+    QLabel* heading_label_ = nullptr;
+    QLabel* lede_label_ = nullptr;
     QLabel* status_label_ = nullptr;
     QPushButton* reopen_button_ = nullptr;
     QPushButton* cancel_button_ = nullptr;
 
     QString tx_base64_;
+    QString title_;
     QString lede_;
     QString last_open_url_;
     QString signature_;

@@ -11,9 +11,13 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QHash>
 #include <QIntValidator>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -24,15 +28,51 @@
 #include <QScrollArea>
 #include <QString>
 #include <QTextEdit>
+#include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
+#include <QVector>
 
 namespace fincept::screens::datasources {
 
 namespace col = fincept::ui::colors;
 
-QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& config,
-                                      const QString& edit_id, bool duplicate) {
+namespace {
+
+/// A URL a connector can actually use: scheme and host both present ("localhost:9200"
+/// parses as scheme "localhost" with no host, and the TEST probe then rejects it).
+bool cfgdlg_is_full_url(const QString& text) {
+    const QUrl u(text, QUrl::TolerantMode);
+    return u.isValid() && !u.scheme().isEmpty() && !u.host().isEmpty();
+}
+
+bool cfgdlg_is_port_field(const QString& name) {
+    return name.compare(QLatin1String("port"), Qt::CaseInsensitive) == 0 || name.endsWith(QLatin1String("Port"));
+}
+
+/// Open-file filter for the Browse button of a connector's `filepath` field.
+QString cfgdlg_file_filter(const QString& connector_id) {
+    static const QHash<QString, QString> kFilters = {
+        {"csv", QStringLiteral("CSV / text (*.csv *.tsv *.txt)")},
+        {"excel", QStringLiteral("Excel workbooks (*.xlsx *.xlsm *.xls)")},
+        {"json", QStringLiteral("JSON (*.json *.jsonl *.ndjson)")},
+        {"parquet", QStringLiteral("Parquet (*.parquet)")},
+        {"geoparquet", QStringLiteral("Parquet (*.parquet *.geoparquet)")},
+        {"xml", QStringLiteral("XML (*.xml)")},
+        {"avro", QStringLiteral("Avro (*.avro)")},
+        {"orc", QStringLiteral("ORC (*.orc)")},
+        {"feather", QStringLiteral("Feather (*.feather)")},
+        {"arrow-ipc", QStringLiteral("Arrow IPC (*.arrow *.feather *.ipc)")},
+        {"sqlite", QStringLiteral("SQLite databases (*.db *.sqlite *.sqlite3 *.db3)")},
+    };
+    const QString specific = kFilters.value(connector_id);
+    return specific.isEmpty() ? QObject::tr("All files (*)") : specific + QStringLiteral(";;") + QObject::tr("All files (*)");
+}
+
+} // namespace
+
+QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& config, const QString& edit_id,
+                                      bool duplicate) {
     const bool editing = !edit_id.isEmpty() && !duplicate;
 
     DataSource existing;
@@ -51,9 +91,9 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
     QString saved_id;
 
     QDialog dlg(parent);
-    dlg.setWindowTitle(editing     ? QString("Edit — %1").arg(config.name)
-                       : duplicate ? QString("Clone — %1").arg(config.name)
-                                   : QString("Configure — %1").arg(config.name));
+    dlg.setWindowTitle(editing     ? QObject::tr("Edit — %1").arg(config.name)
+                       : duplicate ? QObject::tr("Clone — %1").arg(config.name)
+                                   : QObject::tr("Configure — %1").arg(config.name));
     dlg.resize(560, 620);
     dlg.setModal(true);
     dlg.setStyleSheet(
@@ -66,8 +106,8 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
                 "QCheckBox { color:%2; font-size:13px; font-family:'Consolas','Courier New',monospace; }"
                 "QPushButton { padding:7px 18px; font-size:12px; font-weight:700;"
                 "  font-family:'Consolas','Courier New',monospace; }")
-            .arg(col::BG_SURFACE(), col::TEXT_PRIMARY(), col::TEXT_SECONDARY(),
-                 col::BG_BASE(), col::BORDER_DIM(), col::AMBER()));
+            .arg(col::BG_SURFACE(), col::TEXT_PRIMARY(), col::TEXT_SECONDARY(), col::BG_BASE(), col::BORDER_DIM(),
+                 col::AMBER()));
 
     auto* root_vl = new QVBoxLayout(&dlg);
     root_vl->setContentsMargins(0, 0, 0, 0);
@@ -76,8 +116,8 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
     // Dialog header
     auto* dlg_hdr = new QWidget(&dlg);
     dlg_hdr->setFixedHeight(56);
-    dlg_hdr->setStyleSheet(QString("background:%1;border-bottom:1px solid %2;")
-                               .arg(col::BG_RAISED(), col::BORDER_DIM()));
+    dlg_hdr->setStyleSheet(
+        QString("background:%1;border-bottom:1px solid %2;").arg(col::BG_RAISED(), col::BORDER_DIM()));
     auto* dlg_hdr_hl = new QHBoxLayout(dlg_hdr);
     dlg_hdr_hl->setContentsMargins(16, 0, 16, 0);
     dlg_hdr_hl->setSpacing(12);
@@ -93,8 +133,8 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
     title_vl->setContentsMargins(0, 0, 0, 0);
     title_vl->setSpacing(2);
 
-    auto* dlg_title = new QLabel(editing     ? QString("Edit  %1").arg(config.name)
-                                 : duplicate ? QString("Clone  %1").arg(config.name)
+    auto* dlg_title = new QLabel(editing     ? QObject::tr("Edit  %1").arg(config.name)
+                                 : duplicate ? QObject::tr("Clone  %1").arg(config.name)
                                              : config.name);
     dlg_title->setStyleSheet(
         QString("color:%1;font-size:14px;font-weight:700;background:transparent;").arg(col::AMBER()));
@@ -127,28 +167,37 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
 
     int row = 0;
 
-    auto* name_lbl = new QLabel("Connection Name");
+    auto* name_lbl = new QLabel(QObject::tr("Connection Name"));
     name_lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     form->addWidget(name_lbl, row, 0);
 
     auto* name_edit = new QLineEdit;
-    name_edit->setPlaceholderText(config.name + " Connection");
-    name_edit->setText(
-        existing_loaded ? (duplicate ? QString("Copy of %1").arg(existing.display_name) : existing.display_name) : "");
+    name_edit->setPlaceholderText(QObject::tr("%1 Connection").arg(config.name));
+    name_edit->setText(existing_loaded
+                           ? (duplicate ? QObject::tr("Copy of %1").arg(existing.display_name) : existing.display_name)
+                           : "");
     name_edit->setFixedHeight(34);
+    name_edit->setAccessibleName(QObject::tr("Connection name"));
+    name_edit->setAccessibleDescription(QObject::tr("Display name for this %1 connection").arg(config.name));
     form->addWidget(name_edit, row, 1);
+    name_lbl->setBuddy(name_edit);
     ++row;
 
-    auto* enabled_lbl = new QLabel("Enable Connection");
+    auto* enabled_lbl = new QLabel(QObject::tr("Enable Connection"));
     enabled_lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     form->addWidget(enabled_lbl, row, 0);
 
-    auto* enabled_check = new QCheckBox("Active");
+    auto* enabled_check = new QCheckBox(QObject::tr("Active"));
     enabled_check->setChecked(existing_loaded ? existing.enabled : true);
+    enabled_check->setAccessibleName(QObject::tr("Enable connection"));
     form->addWidget(enabled_check, row, 1);
     ++row;
 
     QMap<QString, QWidget*> field_widgets;
+    // Focus chain in visual order — the dialog previously relied on creation
+    // order, which put the footer buttons ahead of the dynamic form fields.
+    QVector<QWidget*> focus_chain{name_edit, enabled_check};
+    bool has_secret_field = false;
 
     for (const auto& field : config.fields) {
         auto* lbl = new QLabel(field.label + (field.required ? " *" : ""));
@@ -157,7 +206,7 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
 
         QWidget* input = nullptr;
         if (field.type == FieldType::Checkbox) {
-            auto* check = new QCheckBox(field.required ? "Required" : "Optional");
+            auto* check = new QCheckBox(field.required ? QObject::tr("Required") : QObject::tr("Optional"));
             const bool value = existing_cfg.contains(field.name) ? existing_cfg.value(field.name).toBool()
                                                                  : (field.default_value == "true");
             check->setChecked(value);
@@ -166,11 +215,11 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
             auto* combo = new QComboBox;
             for (const auto& option : field.options)
                 combo->addItem(option.label, option.value);
-            const QString current = existing_cfg.contains(field.name)
-                                        ? existing_cfg.value(field.name).toString()
-                                        : field.default_value;
+            const QString current =
+                existing_cfg.contains(field.name) ? existing_cfg.value(field.name).toString() : field.default_value;
             const int index = combo->findData(current);
-            if (index >= 0) combo->setCurrentIndex(index);
+            if (index >= 0)
+                combo->setCurrentIndex(index);
             input = combo;
         } else if (field.type == FieldType::Textarea) {
             auto* edit = new QTextEdit;
@@ -183,8 +232,10 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
             auto* edit = new QLineEdit;
             edit->setPlaceholderText(field.placeholder);
             edit->setFixedHeight(34);
-            if (field.type == FieldType::Password) edit->setEchoMode(QLineEdit::Password);
-            if (field.type == FieldType::Number)   edit->setValidator(new QIntValidator(0, 999999999, edit));
+            if (field.type == FieldType::Password)
+                edit->setEchoMode(QLineEdit::Password);
+            if (field.type == FieldType::Number)
+                edit->setValidator(new QIntValidator(0, cfgdlg_is_port_field(field.name) ? 65535 : 999999999, edit));
             const QString text = existing_cfg.contains(field.name)
                                      ? existing_cfg.value(field.name).toVariant().toString()
                                      : field.default_value;
@@ -192,30 +243,90 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
             input = edit;
         }
 
+        // Service-account JSON pasted into a Textarea is as secret as a password field.
+        if (field.type == FieldType::Textarea && field.name.contains(QLatin1String("credential"), Qt::CaseInsensitive))
+            has_secret_field = true;
+        if (field.type == FieldType::Password) {
+            has_secret_field = true;
+            input->setAccessibleName(QObject::tr("%1 (secret)").arg(field.label));
+            input->setAccessibleDescription(
+                QObject::tr("Secret value. Stored locally and masked; screen readers will not read it back."));
+        } else {
+            input->setAccessibleName(field.label);
+            if (!field.placeholder.isEmpty())
+                input->setAccessibleDescription(QObject::tr("Example: %1").arg(field.placeholder));
+        }
+        if (field.required)
+            input->setProperty("required", true);
+        lbl->setBuddy(input);
+
         field_widgets[field.name] = input;
-        form->addWidget(input, row, 1);
+        focus_chain.append(input);
+
+        // File-backed connectors asked for a path with nothing but a placeholder
+        // ("Select CSV file") — give them a real picker.
+        QWidget* grid_widget = input;
+        auto* path_edit = qobject_cast<QLineEdit*>(input);
+        if (path_edit && (field.type == FieldType::File || field.name == QLatin1String("filepath"))) {
+            auto* path_row = new QWidget(&dlg);
+            auto* path_hl = new QHBoxLayout(path_row);
+            path_hl->setContentsMargins(0, 0, 0, 0);
+            path_hl->setSpacing(6);
+            path_hl->addWidget(path_edit, 1);
+            auto* browse = new QPushButton(QObject::tr("Browse..."), path_row);
+            browse->setCursor(Qt::PointingHandCursor);
+            browse->setAccessibleName(QObject::tr("Browse for %1").arg(field.label));
+            const QString file_filter = cfgdlg_file_filter(config.id);
+            QObject::connect(browse, &QPushButton::clicked, &dlg, [&dlg, path_edit, file_filter]() {
+                const QString current = path_edit->text().trimmed();
+                const QString start_dir = current.isEmpty() ? QString() : QFileInfo(current).absolutePath();
+                const QString picked =
+                    QFileDialog::getOpenFileName(&dlg, QObject::tr("Select File"), start_dir, file_filter);
+                if (!picked.isEmpty())
+                    path_edit->setText(QDir::toNativeSeparators(picked));
+            });
+            path_hl->addWidget(browse);
+            grid_widget = path_row;
+        }
+        form->addWidget(grid_widget, row, 1);
         ++row;
     }
 
     // Tags field
-    auto* tags_lbl = new QLabel("Tags");
+    auto* tags_lbl = new QLabel(QObject::tr("Tags"));
     tags_lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     form->addWidget(tags_lbl, row, 0);
 
     auto* tags_edit = new QLineEdit;
-    tags_edit->setPlaceholderText("Comma-separated tags, e.g. prod, live, trading");
+    tags_edit->setPlaceholderText(QObject::tr("Comma-separated tags, e.g. prod, live, trading"));
     tags_edit->setFixedHeight(34);
     tags_edit->setText(existing_loaded ? existing.tags : "");
+    tags_edit->setAccessibleName(QObject::tr("Tags"));
+    tags_lbl->setBuddy(tags_edit);
+    focus_chain.append(tags_edit);
     form->addWidget(tags_edit, row, 1);
     ++row;
 
     body_vl->addLayout(form);
 
-    auto* note = new QLabel("Fields marked with * are required.");
+    auto* note = new QLabel(QObject::tr("Fields marked with * are required."));
     note->setWordWrap(true);
     note->setStyleSheet(
         QString("color:%1;font-size:11px;font-style:italic;background:transparent;").arg(col::TEXT_TERTIARY()));
     body_vl->addWidget(note);
+
+    if (has_secret_field) {
+        // Be explicit about where the secret goes — the connection store is a
+        // local SQLite table, not an encrypted keychain, and EXPORT can carry
+        // these values off the machine.
+        auto* secret_note = new QLabel(
+            QObject::tr("Secrets are saved to the local connection database on this machine. "
+                        "EXPORT blanks them out unless you explicitly choose to include them."));
+        secret_note->setWordWrap(true);
+        secret_note->setStyleSheet(
+            QString("color:%1;font-size:11px;background:transparent;").arg(col::WARNING()));
+        body_vl->addWidget(secret_note);
+    }
     body_vl->addStretch();
 
     scroll->setWidget(body);
@@ -233,17 +344,19 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
     status->setStyleSheet(QString("color:%1;font-size:12px;background:transparent;").arg(col::TEXT_SECONDARY()));
     footer_hl->addWidget(status, 1);
 
-    auto* cancel = new QPushButton("Cancel");
+    auto* cancel = new QPushButton(QObject::tr("Cancel"));
     cancel->setCursor(Qt::PointingHandCursor);
+    cancel->setAccessibleName(QObject::tr("Cancel")); // QDialog already maps Esc to reject()
     cancel->setStyleSheet(QString("QPushButton{background:%1;color:%2;border:1px solid %3;}"
                                   "QPushButton:hover{background:%3;color:%4;}")
                               .arg(col::BG_BASE(), col::TEXT_SECONDARY(), col::BORDER_MED(), col::TEXT_PRIMARY()));
     footer_hl->addWidget(cancel);
 
-    auto* save = new QPushButton(editing ? "Update Connection" : "Save Connection");
+    auto* save = new QPushButton(editing ? QObject::tr("Update Connection") : QObject::tr("Save Connection"));
     save->setCursor(Qt::PointingHandCursor);
     save->setDefault(true);
     save->setAutoDefault(true);
+    save->setAccessibleName(editing ? QObject::tr("Update connection") : QObject::tr("Save connection"));
     save->setStyleSheet(QString("QPushButton{background:rgba(217,119,6,0.12);color:%1;border:1px solid %2;}"
                                 "QPushButton:hover{background:%1;color:%3;}")
                             .arg(col::AMBER(), col::AMBER_DIM(), col::BG_BASE()));
@@ -251,9 +364,27 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
 
     root_vl->addWidget(footer);
 
+    // Explicit tab order: every form field in visual order, then Save, then
+    // Cancel. Without this, Qt walks creation order and jumps from the name
+    // field straight into the footer.
+    focus_chain.append(save);
+    focus_chain.append(cancel);
+    for (int i = 0; i + 1 < focus_chain.size(); ++i)
+        QWidget::setTabOrder(focus_chain[i], focus_chain[i + 1]);
+
     name_edit->setFocus();
 
     QObject::connect(cancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+    // One error presenter for every failed save: styled once here rather than per call
+    // site, with the caret moved to the offending field instead of just naming it.
+    auto show_error = [status](const QString& message, QWidget* focus_widget) {
+        status->setText(message);
+        status->setStyleSheet(
+            QString("color:%1;font-size:12px;font-weight:700;background:transparent;").arg(col::NEGATIVE()));
+        if (focus_widget)
+            focus_widget->setFocus(Qt::OtherFocusReason);
+    };
+
     QObject::connect(save, &QPushButton::clicked, &dlg, [&, existing_loaded]() {
         QJsonObject cfg_json;
 
@@ -278,32 +409,50 @@ QString show_connection_config_dialog(QWidget* parent, const ConnectorConfig& co
             }
 
             if (field.required && field.type != FieldType::Checkbox && text_value.isEmpty()) {
-                status->setText("Missing required field: " + field.label);
-                status->setStyleSheet(
-                    QString("color:%1;font-size:12px;font-weight:700;background:transparent;").arg(col::NEGATIVE()));
+                show_error(QObject::tr("Missing required field: %1").arg(field.label), widget);
+                return;
+            }
+
+            // Shape checks. Nothing validated these, so a bare "localhost:9200" in a URL
+            // field, port 99999 or truncated JSON saved fine and only failed (or probed
+            // nothing) later.
+            if (field.type == FieldType::Url && !text_value.isEmpty() && !cfgdlg_is_full_url(text_value)) {
+                show_error(QObject::tr("%1 must be a full URL including the scheme, e.g. %2")
+                               .arg(field.label, field.placeholder.isEmpty() ? QStringLiteral("https://host")
+                                                                             : field.placeholder),
+                           widget);
+                return;
+            }
+            if (field.type == FieldType::Number && cfgdlg_is_port_field(field.name) && !text_value.isEmpty()) {
+                const int port = text_value.toInt();
+                if (port < 1 || port > 65535) {
+                    show_error(QObject::tr("%1 must be between 1 and 65535").arg(field.label), widget);
+                    return;
+                }
+            }
+            if (field.type == FieldType::Textarea && field.label.contains(QLatin1String("JSON"), Qt::CaseInsensitive) &&
+                !text_value.isEmpty() && !QJsonDocument::fromJson(text_value.toUtf8()).isObject()) {
+                show_error(QObject::tr("%1 must be a valid JSON object").arg(field.label), widget);
                 return;
             }
         }
 
         DataSource ds = (existing_loaded && !duplicate) ? existing : DataSource{};
-        ds.id    = (existing_loaded && !duplicate) ? existing.id : QUuid::createUuid().toString(QUuid::WithoutBraces);
-        ds.alias = (existing_loaded && !duplicate) && !existing.alias.isEmpty()
-                       ? existing.alias
-                       : (config.id + "_" + ds.id.left(8));
+        ds.id = (existing_loaded && !duplicate) ? existing.id : QUuid::createUuid().toString(QUuid::WithoutBraces);
+        ds.alias = (existing_loaded && !duplicate) && !existing.alias.isEmpty() ? existing.alias
+                                                                                : (config.id + "_" + ds.id.left(8));
         ds.display_name = name_edit->text().trimmed().isEmpty() ? config.name : name_edit->text().trimmed();
-        ds.description  = config.description;
-        ds.type         = persistence_type(config);
-        ds.provider     = config.id;
-        ds.category     = category_str(config.category);
-        ds.config       = QJsonDocument(cfg_json).toJson(QJsonDocument::Compact);
-        ds.enabled      = enabled_check->isChecked();
-        ds.tags         = tags_edit->text().trimmed();
+        ds.description = config.description;
+        ds.type = persistence_type(config);
+        ds.provider = config.id;
+        ds.category = category_str(config.category);
+        ds.config = QJsonDocument(cfg_json).toJson(QJsonDocument::Compact);
+        ds.enabled = enabled_check->isChecked();
+        ds.tags = tags_edit->text().trimmed();
 
         const auto result = DataSourceRepository::instance().save(ds);
         if (result.is_err()) {
-            status->setText("Failed to save: " + QString::fromStdString(result.error()));
-            status->setStyleSheet(
-                QString("color:%1;font-size:12px;font-weight:700;background:transparent;").arg(col::NEGATIVE()));
+            show_error(QObject::tr("Failed to save: %1").arg(QString::fromStdString(result.error())), nullptr);
             return;
         }
 

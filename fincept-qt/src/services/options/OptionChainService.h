@@ -6,8 +6,9 @@
 //     InstrumentService, fetches quotes via the broker's IBroker::get_quotes,
 //     enriches each strike with OI/IV/Greeks, and publishes the assembled
 //     OptionChain on `option:chain:<broker>:<underlying>:<expiry>`.
-//   - Greeks/IV computation is stubbed in Phase 1 (returns 0). Wired to the
-//     PythonWorker `option_greeks_batch` action in Phase 3.
+//   - Greeks/IV are computed during chain assembly (see enrich_with_greeks):
+//     an IV solver + per-leg greeks, throttled and cached. Brokers that supply
+//     greeks in their quotes (e.g. Fyers) are used directly.
 //   - WebSocket OI fan-out is wired in Phase 3; Phase 1 ships polled
 //     refresh through DataHub.
 //
@@ -30,6 +31,8 @@
 #include <QStringList>
 #include <QVector>
 
+#include <functional>
+
 namespace fincept::services::options {
 
 class OptionChainService : public QObject, public fincept::datahub::Producer {
@@ -49,14 +52,35 @@ class OptionChainService : public QObject, public fincept::datahub::Producer {
 
     // ── Consumer-facing helpers ─────────────────────────────────────────────
 
+    /// Risk-free rate (decimal) the chain's Greeks are priced with for `broker_id`: the
+    /// `fno.risk_free_rate` setting for Indian brokers, a US T-bill level for Databento.
+    /// The Builder's target-day curve and POP reuse it so they price on the same curve as
+    /// the ribbon Greeks instead of a separate hard-coded default.
+    double risk_free_rate_for(const QString& broker_id);
+
     /// One-shot read of the current cached chain, or std::nullopt when no
     /// snapshot exists. Triggers no fetch — wrapper around DataHub::peek.
     /// Streaming consumers should subscribe to the topic instead.
     QString chain_topic(const QString& broker_id, const QString& underlying, const QString& expiry) const;
 
+    /// Last published chain snapshot — available immediately for sub-tabs
+    /// that are lazily constructed after the initial chain publish.
+    const fincept::services::options::OptionChain& last_chain() const { return last_chain_; }
+
     /// List underlyings + expiries from InstrumentService for picker UIs.
+    /// For broker_id == "databento", returns hardcoded US equity list / cached expiries.
     QStringList list_underlyings(const QString& broker_id) const;
     QStringList list_expiries(const QString& broker_id, const QString& underlying) const;
+
+    /// Async expiry fetch for Databento — calls Python script, caches result.
+    void list_databento_expiries(const QString& underlying, std::function<void(QStringList)> callback);
+
+    /// Pin extra contract symbols into the live WS subscription window for a chain
+    /// topic. Replaces any prior pin set for that topic; an empty list clears pins.
+    /// Call from the main thread only.
+    void pin_contracts(const QString& topic, const QStringList& symbols);
+    /// Returns the currently-pinned symbols for `topic` (empty when no pins set).
+    QStringList pinned_contracts_for(const QString& topic) const { return pinned_contracts_.value(topic); }
 
   signals:
     /// Emitted alongside the hub publish so callers can connect via Qt
@@ -78,6 +102,16 @@ class OptionChainService : public QObject, public fincept::datahub::Producer {
     /// then publishes the result on the hub from the UI thread.
     void refresh_chain(const QString& broker_id, const QString& underlying, const QString& expiry);
 
+    /// Databento-specific chain refresh via databento_fno_chain.py.
+    void refresh_chain_databento(const QString& underlying, const QString& expiry);
+
+    /// Fyers-specific chain refresh via /data/options-chain-v3 endpoint.
+    /// Returns OI, Greeks, IV, volume in a single REST call — no Python needed.
+    void refresh_chain_fyers(const QString& broker_id, const QString& underlying, const QString& expiry);
+
+    /// Hardcoded list of popular US equity option underlyings.
+    static QStringList databento_underlyings();
+
     /// Compute max pain strike from a fully-populated chain.
     static double compute_max_pain(const QVector<OptionChainRow>& rows);
     /// Compute PCR = sum(PE OI) / sum(CE OI), or 0 when total CE OI is 0.
@@ -97,6 +131,18 @@ class OptionChainService : public QObject, public fincept::datahub::Producer {
     /// `option:atm_iv:<broker>:<underlying>` and per-leg `option:tick:*`.
     void enrich_with_greeks(const fincept::services::options::OptionChain& chain, const QString& topic);
 
+    /// True when `chain` belongs to the same (broker, underlying, expiry) series as
+    /// `last_chain_` but is OLDER than it — i.e. a newer snapshot was assembled while
+    /// an async Greeks job for `chain` was in flight, so republishing it would roll
+    /// the topic back to stale quotes.
+    bool is_superseded(const fincept::services::options::OptionChain& chain) const;
+
+    /// Adopt a Greeks-enriched snapshot as `last_chain_` (when it is the same
+    /// snapshot `last_chain_` holds) and tell signal consumers. `last_chain_` was
+    /// only ever the un-enriched REST assembly, so every `last_chain()` reader —
+    /// the Builder's payoff/Greeks ribbon, the leg-click path — saw IV = 0.
+    void commit_enriched_chain(const fincept::services::options::OptionChain& enriched);
+
     /// Push per-leg `option:tick:<broker>:<token>` BrokerQuote snapshots
     /// for every CE/PE row with a non-zero token. Phase 3 fan-out is
     /// chain-derived; broker-WS-driven publishes will replace this in a
@@ -107,6 +153,27 @@ class OptionChainService : public QObject, public fincept::datahub::Producer {
     /// `option:atm_iv:<broker>:<underlying>` (decimal IV).
     void publish_atm_iv(const fincept::services::options::OptionChain& chain);
 
+    // ── WS-first live streaming (Phase 3 fan-out) ──────────────────────────
+    // When the broker has a native option WebSocket (Fyers today), the market
+    // is open, and the account is connected, the chain switches from REST
+    // polling to a live WS feed: the ATM±window option symbols are subscribed
+    // on the account's shared AccountDataStream, and incoming ticks patch
+    // last_chain_ in place + fan out on `option:tick:<broker>:<token>`. REST is
+    // suppressed (see refresh()) while the feed stays fresh, and resumes as the
+    // fallback when the feed goes stale / market closes / account disconnects.
+
+    /// Subscribe the ATM±window legs of `chain` to the live WS and route ticks.
+    /// No-op (and tears down any existing feed) when not WS-eligible.
+    void maybe_start_ws_stream(const fincept::services::options::OptionChain& chain, const QString& topic);
+    /// Drop the WS subscription + tick routing for the active streamed topic.
+    void stop_ws_stream();
+    /// Tick handler — merges a live broker quote into last_chain_ and republishes
+    /// the affected leg on `option:tick:*`. Filters by account + symbol map.
+    void on_ws_quote(const QString& account_id, const QString& symbol, const fincept::trading::BrokerQuote& quote);
+    /// True when `topic` is the streamed topic and a tick arrived within the
+    /// staleness window (so the REST poll should stand down).
+    bool ws_feed_fresh(const QString& topic) const;
+
     /// Risk-free rate from settings (`fno.risk_free_rate`), default 0.067
     /// (RBI 91-day T-bill ballpark). Cached after first read.
     double risk_free_rate();
@@ -115,7 +182,11 @@ class OptionChainService : public QObject, public fincept::datahub::Producer {
     /// expiry-day options don't blow up the BSM model.
     static double compute_t_years(const QString& expiry);
 
+    fincept::services::options::OptionChain last_chain_;
     bool hub_registered_ = false;
+    /// Extra symbols pinned per topic (e.g. by FnoDataBridge for algo legs).
+    /// Unioned into the WS subscription set inside maybe_start_ws_stream.
+    QHash<QString, QStringList> pinned_contracts_;
     /// In-flight guard per topic to avoid duplicate refresh fan-out when the
     /// hub scheduler races with a manual request.
     QHash<QString, bool> in_flight_;
@@ -124,6 +195,10 @@ class OptionChainService : public QObject, public fincept::datahub::Producer {
     /// Per-token last Greeks compute timestamp (ms since epoch) — used to
     /// throttle py_vollib invocations to ≤1/500ms per strike per side.
     QHash<qint64, qint64> last_greeks_compute_ms_;
+    /// Last time (epoch ms) the day's ATM IV was written to `iv_history_daily`, per
+    /// underlying — the write is a synchronous SQLite upsert on the UI thread and the
+    /// value only needs minute resolution.
+    QHash<QString, qint64> iv_persist_ms_;
     /// Per-token IV cache (decimal) — reused when throttle skips compute.
     QHash<qint64, double> iv_cache_;
     /// Per-token Greeks cache — reused when throttle skips compute.
@@ -131,6 +206,16 @@ class OptionChainService : public QObject, public fincept::datahub::Producer {
     /// Cached risk-free rate; populated on first refresh.
     double risk_free_rate_ = 0.0;
     bool risk_free_rate_loaded_ = false;
+    /// Cached Databento expiries per underlying (session-scoped).
+    QHash<QString, QStringList> databento_expiry_cache_;
+
+    // ── WS-first streaming state ───────────────────────────────────────────
+    QString ws_topic_;                      ///< chain topic currently WS-streamed ("" = none)
+    QString ws_account_id_;                 ///< account whose stream we subscribed
+    QHash<QString, qint64> ws_sym_token_;   ///< bare WS option symbol → leg token
+    qint64 ws_last_tick_ms_ = 0;            ///< last WS tick arrival (epoch ms)
+    QMetaObject::Connection ws_quote_conn_; ///< AccountDataStream::quote_updated binding
+    QMetaObject::Connection ws_idle_conn_;  ///< DataHub::topic_idle teardown binding
 };
 
 } // namespace fincept::services::options

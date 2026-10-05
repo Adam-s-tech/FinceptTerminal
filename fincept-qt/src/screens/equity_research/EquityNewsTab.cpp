@@ -9,6 +9,7 @@
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QStandardItemModel>
 #include <QUrl>
 
 namespace fincept::screens {
@@ -17,6 +18,21 @@ EquityNewsTab::EquityNewsTab(QWidget* parent) : QWidget(parent) {
     build_ui();
     auto& svc = services::equity::EquityResearchService::instance();
     connect(&svc, &services::equity::EquityResearchService::news_loaded, this, &EquityNewsTab::on_news_loaded);
+    // Dismiss the "LOADING NEWS…" overlay on failure — it's hidden only on success.
+    // The overlay hides on failure, but the "Loading news…" status used to stay put —
+    // a blank tab claiming to still load. Say what happened and how to retry.
+    connect(&svc, &services::equity::EquityResearchService::error_occurred, this,
+            [this](const QString& ctx, const QString&) {
+                if (ctx != "News" || news_loaded_)
+                    return;
+                if (loading_overlay_)
+                    loading_overlay_->hide_loading();
+                if (status_label_) {
+                    status_label_->setText(tr("Could not load news for %1. Press REFRESH to try again.")
+                                               .arg(current_symbol_));
+                    status_label_->show();
+                }
+            });
 }
 
 void EquityNewsTab::set_symbol(const QString& symbol) {
@@ -24,13 +40,58 @@ void EquityNewsTab::set_symbol(const QString& symbol) {
         return;
     current_symbol_ = symbol;
     news_loaded_ = false;
-    clear_cards();
-    count_label_->setText("");
     company_label_->setText(symbol);
+    refresh_provider_availability();
+    start_fetch();
+}
+
+// (Re)fetch the current symbol's news using the selected provider. Sole owner of
+// the news fetch — the screen no longer triggers it, so the dropdown is authoritative.
+void EquityNewsTab::start_fetch(bool force) {
+    if (current_symbol_.isEmpty())
+        return;
+    clear_cards();
+    news_loaded_ = false; // a REFRESH is a fresh load: its failure must reach the error handler
+    count_label_->setText("");
     status_label_->setText(tr("Loading news…"));
     status_label_->show();
     loading_overlay_->show_loading(tr("LOADING NEWS…"));
-    services::equity::EquityResearchService::instance().fetch_news(symbol, 20);
+    using NP = services::equity::NewsProvider;
+    services::equity::EquityResearchService::instance().fetch_news(current_symbol_, 20,
+                                                                   use_newsapi_ ? NP::NewsApi : NP::Auto, force);
+}
+
+// Enable the "NewsAPI" item only when a key is configured in Data Sources; if it
+// was selected but the key went away, fall back to Auto.
+void EquityNewsTab::refresh_provider_availability() {
+    if (!provider_combo_)
+        return;
+    const bool avail = !services::equity::EquityResearchService::instance().configured_newsapi_key().isEmpty();
+    if (auto* model = qobject_cast<QStandardItemModel*>(provider_combo_->model())) {
+        if (auto* item = model->item(1)) {
+            item->setEnabled(avail);
+            item->setToolTip(avail ? QString() : tr("Add a NewsAPI key in the Data Sources tab"));
+        }
+    }
+    if (!avail && use_newsapi_) {
+        use_newsapi_ = false;
+        suppress_provider_signal_ = true;
+        provider_combo_->setCurrentIndex(0);
+        suppress_provider_signal_ = false;
+    }
+}
+
+QString EquityNewsTab::provider_key() const {
+    return use_newsapi_ ? QStringLiteral("newsapi") : QStringLiteral("auto");
+}
+
+void EquityNewsTab::set_provider_key(const QString& key) {
+    use_newsapi_ = (key == QLatin1String("newsapi"));
+    if (provider_combo_) {
+        suppress_provider_signal_ = true;
+        provider_combo_->setCurrentIndex(use_newsapi_ ? 1 : 0);
+        suppress_provider_signal_ = false;
+    }
 }
 
 void EquityNewsTab::build_ui() {
@@ -50,7 +111,7 @@ void EquityNewsTab::build_ui() {
 
     title_lbl_ = new QLabel(tr("LATEST NEWS"));
     title_lbl_->setStyleSheet(QString("color:%1; font-size:11px; font-weight:700; letter-spacing:2px; "
-                                       "background:transparent; border:0;")
+                                      "background:transparent; border:0;")
                                   .arg(ui::colors::AMBER()));
     hl->addWidget(title_lbl_);
 
@@ -66,21 +127,38 @@ void EquityNewsTab::build_ui() {
 
     hl->addStretch();
 
+    // ── Provider switch ─────────────────────────────────────────────────────────
+    // "NewsAPI" stays disabled until a key is configured in the Data Sources tab.
+    provider_combo_ = new QComboBox;
+    provider_combo_->addItem(tr("Auto (GNews → Yahoo)"));
+    provider_combo_->addItem(QStringLiteral("NewsAPI"));
+    provider_combo_->setToolTip(tr("News source"));
+    provider_combo_->setStyleSheet(
+        QString("QComboBox { background:%1; color:%2; border:1px solid %3; border-radius:3px; "
+                "padding:3px 8px; font-size:10px; font-weight:700; }"
+                "QComboBox::drop-down { border:0; width:14px; }"
+                "QComboBox QAbstractItemView { background:%1; color:%2; border:1px solid %3; "
+                "selection-background-color:%4; }")
+            .arg(ui::colors::BG_SURFACE(), ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(),
+                 ui::colors::BG_RAISED()));
+    connect(provider_combo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int idx) {
+        if (suppress_provider_signal_)
+            return;
+        use_newsapi_ = (idx == 1);
+        start_fetch();
+    });
+    hl->addWidget(provider_combo_);
+
     refresh_btn_ = new QPushButton(tr("REFRESH"));
     refresh_btn_->setStyleSheet(QString("QPushButton { background:transparent; color:%1; border:1px solid %2; "
                                         "border-radius:3px; padding:4px 12px; font-size:10px; font-weight:700; }"
                                         "QPushButton:hover { border-color:%3; color:%3; }")
                                     .arg(ui::colors::TEXT_SECONDARY(), ui::colors::BORDER_DIM(), ui::colors::AMBER()));
-    connect(refresh_btn_, &QPushButton::clicked, this, [this]() {
-        if (!current_symbol_.isEmpty()) {
-            clear_cards();
-            status_label_->show();
-            loading_overlay_->show_loading(tr("LOADING NEWS…"));
-            services::equity::EquityResearchService::instance().fetch_news(current_symbol_, 20);
-        }
-    });
+    connect(refresh_btn_, &QPushButton::clicked, this, [this]() { start_fetch(/*force=*/true); });
     hl->addWidget(refresh_btn_);
     vl->addWidget(hdr);
+
+    refresh_provider_availability(); // set the initial enabled state of the NewsAPI item
 
     // ── Status label ──────────────────────────────────────────────────────────
     status_label_ = new QLabel(tr("Search for a symbol to load news."));
@@ -186,27 +264,22 @@ void EquityNewsTab::populate(const QVector<services::equity::NewsArticle>& artic
                                         .arg(ui::colors::AMBER()));
             cl->addWidget(read_lbl);
 
-            // Whole card opens URL
-            QString url = art.url;
-            auto* click_filter = new QObject(card);
-            card->installEventFilter(click_filter);
-            connect(click_filter, &QObject::destroyed, this, [] {});
-            // Use QPushButton invisible overlay approach via event filter on card
-            QObject::connect(card, &QFrame::destroyed, click_filter, &QObject::deleteLater);
-
-            // Simpler: intercept mouse release via child button spanning the card
-            auto* link_btn = new QPushButton;
-            link_btn->setFlat(true);
-            link_btn->setCursor(Qt::PointingHandCursor);
-            link_btn->setStyleSheet("QPushButton { background:transparent; border:0; }");
-            link_btn->setFixedSize(0, 0); // invisible, just for signal
-            connect(link_btn, &QPushButton::clicked, this, [url]() { QDesktopServices::openUrl(QUrl(url)); });
-
-            // Make the read_lbl clickable
+            // The whole card is the click target (it already shows a hand cursor).
+            // Previously the card's "click filter" was a bare QObject with no
+            // eventFilter override and the link button was sized 0×0, so only the
+            // small "READ FULL ARTICLE" line worked — three dead objects per card
+            // on every refresh. One filter (this) + a url property on both widgets.
+            const QString url = art.url;
             read_lbl->setCursor(Qt::PointingHandCursor);
-            read_lbl->installEventFilter(this);
             read_lbl->setProperty("url", url);
-            cl->addWidget(link_btn);
+            read_lbl->installEventFilter(this);
+            card->setProperty("url", url);
+            card->installEventFilter(this);
+            card->setToolTip(tr("Open in browser: %1").arg(url));
+            card->setAccessibleName(art.title);
+            card->setAccessibleDescription(tr("Open the full article in your browser"));
+        } else {
+            card->setCursor(Qt::ArrowCursor); // nothing to open — don't imply a link
         }
 
         cards_layout_->insertWidget(cards_layout_->count() - 1, card);
@@ -246,8 +319,14 @@ void EquityNewsTab::changeEvent(QEvent* event) {
 }
 
 void EquityNewsTab::retranslateUi() {
-    if (title_lbl_)   title_lbl_->setText(tr("LATEST NEWS"));
-    if (refresh_btn_) refresh_btn_->setText(tr("REFRESH"));
+    if (title_lbl_)
+        title_lbl_->setText(tr("LATEST NEWS"));
+    if (refresh_btn_)
+        refresh_btn_->setText(tr("REFRESH"));
+    if (provider_combo_) {
+        provider_combo_->setItemText(0, tr("Auto (GNews → Yahoo)"));
+        provider_combo_->setToolTip(tr("News source"));
+    }
 
     if (status_label_) {
         // Pick the appropriate idle text — never overwrite a live "Loading…"

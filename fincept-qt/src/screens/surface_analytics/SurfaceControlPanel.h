@@ -11,6 +11,7 @@
 #include "SurfaceTypes.h"
 
 #include <QDate>
+#include <QEvent>
 #include <QHash>
 #include <QString>
 #include <QStringList>
@@ -53,12 +54,21 @@ class SurfaceControlPanel : public QWidget {
     // Re-render sections to match the active surface's capability profile.
     // Called by the screen on every chip click.
     void set_capability(ChartType type);
+    /// Mark the currently-displayed data as synthetic (demo) or real (fetched). When
+    /// synthetic, the tier badge shows DEMO regardless of the surface's capability tier,
+    /// so rand() sample data never reads as live/COMPUTED market data.
+    void mark_synthetic(bool on);
 
     // Push min/max/mean/median/std/skew/kurt of the active surface's z matrix.
     void update_metrics(const std::vector<std::vector<float>>& z, const QString& units = "");
 
     // Show a one-line lineage string from the active capability + state.
     void update_lineage(const QString& line);
+
+    /// Fill in the "Spot:" readout under the symbol field. The label existed
+    /// but nothing ever wrote to it, so it read "Spot: —" forever even though
+    /// the screen resolves a spot for every fetch. Pass <= 0 to clear.
+    void set_spot(double spot);
 
     SurfaceControlsState state() const { return state_; }
 
@@ -71,8 +81,10 @@ class SurfaceControlPanel : public QWidget {
 
     // Update the provider status pill (header). dataset is shown alongside
     // the dot. State is one of "connected", "disconnected", "not configured".
-    void set_provider_status(const QString& provider_name, const QString& state,
-                             const QString& detail = QString());
+    void set_provider_status(const QString& provider_name, const QString& state, const QString& detail = QString());
+
+  protected:
+    void changeEvent(QEvent* event) override;
 
   signals:
     void controls_changed();
@@ -104,6 +116,13 @@ class SurfaceControlPanel : public QWidget {
     void apply_capability_visibility();
     void prefill_datasets();
 
+    /// Re-apply tr() lookups to every widget whose text we keep a handle to.
+    void retranslateUi();
+
+    // ── Header / provider strip (cached for retranslateUi) ──────────────────
+    QLabel* header_label_ = nullptr;
+    QLabel* providers_title_ = nullptr;
+
     // ── Sections ───────────────────────────────────────────────────────────
     QGroupBox* asset_box_ = nullptr;
     QGroupBox* dates_box_ = nullptr;
@@ -115,8 +134,21 @@ class SurfaceControlPanel : public QWidget {
     // ── Asset section ──────────────────────────────────────────────────────
     QLineEdit* symbol_edit_ = nullptr;
     QComboBox* dataset_combo_ = nullptr;
+    QLabel* dataset_lbl_ = nullptr; // "Dataset:" (cached for retranslateUi)
     QLabel* spot_label_ = nullptr;
+    double last_spot_ = 0.0; // last value pushed to spot_label_, for retranslate
     QLabel* tier_badge_ = nullptr;
+    bool synthetic_ = false; // true while the displayed surface is demo/sample data
+
+    // ── Static field labels (cached for retranslateUi) ──────────────────────
+    QLabel* start_lbl_ = nullptr;
+    QLabel* end_lbl_ = nullptr;
+    QLabel* strike_window_lbl_ = nullptr;
+    QLabel* dte_min_lbl_ = nullptr;
+    QLabel* dte_max_lbl_ = nullptr;
+    QLabel* iv_method_lbl_ = nullptr;
+    // Metric name labels in declared order: count/min/max/mean/median/std/skew/kurt
+    QLabel* metric_name_lbls_[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     // Symbol search autocomplete (Databento)
     QCompleter* symbol_completer_ = nullptr;
     QStringListModel* symbol_completer_model_ = nullptr;

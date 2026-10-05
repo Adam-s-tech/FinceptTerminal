@@ -17,11 +17,11 @@
 #include "core/panel/PanelRegistry.h"
 #include "core/session/ScreenStateManager.h"
 #include "core/session/SessionManager.h"
-#include "core/window/WindowRegistry.h"
 #include "core/symbol/IGroupLinked.h"
 #include "core/symbol/SymbolContext.h"
 #include "core/symbol/SymbolGroupRegistry.h"
 #include "core/symbol/SymbolRef.h"
+#include "core/window/WindowRegistry.h"
 #include "screens/common/IStatefulScreen.h"
 #include "ui/widgets/GroupBadge.h"
 
@@ -72,6 +72,9 @@ QString DockScreenRouter::title_for_id(const QString& id) {
         {"polymarket", QT_TRANSLATE_NOOP("fincept::DockScreenRouter", "Prediction Markets")},
         {"relationship_map", QT_TRANSLATE_NOOP("fincept::DockScreenRouter", "Relationship Map")},
         {"derivatives", QT_TRANSLATE_NOOP("fincept::DockScreenRouter", "Derivatives")},
+        {"fno", QT_TRANSLATE_NOOP("fincept::DockScreenRouter", "F&O")},
+        {"screener", QT_TRANSLATE_NOOP("fincept::DockScreenRouter", "Screener")},
+        {"crypto_center", QT_TRANSLATE_NOOP("fincept::DockScreenRouter", "Crypto Center")},
         {"alt_investments", QT_TRANSLATE_NOOP("fincept::DockScreenRouter", "Alt Investments")},
         {"ma_analytics", QT_TRANSLATE_NOOP("fincept::DockScreenRouter", "M&A Analytics")},
         {"surface_analytics", QT_TRANSLATE_NOOP("fincept::DockScreenRouter", "Surface Analytics")},
@@ -117,9 +120,15 @@ DockScreenRouter::DockScreenRouter(ads::CDockManager* manager, QObject* parent) 
 }
 
 void DockScreenRouter::on_group_symbol_changed_external(SymbolGroup g, const SymbolRef& ref, QObject* source) {
-    for (auto it = group_linked_.begin(); it != group_linked_.end(); ++it) {
+    // Iterate a copy: a screen's handler may navigate/materialise another screen,
+    // which inserts into group_linked_ and would invalidate a live iterator.
+    const auto linked_snapshot = group_linked_;
+    for (auto it = linked_snapshot.cbegin(); it != linked_snapshot.cend(); ++it) {
         IGroupLinked* linked = it.value();
-        if (!linked || linked->group() != g)
+        // screens_ is the source of truth for live screens: an entry here whose
+        // screen has been torn down (moved to another frame) is stale and its
+        // raw pointer must not be touched.
+        if (!linked || !screens_.contains(it.key()) || linked->group() != g)
             continue;
         auto* as_obj = dynamic_cast<QObject*>(linked);
         if (as_obj && as_obj == source)
@@ -182,23 +191,21 @@ void DockScreenRouter::attach_group_badge_to_tab(const QString& id, QWidget* scr
         return;
     }
 
-    connect(badge, &ui::GroupBadge::group_change_requested, this,
-            [linked, badge](SymbolGroup g) {
-                linked->set_group(g);
-                badge->set_group_silent(g);
-                // If the new group already has an active symbol, push it
-                // into the newly-linked screen immediately. Otherwise seed
-                // the group from the screen's current symbol.
-                const SymbolRef group_sym = SymbolContext::instance().group_symbol(g);
-                if (group_sym.is_valid()) {
-                    linked->on_group_symbol_changed(group_sym);
-                } else if (g != SymbolGroup::None) {
-                    const SymbolRef own = linked->current_symbol();
-                    if (own.is_valid())
-                        SymbolContext::instance().set_group_symbol(
-                            g, own, dynamic_cast<QObject*>(linked));
-                }
-            });
+    connect(badge, &ui::GroupBadge::group_change_requested, this, [linked, badge](SymbolGroup g) {
+        linked->set_group(g);
+        badge->set_group_silent(g);
+        // If the new group already has an active symbol, push it
+        // into the newly-linked screen immediately. Otherwise seed
+        // the group from the screen's current symbol.
+        const SymbolRef group_sym = SymbolContext::instance().group_symbol(g);
+        if (group_sym.is_valid()) {
+            linked->on_group_symbol_changed(group_sym);
+        } else if (g != SymbolGroup::None) {
+            const SymbolRef own = linked->current_symbol();
+            if (own.is_valid())
+                SymbolContext::instance().set_group_symbol(g, own, dynamic_cast<QObject*>(linked));
+        }
+    });
 
     group_badges_[id] = badge;
 }
@@ -214,11 +221,9 @@ void DockScreenRouter::register_factory(const QString& id, ScreenFactory factory
     factories_[id] = std::move(factory);
 }
 
-
 ads::CDockWidget* DockScreenRouter::find_dock_widget(const QString& id) const {
     return dock_widgets_.value(id, nullptr);
 }
-
 
 QStringList DockScreenRouter::all_screen_ids() const {
     QStringList ids;
@@ -370,13 +375,33 @@ void DockScreenRouter::restore_screen_state(const QString& id) {
     // upgrading, so no state is lost across the migration.
     const PanelInstanceId uuid = panel_uuid_for(id);
     if (!uuid.is_null()) {
-        ScreenStateManager::instance().restore_by_uuid(
-            stateful, uuid.to_string(), /*fallback_to_screen_key=*/true);
+        ScreenStateManager::instance().restore_by_uuid(stateful, uuid.to_string(), /*fallback_to_screen_key=*/true);
     } else {
         LOG_DEBUG("DockRouter",
                   QString("restore_screen_state('%1'): no PanelInstanceId, falling back to screen-key path").arg(id));
         ScreenStateManager::instance().restore(stateful);
     }
+}
+
+int DockScreenRouter::flush_all_screen_states() {
+    int flushed = 0;
+    // screens_ holds every MATERIALIZED screen widget (closed-but-not-yet-
+    // dematerialised included). Synchronously persist each stateful one so a
+    // tab that's still on screen at quit doesn't lose its config. Closed tabs
+    // were already saved through the visibilityChanged(false) hide path.
+    for (auto it = screens_.cbegin(); it != screens_.cend(); ++it) {
+        auto* stateful = dynamic_cast<screens::IStatefulScreen*>(it.value());
+        if (!stateful)
+            continue;
+        const PanelInstanceId uuid = panel_uuid_for(it.key());
+        if (!uuid.is_null())
+            ScreenStateManager::instance().save_now_by_uuid_sync(stateful, uuid.to_string());
+        else
+            ScreenStateManager::instance().save_now_sync(stateful);
+        ++flushed;
+    }
+    LOG_INFO("DockRouter", QString("flush_all_screen_states: persisted %1 screen(s)").arg(flushed));
+    return flushed;
 }
 
 void DockScreenRouter::apply_ads_theme() {

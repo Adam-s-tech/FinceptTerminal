@@ -8,6 +8,7 @@
 // live in a shared inline-namespace header.
 #pragma once
 
+#include "core/currency/Currency.h"
 #include "ui/theme/Theme.h"
 
 #include <QCoreApplication>
@@ -36,8 +37,12 @@ inline QWidget* gs_make_card(const QString& label, const QString& value, QWidget
     l->setStyleSheet(QString("color:%1; font-size:9px; font-weight:700; letter-spacing:0.5px; background:transparent;")
                          .arg(ui::colors::TEXT_TERTIARY()));
     auto* v = new QLabel(value, card);
-    v->setStyleSheet(QString("color:%1; font-size:13px; font-weight:700; font-family:'Courier New'; background:transparent;")
-                         .arg(value_color.isEmpty() ? QString(ui::colors::TEXT_PRIMARY()) : value_color));
+    // Cards carry model IDs, pipeline IDs, model keys and tickers that the next tab asks the user
+    // to paste back in (Backtest / Feature Importance / Ensemble / Process Data); make them copyable.
+    v->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    v->setStyleSheet(
+        QString("color:%1; font-size:13px; font-weight:700; font-family:'Courier New'; background:transparent;")
+            .arg(value_color.isEmpty() ? QString(ui::colors::TEXT_PRIMARY()) : value_color));
     cvl->addWidget(l);
     cvl->addWidget(v);
     return card;
@@ -59,11 +64,8 @@ inline QString gs_fmt_pct(double v, int decimals = 2) {
 }
 
 inline QString gs_fmt_money(double v) {
-    const double a = std::abs(v);
-    if (a >= 1e9) return QString("$%1B").arg(v / 1e9, 0, 'f', 2);
-    if (a >= 1e6) return QString("$%1M").arg(v / 1e6, 0, 'f', 2);
-    if (a >= 1e3) return QString("$%1K").arg(v / 1e3, 0, 'f', 2);
-    return QString("$%1").arg(v, 0, 'f', 2);
+    // Calculator output — follows the preferred currency.
+    return cur::money(v, /*compact=*/true);
 }
 
 inline QString gs_fmt_signed_money(double v) {
@@ -75,8 +77,10 @@ inline QString gs_fmt_num(double v, int decimals = 4) {
 }
 
 inline QString gs_pos_neg_color(double v) {
-    if (v > 0) return ui::colors::POSITIVE();
-    if (v < 0) return ui::colors::NEGATIVE();
+    if (v > 0)
+        return ui::colors::POSITIVE();
+    if (v < 0)
+        return ui::colors::NEGATIVE();
     return ui::colors::TEXT_PRIMARY();
 }
 
@@ -85,10 +89,8 @@ inline QString gs_pos_neg_color(double v) {
 inline QString format_val(const QJsonValue& val) {
     if (val.isDouble()) {
         double v = val.toDouble();
-        if (std::abs(v) >= 1e9)
-            return QString("$%1B").arg(v / 1e9, 0, 'f', 1);
         if (std::abs(v) >= 1e6)
-            return QString("$%1M").arg(v / 1e6, 0, 'f', 1);
+            return cur::money(v, /*compact=*/true);
         if (std::abs(v) < 1.0 && std::abs(v) > 0.0001)
             return QString("%1%").arg(v * 100, 0, 'f', 2);
         return QString::number(v, 'f', 4);

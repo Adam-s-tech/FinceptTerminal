@@ -9,6 +9,7 @@
 
 #include <QHBoxLayout>
 #include <QScrollArea>
+#include <QSet>
 #include <QSplitter>
 
 namespace fincept::screens {
@@ -38,6 +39,60 @@ void MAAnalyticsScreen::showEvent(QShowEvent* e) {
 void MAAnalyticsScreen::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
     LOG_INFO("MAAnalytics", "Screen hidden");
+}
+
+// ── Live language switch ─────────────────────────────────────────────────────
+void MAAnalyticsScreen::changeEvent(QEvent* e) {
+    if (e->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(e);
+}
+
+void MAAnalyticsScreen::retranslateUi() {
+    // Top bar (module quick-buttons carry data short_label — not translated)
+    if (brand_label_)
+        brand_label_->setText(tr("M&A ANALYTICS"));
+    if (ready_label_)
+        ready_label_->setText(tr("READY"));
+    if (subtitle_label_)
+        subtitle_label_->setText(tr("CORPORATE FINANCE TOOLKIT"));
+
+    // Sidebar / right-panel section headers
+    if (modules_title_)
+        modules_title_->setText(tr("MODULES"));
+    if (info_title_)
+        info_title_->setText(tr("MODULE INFO"));
+    if (cap_header_)
+        cap_header_->setText(tr("CAPABILITIES"));
+    if (stats_title_)
+        stats_title_->setText(tr("QUICK STATS"));
+
+    // Quick-stat name labels
+    if (stat_total_modules_lbl_)
+        stat_total_modules_lbl_->setText(tr("Total Modules"));
+    if (stat_valuation_methods_lbl_)
+        stat_valuation_methods_lbl_->setText(tr("Categories"));
+    if (stat_python_scripts_lbl_)
+        stat_python_scripts_lbl_->setText(tr("Capabilities"));
+    if (stat_analysis_tools_lbl_)
+        stat_analysis_tools_lbl_->setText(tr("Engine"));
+
+    if (tips_label_)
+        tips_label_->setText(tr("Click sidebar modules to switch views. "
+                                "Each module provides professional-grade analytics with export capabilities."));
+
+    // Status bar
+    if (status_module_lbl_)
+        status_module_lbl_->setText(tr("MODULE:"));
+    if (status_engine_lbl_)
+        status_engine_lbl_->setText(tr("ENGINE:"));
+    if (status_status_lbl_)
+        status_status_lbl_->setText(tr("STATUS:"));
+    if (status_ready_val_)
+        status_ready_val_->setText(tr("READY"));
+
+    // Right-panel category line (mod.label is data; "%1 module" is translatable)
+    update_right_panel();
 }
 
 // ── Build UI ─────────────────────────────────────────────────────────────────
@@ -91,7 +146,7 @@ QWidget* MAAnalyticsScreen::build_top_bar() {
     hl->setSpacing(12);
 
     // Branding badge
-    brand_label_ = new QLabel("M&A ANALYTICS", bar);
+    brand_label_ = new QLabel(tr("M&A ANALYTICS"), bar);
     brand_label_->setFixedHeight(22);
     hl->addWidget(brand_label_);
 
@@ -106,6 +161,7 @@ QWidget* MAAnalyticsScreen::build_top_bar() {
         const auto& mod = modules_[i];
         auto* btn = new QPushButton(mod.short_label, bar);
         btn->setToolTip(mod.label);
+        btn->setAccessibleName(mod.label);
         btn->setCursor(Qt::PointingHandCursor);
         btn->setFixedHeight(22);
         connect(btn, &QPushButton::clicked, this, [this, i]() { on_module_selected(i); });
@@ -116,11 +172,11 @@ QWidget* MAAnalyticsScreen::build_top_bar() {
     hl->addStretch(1);
 
     // Ready badge
-    ready_label_ = new QLabel("READY", bar);
+    ready_label_ = new QLabel(tr("READY"), bar);
     ready_label_->setFixedHeight(22);
     hl->addWidget(ready_label_);
 
-    subtitle_label_ = new QLabel("CORPORATE FINANCE TOOLKIT", bar);
+    subtitle_label_ = new QLabel(tr("CORPORATE FINANCE TOOLKIT"), bar);
     hl->addWidget(subtitle_label_);
 
     return bar;
@@ -141,7 +197,7 @@ QWidget* MAAnalyticsScreen::build_left_sidebar() {
     header->setObjectName("maLeftHeader");
     auto* hhl = new QHBoxLayout(header);
     hhl->setContentsMargins(12, 0, 12, 0);
-    modules_title_ = new QLabel("MODULES", header);
+    modules_title_ = new QLabel(tr("MODULES"), header);
     hhl->addWidget(modules_title_);
     hhl->addStretch();
     vl->addWidget(header);
@@ -172,6 +228,7 @@ QWidget* MAAnalyticsScreen::build_left_sidebar() {
         // Module button
         auto* btn = new QPushButton(mod.label, list_widget);
         btn->setCursor(Qt::PointingHandCursor);
+        btn->setAccessibleName(tr("%1 module").arg(mod.label));
         connect(btn, &QPushButton::clicked, this, [this, i]() { on_module_selected(i); });
         left_items_layout_->addWidget(btn);
         module_buttons_.append(btn);
@@ -199,7 +256,7 @@ QWidget* MAAnalyticsScreen::build_right_sidebar() {
     header->setObjectName("maRightHeader");
     auto* hhl = new QHBoxLayout(header);
     hhl->setContentsMargins(12, 0, 12, 0);
-    info_title_ = new QLabel("MODULE INFO", header);
+    info_title_ = new QLabel(tr("MODULE INFO"), header);
     hhl->addWidget(info_title_);
     hhl->addStretch();
     vl->addWidget(header);
@@ -230,7 +287,7 @@ QWidget* MAAnalyticsScreen::build_right_sidebar() {
     cl->addWidget(info_card);
 
     // Capabilities section
-    cap_header_ = new QLabel("CAPABILITIES", content);
+    cap_header_ = new QLabel(tr("CAPABILITIES"), content);
     cl->addWidget(cap_header_);
 
     auto* cap_container = new QWidget(content);
@@ -245,16 +302,17 @@ QWidget* MAAnalyticsScreen::build_right_sidebar() {
     sl->setContentsMargins(8, 8, 8, 8);
     sl->setSpacing(4);
 
-    stats_title_ = new QLabel("QUICK STATS", stats_card_);
+    stats_title_ = new QLabel(tr("QUICK STATS"), stats_card_);
     sl->addWidget(stats_title_);
 
-    auto add_stat = [&](const QString& label, const QString& value) {
+    auto add_stat = [&](const QString& label, const QString& value, QLabel*& label_out) {
         auto* row = new QWidget(stats_card_);
         row->setObjectName("maStatRow");
         auto* rl = new QHBoxLayout(row);
         rl->setContentsMargins(0, 0, 0, 0);
         auto* lbl = new QLabel(label, row);
         lbl->setObjectName("maStatLabel");
+        label_out = lbl;
         auto* val = new QLabel(value, row);
         val->setObjectName("maStatValue");
         rl->addWidget(lbl);
@@ -262,15 +320,24 @@ QWidget* MAAnalyticsScreen::build_right_sidebar() {
         rl->addWidget(val);
         sl->addWidget(row);
     };
-    add_stat("Total Modules", "8");
-    add_stat("Valuation Methods", "15+");
-    add_stat("Python Scripts", "30+");
-    add_stat("Analysis Tools", "60+");
+    // These were hardcoded to "8 / 15+ / 30+ / 60+" — invented figures that
+    // drifted from the module registry and could not be verified. Everything
+    // shown here is now counted from the registry that drives the UI.
+    QSet<QString> categories;
+    int total_caps = 0;
+    for (const auto& m : modules_) {
+        categories.insert(m.category);
+        total_caps += static_cast<int>(module_capabilities(m.id).size());
+    }
+    add_stat(tr("Total Modules"), QString::number(modules_.size()), stat_total_modules_lbl_);
+    add_stat(tr("Categories"), QString::number(categories.size()), stat_valuation_methods_lbl_);
+    add_stat(tr("Capabilities"), QString::number(total_caps), stat_python_scripts_lbl_);
+    add_stat(tr("Engine"), QStringLiteral("Python + C++"), stat_analysis_tools_lbl_);
     cl->addWidget(stats_card_);
 
     // Tips
-    tips_label_ = new QLabel("Click sidebar modules to switch views. "
-                             "Each module provides professional-grade analytics with export capabilities.",
+    tips_label_ = new QLabel(tr("Click sidebar modules to switch views. "
+                                "Each module provides professional-grade analytics with export capabilities."),
                              content);
     tips_label_->setWordWrap(true);
     cl->addWidget(tips_label_);
@@ -291,19 +358,23 @@ QWidget* MAAnalyticsScreen::build_status_bar() {
     hl->setContentsMargins(12, 0, 12, 0);
     hl->setSpacing(16);
 
-    auto add_item = [&](const QString& label, const QString& value, const QString& obj_name) {
+    auto add_item = [&](const QString& label, const QString& value, const QString& obj_name, QLabel*& label_out,
+                        QLabel** value_out = nullptr) {
         auto* lbl = new QLabel(label, bar);
         lbl->setObjectName("maStatusLabel");
+        label_out = lbl;
         hl->addWidget(lbl);
         auto* val = new QLabel(value, bar);
         val->setObjectName(obj_name);
+        if (value_out)
+            *value_out = val;
         hl->addWidget(val);
     };
 
-    add_item("MODULE:", QString::fromUtf8("\xe2\x80\x94"), "maStatusModule");
-    add_item("ENGINE:", "PYTHON + C++", "maStatusEngine");
+    add_item(tr("MODULE:"), QString::fromUtf8("\xe2\x80\x94"), "maStatusModule", status_module_lbl_);
+    add_item(tr("ENGINE:"), "PYTHON + C++", "maStatusEngine", status_engine_lbl_);
     hl->addStretch();
-    add_item("STATUS:", "READY", "maStatusReady");
+    add_item(tr("STATUS:"), tr("READY"), "maStatusReady", status_status_lbl_, &status_ready_val_);
 
     return bar;
 }
@@ -316,6 +387,11 @@ void MAAnalyticsScreen::on_module_selected(int index) {
     content_stack_->setCurrentIndex(index);
     update_sidebar_selection();
     update_right_panel();
+    // The status bar's MODULE: value was created as an em-dash and then never
+    // written to — it stayed "—" no matter which module was open.
+    if (status_bar_)
+        if (auto* mod_val = status_bar_->findChild<QLabel*>("maStatusModule"))
+            mod_val->setText(modules_[index].label.toUpper());
     LOG_INFO("MAAnalytics", QString("Switched to module: %1").arg(modules_[index].label));
     ScreenStateManager::instance().notify_changed(this);
 }
@@ -370,7 +446,7 @@ void MAAnalyticsScreen::update_right_panel() {
                                     .arg(mod.color.name())
                                     .arg(ui::fonts::SMALL)
                                     .arg(ui::fonts::DATA_FAMILY));
-    right_category_->setText(mod.category + " module");
+    right_category_->setText(tr("%1 module").arg(mod.category));
     right_category_->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3;")
                                        .arg(ui::colors::TEXT_SECONDARY())
                                        .arg(ui::fonts::TINY)

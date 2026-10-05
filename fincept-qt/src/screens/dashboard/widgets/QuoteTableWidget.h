@@ -33,9 +33,13 @@ class QuoteTableWidget : public BaseWidget {
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
 
+    /// Re-apply BaseWidget chrome + this widget's own table headers when the
+    /// UI language changes. Title is caller-supplied (constructor param) so it
+    /// stays as-is here.
+    void retranslateUi() override;
+
   private:
     void apply_styles();
-    void populate(const QVector<fincept::services::QuoteData>& quotes);
 
     /// Hub path: subscribe to every symbol's quote topic and apply updates
     /// into the row cache + redraw. Called from showEvent.

@@ -131,9 +131,7 @@ SurfaceControlPanel::SurfaceControlPanel(QWidget* parent) : QWidget(parent) {
 }
 
 void SurfaceControlPanel::setup_ui() {
-    setStyleSheet(QString("background:%1; color:%2;")
-                      .arg(colors::BG_BASE())
-                      .arg(colors::TEXT_PRIMARY()));
+    setStyleSheet(QString("background:%1; color:%2;").arg(colors::BG_BASE()).arg(colors::TEXT_PRIMARY()));
     setMinimumWidth(300);
     setMaximumWidth(360);
 
@@ -142,28 +140,26 @@ void SurfaceControlPanel::setup_ui() {
     outer->setSpacing(0);
 
     // ── Header ─────────────────────────────────────────────────────────────
-    auto* header = new QLabel("CONTROL PANEL", this);
-    header->setStyleSheet(QString("background:%1; color:%2; font-size:10px; font-weight:bold; "
-                                  "padding:8px 10px; border-bottom:1px solid %3;")
-                              .arg(colors::BG_SURFACE())
-                              .arg(colors::TEXT_PRIMARY())
-                              .arg(colors::BORDER_DIM()));
-    outer->addWidget(header);
+    header_label_ = new QLabel(tr("CONTROL PANEL"), this);
+    header_label_->setStyleSheet(QString("background:%1; color:%2; font-size:10px; font-weight:bold; "
+                                         "padding:8px 10px; border-bottom:1px solid %3;")
+                                     .arg(colors::BG_SURFACE())
+                                     .arg(colors::TEXT_PRIMARY())
+                                     .arg(colors::BORDER_DIM()));
+    outer->addWidget(header_label_);
 
     // ── Provider status strip (one row per provider; just Databento for now) ─
     providers_box_ = new QWidget(this);
-    providers_box_->setStyleSheet(QString("background:%1; border-bottom:1px solid %2;")
-                                       .arg(colors::BG_SURFACE())
-                                       .arg(colors::BORDER_DIM()));
+    providers_box_->setStyleSheet(
+        QString("background:%1; border-bottom:1px solid %2;").arg(colors::BG_SURFACE()).arg(colors::BORDER_DIM()));
     auto* prov_layout = new QVBoxLayout(providers_box_);
     prov_layout->setContentsMargins(8, 6, 8, 6);
     prov_layout->setSpacing(3);
 
-    auto* prov_title = new QLabel("DATA PROVIDERS", providers_box_);
-    prov_title->setStyleSheet(
-        QString("color:%1; font-size:9px; font-weight:bold; letter-spacing:0.5px;")
-            .arg(colors::TEXT_DIM()));
-    prov_layout->addWidget(prov_title);
+    providers_title_ = new QLabel(tr("DATA PROVIDERS"), providers_box_);
+    providers_title_->setStyleSheet(
+        QString("color:%1; font-size:9px; font-weight:bold; letter-spacing:0.5px;").arg(colors::TEXT_DIM()));
+    prov_layout->addWidget(providers_title_);
 
     auto add_provider_row = [&](const QString& key, const QString& label) {
         auto* row = new QHBoxLayout();
@@ -173,16 +169,14 @@ void SurfaceControlPanel::setup_ui() {
         dot->setFixedWidth(10);
         row->addWidget(dot);
         auto* name_lbl = new QLabel(label, providers_box_);
-        name_lbl->setStyleSheet(QString("color:%1; font-size:10px; font-family:Consolas;")
-                                    .arg(colors::TEXT_PRIMARY()));
+        name_lbl->setStyleSheet(QString("color:%1; font-size:10px; font-family:Consolas;").arg(colors::TEXT_PRIMARY()));
         name_lbl->setMinimumWidth(80);
         row->addWidget(name_lbl);
-        auto* state_lbl = new QLabel("not configured", providers_box_);
+        auto* state_lbl = new QLabel(tr("not configured"), providers_box_);
         state_lbl->setStyleSheet(QString("color:%1; font-size:9px;").arg(colors::TEXT_DIM()));
         row->addWidget(state_lbl, 1);
         auto* detail_lbl = new QLabel("", providers_box_);
-        detail_lbl->setStyleSheet(QString("color:%1; font-size:9px; font-family:Consolas;")
-                                       .arg(colors::TEXT_DIM()));
+        detail_lbl->setStyleSheet(QString("color:%1; font-size:9px; font-family:Consolas;").arg(colors::TEXT_DIM()));
         row->addWidget(detail_lbl);
         prov_layout->addLayout(row);
         provider_dot_[key] = dot;
@@ -218,14 +212,14 @@ void SurfaceControlPanel::setup_ui() {
 
     // ── Footer (sticky) — FETCH ────────────────────────────────────────────
     auto* footer = new QWidget(this);
-    footer->setStyleSheet(QString("background:%1; border-top:1px solid %2;")
-                              .arg(colors::BG_SURFACE())
-                              .arg(colors::BORDER_DIM()));
+    footer->setStyleSheet(
+        QString("background:%1; border-top:1px solid %2;").arg(colors::BG_SURFACE()).arg(colors::BORDER_DIM()));
     auto* footer_layout = new QVBoxLayout(footer);
     footer_layout->setContentsMargins(8, 8, 8, 8);
-    fetch_btn_ = new QPushButton("FETCH", footer);
+    fetch_btn_ = new QPushButton(tr("FETCH"), footer);
     fetch_btn_->setStyleSheet(fetch_btn_qss(true));
     fetch_btn_->setMinimumHeight(34);
+    fetch_btn_->setAccessibleName(tr("Fetch this surface from Databento"));
     connect(fetch_btn_, &QPushButton::clicked, this, &SurfaceControlPanel::on_fetch_clicked);
     footer_layout->addWidget(fetch_btn_);
     outer->addWidget(footer);
@@ -234,14 +228,14 @@ void SurfaceControlPanel::setup_ui() {
 }
 
 QGroupBox* SurfaceControlPanel::build_asset_section() {
-    auto* gb = new QGroupBox("ASSET", this);
+    auto* gb = new QGroupBox(tr("ASSET"), this);
     gb->setStyleSheet(section_title_qss());
     auto* l = new QVBoxLayout(gb);
     l->setContentsMargins(8, 12, 8, 8);
     l->setSpacing(6);
 
     symbol_edit_ = new QLineEdit(gb);
-    symbol_edit_->setPlaceholderText("Underlying / parent symbol");
+    symbol_edit_->setPlaceholderText(tr("Underlying / parent symbol"));
     symbol_edit_->setText(state_.symbol);
     symbol_edit_->setStyleSheet(line_edit_qss());
     connect(symbol_edit_, &QLineEdit::editingFinished, this, &SurfaceControlPanel::on_symbol_edited);
@@ -261,14 +255,13 @@ QGroupBox* SurfaceControlPanel::build_asset_section() {
     symbol_search_timer_ = new QTimer(this);
     symbol_search_timer_->setSingleShot(true);
     symbol_search_timer_->setInterval(300);
-    connect(symbol_search_timer_, &QTimer::timeout, this,
-            &SurfaceControlPanel::on_search_debounce_fired);
+    connect(symbol_search_timer_, &QTimer::timeout, this, &SurfaceControlPanel::on_search_debounce_fired);
 
     auto* row = new QHBoxLayout();
     row->setSpacing(6);
-    auto* ds_lbl = new QLabel("Dataset:", gb);
-    ds_lbl->setStyleSheet(QString("color:%1; font-size:9px;").arg(colors::TEXT_SECONDARY()));
-    row->addWidget(ds_lbl);
+    dataset_lbl_ = new QLabel(tr("Dataset:"), gb);
+    dataset_lbl_->setStyleSheet(QString("color:%1; font-size:9px;").arg(colors::TEXT_SECONDARY()));
+    row->addWidget(dataset_lbl_);
     dataset_combo_ = new QComboBox(gb);
     dataset_combo_->setStyleSheet(combo_qss());
     connect(dataset_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
@@ -276,23 +269,27 @@ QGroupBox* SurfaceControlPanel::build_asset_section() {
     row->addWidget(dataset_combo_, 1);
     l->addLayout(row);
 
-    spot_label_ = new QLabel("Spot: —", gb);
+    spot_label_ = new QLabel(tr("Spot: —"), gb);
     spot_label_->setStyleSheet(QString("color:%1; font-size:9px;").arg(colors::TEXT_DIM()));
     l->addWidget(spot_label_);
 
+    symbol_edit_->setAccessibleName(tr("Underlying symbol"));
+    dataset_combo_->setAccessibleName(tr("Databento dataset"));
+    spot_label_->setAccessibleName(tr("Spot price"));
+
     tier_badge_ = new QLabel("DEMO", gb);
+    tier_badge_->setAccessibleName(tr("Data tier"));
     tier_badge_->setAlignment(Qt::AlignCenter);
-    tier_badge_->setStyleSheet(
-        QString("background:%1; color:#000; font-size:9px; font-weight:bold; "
-                "padding:2px 6px; border-radius:2px; max-width:80px;")
-            .arg(colors::TEXT_DIM()));
+    tier_badge_->setStyleSheet(QString("background:%1; color:#000; font-size:9px; font-weight:bold; "
+                                       "padding:2px 6px; border-radius:2px; max-width:80px;")
+                                   .arg(colors::TEXT_DIM()));
     l->addWidget(tier_badge_, 0, Qt::AlignLeft);
 
     return gb;
 }
 
 QGroupBox* SurfaceControlPanel::build_dates_section() {
-    auto* gb = new QGroupBox("DATE RANGE", this);
+    auto* gb = new QGroupBox(tr("DATE RANGE"), this);
     gb->setStyleSheet(section_title_qss());
     auto* l = new QVBoxLayout(gb);
     l->setContentsMargins(8, 12, 8, 8);
@@ -304,12 +301,13 @@ QGroupBox* SurfaceControlPanel::build_dates_section() {
     QDate default_min(2013, 1, 1);
     QDate default_max = QDate::currentDate().addDays(-1);
 
-    auto build_date_row = [&](const QString& title, QDateEdit*& target, const QDate& def) {
+    auto build_date_row = [&](const QString& title, QDateEdit*& target, QLabel*& label_out, const QDate& def) {
         auto* row = new QHBoxLayout();
         row->setSpacing(6);
         auto* lbl = new QLabel(title, gb);
         lbl->setStyleSheet(QString("color:%1; font-size:9px;").arg(colors::TEXT_SECONDARY()));
         lbl->setMinimumWidth(40);
+        label_out = lbl;
         row->addWidget(lbl);
         target = new QDateEdit(def, gb);
         target->setCalendarPopup(true);
@@ -321,8 +319,8 @@ QGroupBox* SurfaceControlPanel::build_dates_section() {
         row->addWidget(target, 1);
         l->addLayout(row);
     };
-    build_date_row("Start:", start_edit_, state_.start_date);
-    build_date_row("End:", end_edit_, state_.end_date);
+    build_date_row(tr("Start:"), start_edit_, start_lbl_, state_.start_date);
+    build_date_row(tr("End:"), end_edit_, end_lbl_, state_.end_date);
 
     // Lookback presets
     auto* presets = new QHBoxLayout();
@@ -346,19 +344,20 @@ QGroupBox* SurfaceControlPanel::build_dates_section() {
 }
 
 QGroupBox* SurfaceControlPanel::build_options_section() {
-    auto* gb = new QGroupBox("OPTION FILTERS", this);
+    auto* gb = new QGroupBox(tr("OPTION FILTERS"), this);
     gb->setStyleSheet(section_title_qss());
     auto* l = new QVBoxLayout(gb);
     l->setContentsMargins(8, 12, 8, 8);
     l->setSpacing(6);
 
-    auto build_spin_row = [&](const QString& title, int min_v, int max_v, int initial,
-                              QSpinBox*& target, const QString& suffix = QString()) {
+    auto build_spin_row = [&](const QString& title, int min_v, int max_v, int initial, QSpinBox*& target,
+                              QLabel*& label_out, const QString& suffix = QString()) {
         auto* row = new QHBoxLayout();
         row->setSpacing(6);
         auto* lbl = new QLabel(title, gb);
         lbl->setStyleSheet(QString("color:%1; font-size:9px;").arg(colors::TEXT_SECONDARY()));
         lbl->setMinimumWidth(110);
+        label_out = lbl;
         row->addWidget(lbl);
         target = new QSpinBox(gb);
         target->setRange(min_v, max_v);
@@ -370,21 +369,22 @@ QGroupBox* SurfaceControlPanel::build_options_section() {
         l->addLayout(row);
     };
 
-    build_spin_row("Strike window:", 1, 100, state_.strike_window_pct, strike_window_spin_, "%");
+    build_spin_row(tr("Strike window:"), 1, 100, state_.strike_window_pct, strike_window_spin_, strike_window_lbl_,
+                   "%");
     connect(strike_window_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
             &SurfaceControlPanel::on_strike_window_changed);
 
-    build_spin_row("DTE min (days):", 0, 3650, state_.dte_min, dte_min_spin_);
-    build_spin_row("DTE max (days):", 1, 3650, state_.dte_max, dte_max_spin_);
+    build_spin_row(tr("DTE min (days):"), 0, 3650, state_.dte_min, dte_min_spin_, dte_min_lbl_);
+    build_spin_row(tr("DTE max (days):"), 1, 3650, state_.dte_max, dte_max_spin_, dte_max_lbl_);
     connect(dte_min_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &SurfaceControlPanel::on_dte_changed);
     connect(dte_max_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &SurfaceControlPanel::on_dte_changed);
 
     auto* iv_row = new QHBoxLayout();
     iv_row->setSpacing(6);
-    auto* iv_lbl = new QLabel("IV method:", gb);
-    iv_lbl->setStyleSheet(QString("color:%1; font-size:9px;").arg(colors::TEXT_SECONDARY()));
-    iv_lbl->setMinimumWidth(110);
-    iv_row->addWidget(iv_lbl);
+    iv_method_lbl_ = new QLabel(tr("IV method:"), gb);
+    iv_method_lbl_->setStyleSheet(QString("color:%1; font-size:9px;").arg(colors::TEXT_SECONDARY()));
+    iv_method_lbl_->setMinimumWidth(110);
+    iv_row->addWidget(iv_method_lbl_);
     iv_method_combo_ = new QComboBox(gb);
     iv_method_combo_->addItems({"Brent", "Bisection", "Newton-Raphson"});
     iv_method_combo_->setStyleSheet(combo_qss());
@@ -397,7 +397,7 @@ QGroupBox* SurfaceControlPanel::build_options_section() {
 }
 
 QGroupBox* SurfaceControlPanel::build_basket_section() {
-    auto* gb = new QGroupBox("BASKET", this);
+    auto* gb = new QGroupBox(tr("BASKET"), this);
     gb->setStyleSheet(section_title_qss());
     auto* l = new QVBoxLayout(gb);
     l->setContentsMargins(8, 12, 8, 8);
@@ -406,7 +406,7 @@ QGroupBox* SurfaceControlPanel::build_basket_section() {
     auto* input_row = new QHBoxLayout();
     input_row->setSpacing(4);
     basket_input_ = new QLineEdit(gb);
-    basket_input_->setPlaceholderText("Add ticker");
+    basket_input_->setPlaceholderText(tr("Add ticker"));
     basket_input_->setStyleSheet(line_edit_qss());
     input_row->addWidget(basket_input_, 1);
     basket_add_btn_ = new QPushButton("+", gb);
@@ -440,41 +440,41 @@ QGroupBox* SurfaceControlPanel::build_basket_section() {
 }
 
 QGroupBox* SurfaceControlPanel::build_metrics_section() {
-    auto* gb = new QGroupBox("METRICS", this);
+    auto* gb = new QGroupBox(tr("METRICS"), this);
     gb->setStyleSheet(section_title_qss());
     auto* l = new QVBoxLayout(gb);
     l->setContentsMargins(8, 12, 8, 8);
     l->setSpacing(2);
 
-    auto add_row = [&](const QString& label, QLabel*& target) {
+    auto add_row = [&](const QString& label, QLabel*& target, QLabel*& name_out) {
         auto* row = new QHBoxLayout();
         row->setSpacing(6);
         auto* lbl = new QLabel(label, gb);
-        lbl->setStyleSheet(QString("color:%1; font-size:9px; font-family:Consolas;")
-                               .arg(colors::TEXT_SECONDARY()));
+        lbl->setStyleSheet(QString("color:%1; font-size:9px; font-family:Consolas;").arg(colors::TEXT_SECONDARY()));
         lbl->setMinimumWidth(80);
+        name_out = lbl;
         row->addWidget(lbl);
         target = new QLabel("—", gb);
-        target->setStyleSheet(QString("color:%1; font-size:10px; font-family:Consolas; font-weight:bold;")
-                                  .arg(colors::TEXT_PRIMARY()));
+        target->setStyleSheet(
+            QString("color:%1; font-size:10px; font-family:Consolas; font-weight:bold;").arg(colors::TEXT_PRIMARY()));
         row->addWidget(target, 1, Qt::AlignRight);
         l->addLayout(row);
     };
 
-    add_row("count", metrics_count_);
-    add_row("min", metrics_min_);
-    add_row("max", metrics_max_);
-    add_row("mean", metrics_mean_);
-    add_row("median", metrics_median_);
-    add_row("std", metrics_std_);
-    add_row("skew", metrics_skew_);
-    add_row("kurt", metrics_kurt_);
+    add_row(tr("count"), metrics_count_, metric_name_lbls_[0]);
+    add_row(tr("min"), metrics_min_, metric_name_lbls_[1]);
+    add_row(tr("max"), metrics_max_, metric_name_lbls_[2]);
+    add_row(tr("mean"), metrics_mean_, metric_name_lbls_[3]);
+    add_row(tr("median"), metrics_median_, metric_name_lbls_[4]);
+    add_row(tr("std"), metrics_std_, metric_name_lbls_[5]);
+    add_row(tr("skew"), metrics_skew_, metric_name_lbls_[6]);
+    add_row(tr("kurt"), metrics_kurt_, metric_name_lbls_[7]);
 
     return gb;
 }
 
 QGroupBox* SurfaceControlPanel::build_lineage_section() {
-    auto* gb = new QGroupBox("LINEAGE", this);
+    auto* gb = new QGroupBox(tr("LINEAGE"), this);
     gb->setStyleSheet(section_title_qss());
     auto* l = new QVBoxLayout(gb);
     l->setContentsMargins(8, 12, 8, 8);
@@ -489,8 +489,8 @@ QGroupBox* SurfaceControlPanel::build_lineage_section() {
 void SurfaceControlPanel::prefill_datasets() {
     // Static seed list — the screen calls list_datasets() asynchronously and
     // updates this combo when results arrive (see SurfaceAnalyticsScreen).
-    QStringList seed = {"OPRA.PILLAR", "GLBX.MDP3", "EQUS.MINI", "XNAS.ITCH", "XNYS.PILLAR",
-                        "IFEU.IMPACT", "IFUS.IMPACT"};
+    QStringList seed = {"OPRA.PILLAR", "GLBX.MDP3",   "EQUS.MINI",  "XNAS.ITCH",
+                        "XNYS.PILLAR", "IFEU.IMPACT", "IFUS.IMPACT"};
     dataset_combo_->blockSignals(true);
     dataset_combo_->clear();
     for (const QString& s : seed)
@@ -498,17 +498,26 @@ void SurfaceControlPanel::prefill_datasets() {
     dataset_combo_->blockSignals(false);
 }
 
+void SurfaceControlPanel::mark_synthetic(bool on) {
+    if (synthetic_ == on)
+        return;
+    synthetic_ = on;
+    set_capability(active_type_); // re-apply the badge with the new real/synthetic state
+}
+
 void SurfaceControlPanel::set_capability(ChartType type) {
     active_type_ = type;
     const auto& cap = capability_for(type);
 
-    // Tier badge
-    QColor bg = tier_color(cap.tier);
-    tier_badge_->setText(tier_name(cap.tier));
-    tier_badge_->setStyleSheet(
-        QString("background:%1; color:#000; font-size:9px; font-weight:bold; "
-                "padding:2px 6px; border-radius:2px; max-width:80px;")
-            .arg(bg.name()));
+    // Tier badge — when the displayed data is synthetic (demo/refresh with no real
+    // fetch) show DEMO regardless of the surface's *capability* tier, otherwise the
+    // rand() sample data reads as live/COMPUTED market data.
+    const SurfaceTier shown_tier = synthetic_ ? SurfaceTier::DEMO : cap.tier;
+    QColor bg = tier_color(shown_tier);
+    tier_badge_->setText(tier_name(shown_tier));
+    tier_badge_->setStyleSheet(QString("background:%1; color:#000; font-size:9px; font-weight:bold; "
+                                       "padding:2px 6px; border-radius:2px; max-width:80px;")
+                                   .arg(bg.name()));
 
     // Default dataset for this surface
     if (!QString(cap.dataset).isEmpty()) {
@@ -530,16 +539,15 @@ void SurfaceControlPanel::set_capability(ChartType type) {
     fetch_btn_->setEnabled(can_fetch);
     fetch_btn_->setStyleSheet(fetch_btn_qss(can_fetch));
     fetch_btn_->setToolTip(can_fetch ? QString()
-                                     : "No Databento source for this surface — "
-                                       "viewing synthetic data");
+                                     : tr("No Databento source for this surface — "
+                                          "viewing synthetic data"));
 
     update_lineage(QString::fromUtf8(cap.description));
 }
 
 void SurfaceControlPanel::apply_capability_visibility() {
     const auto& cap = capability_for(active_type_);
-    asset_box_->setVisible(cap.needs_underlying || cap.needs_correlation_basket ||
-                           cap.tier != SurfaceTier::DEMO);
+    asset_box_->setVisible(cap.needs_underlying || cap.needs_correlation_basket || cap.tier != SurfaceTier::DEMO);
     dates_box_->setVisible(cap.needs_date_range);
     options_box_->setVisible(cap.needs_strike_window || cap.needs_expiry_filter);
     basket_box_->setVisible(cap.needs_correlation_basket);
@@ -553,13 +561,14 @@ void SurfaceControlPanel::update_metrics(const std::vector<std::vector<float>>& 
             if (std::isfinite(v))
                 flat.push_back(v);
     if (flat.empty()) {
-        for (auto* l : {metrics_count_, metrics_min_, metrics_max_, metrics_mean_,
-                        metrics_median_, metrics_std_, metrics_skew_, metrics_kurt_})
+        for (auto* l : {metrics_count_, metrics_min_, metrics_max_, metrics_mean_, metrics_median_, metrics_std_,
+                        metrics_skew_, metrics_kurt_})
             set_metric(l, "—");
         return;
     }
     std::sort(flat.begin(), flat.end());
-    double n = (double)flat.size();
+    const size_t count = flat.size();
+    double n = (double)count;
     double sum = 0;
     for (float v : flat)
         sum += v;
@@ -575,7 +584,11 @@ void SurfaceControlPanel::update_metrics(const std::vector<std::vector<float>>& 
     double std_dev = std::sqrt(var);
     double skew = (std_dev > 0) ? (m3 / n) / std::pow(std_dev, 3) : 0.0;
     double kurt = (std_dev > 0) ? (m4 / n) / std::pow(std_dev, 4) - 3.0 : 0.0;
-    double median = flat[flat.size() / 2];
+    // Even-sized samples take the mean of the two central values; the old
+    // flat[size/2] silently reported the upper middle as "median".
+    const double median = (count % 2 == 0)
+                              ? 0.5 * (double(flat[count / 2 - 1]) + double(flat[count / 2]))
+                              : double(flat[count / 2]);
 
     QString suffix = units.isEmpty() ? QString() : QStringLiteral(" ") + units;
     set_metric(metrics_count_, QString::number((qint64)n));
@@ -591,6 +604,13 @@ void SurfaceControlPanel::update_metrics(const std::vector<std::vector<float>>& 
 void SurfaceControlPanel::update_lineage(const QString& line) {
     if (lineage_label_)
         lineage_label_->setText(line.isEmpty() ? "—" : line);
+}
+
+void SurfaceControlPanel::set_spot(double spot) {
+    last_spot_ = spot;
+    if (!spot_label_)
+        return;
+    spot_label_->setText(spot > 0 ? tr("Spot: %1").arg(spot, 0, 'f', 2) : tr("Spot: —"));
 }
 
 void SurfaceControlPanel::apply_state(const SurfaceControlsState& s) {
@@ -647,19 +667,17 @@ void SurfaceControlPanel::on_search_debounce_fired() {
     QString query = pending_search_query_;
     QString dataset = dataset_combo_ ? dataset_combo_->currentText() : QString();
     QPointer<SurfaceControlPanel> self = this;
-    DatabentoService::instance().search_symbols(
-        query, dataset, [self, query](QStringList matches) {
-            if (!self || !self->symbol_completer_model_)
-                return;
-            // Only apply if the query is still the freshest pending one.
-            if (self->pending_search_query_ != query)
-                return;
-            self->symbol_completer_model_->setStringList(matches);
-            if (self->symbol_completer_ && self->symbol_edit_ &&
-                self->symbol_edit_->hasFocus() && !matches.isEmpty()) {
-                self->symbol_completer_->complete();
-            }
-        });
+    DatabentoService::instance().search_symbols(query, dataset, [self, query](QStringList matches) {
+        if (!self || !self->symbol_completer_model_)
+            return;
+        // Only apply if the query is still the freshest pending one.
+        if (self->pending_search_query_ != query)
+            return;
+        self->symbol_completer_model_->setStringList(matches);
+        if (self->symbol_completer_ && self->symbol_edit_ && self->symbol_edit_->hasFocus() && !matches.isEmpty()) {
+            self->symbol_completer_->complete();
+        }
+    });
 }
 
 void SurfaceControlPanel::on_dataset_changed() {
@@ -730,8 +748,7 @@ void SurfaceControlPanel::on_fetch_clicked() {
     emit fetch_requested();
 }
 
-void SurfaceControlPanel::apply_dataset_range(const QDate& available_start,
-                                              const QDate& available_end) {
+void SurfaceControlPanel::apply_dataset_range(const QDate& available_start, const QDate& available_end) {
     if (!start_edit_ || !end_edit_)
         return;
     // Cap end at *yesterday* even if Databento says today, since intraday
@@ -764,27 +781,102 @@ void SurfaceControlPanel::apply_dataset_range(const QDate& available_start,
     end_edit_->blockSignals(false);
 }
 
-void SurfaceControlPanel::set_provider_status(const QString& provider_name,
-                                              const QString& provider_state,
+void SurfaceControlPanel::set_provider_status(const QString& provider_name, const QString& provider_state,
                                               const QString& detail) {
     auto* dot = provider_dot_.value(provider_name, nullptr);
     auto* lbl = provider_state_.value(provider_name, nullptr);
     auto* dt = provider_detail_.value(provider_name, nullptr);
     if (!dot || !lbl)
         return;
+    // `provider_state` is a protocol token from the caller; the pill shows a
+    // translated rendering of it rather than the raw token.
     QString color = colors::TEXT_DIM();
     QString text = provider_state;
-    if (provider_state == "connected")
+    if (provider_state == "connected") {
         color = colors::POSITIVE();
-    else if (provider_state == "disconnected" || provider_state == "error")
+        text = tr("connected");
+    } else if (provider_state == "disconnected") {
         color = colors::NEGATIVE();
-    else if (provider_state == "configured")
+        text = tr("disconnected");
+    } else if (provider_state == "error") {
+        color = colors::NEGATIVE();
+        text = tr("error");
+    } else if (provider_state == "configured") {
         color = QString("rgb(217,164,6)"); // amber, key set but not yet tested
+        text = tr("configured");
+    } else if (provider_state == "not configured") {
+        text = tr("not configured");
+    }
     dot->setStyleSheet(QString("color:%1; font-size:11px;").arg(color));
     lbl->setText(text);
     lbl->setStyleSheet(QString("color:%1; font-size:9px;").arg(color));
     if (dt)
         dt->setText(detail);
+}
+
+// ── Live language switch ─────────────────────────────────────────────────────
+void SurfaceControlPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void SurfaceControlPanel::retranslateUi() {
+    if (header_label_)
+        header_label_->setText(tr("CONTROL PANEL"));
+    if (providers_title_)
+        providers_title_->setText(tr("DATA PROVIDERS"));
+
+    // Section titles
+    if (asset_box_)
+        asset_box_->setTitle(tr("ASSET"));
+    if (dates_box_)
+        dates_box_->setTitle(tr("DATE RANGE"));
+    if (options_box_)
+        options_box_->setTitle(tr("OPTION FILTERS"));
+    if (basket_box_)
+        basket_box_->setTitle(tr("BASKET"));
+    if (metrics_box_)
+        metrics_box_->setTitle(tr("METRICS"));
+    if (lineage_box_)
+        lineage_box_->setTitle(tr("LINEAGE"));
+
+    // Asset section
+    if (symbol_edit_)
+        symbol_edit_->setPlaceholderText(tr("Underlying / parent symbol"));
+    if (dataset_lbl_)
+        dataset_lbl_->setText(tr("Dataset:"));
+    // Re-render the live value rather than blanking it back to a dash.
+    set_spot(last_spot_);
+
+    // Date + option field labels
+    if (start_lbl_)
+        start_lbl_->setText(tr("Start:"));
+    if (end_lbl_)
+        end_lbl_->setText(tr("End:"));
+    if (strike_window_lbl_)
+        strike_window_lbl_->setText(tr("Strike window:"));
+    if (dte_min_lbl_)
+        dte_min_lbl_->setText(tr("DTE min (days):"));
+    if (dte_max_lbl_)
+        dte_max_lbl_->setText(tr("DTE max (days):"));
+    if (iv_method_lbl_)
+        iv_method_lbl_->setText(tr("IV method:"));
+
+    // Basket
+    if (basket_input_)
+        basket_input_->setPlaceholderText(tr("Add ticker"));
+
+    // Metric name labels (declared order)
+    const char* metric_names[8] = {QT_TR_NOOP("count"),  QT_TR_NOOP("min"), QT_TR_NOOP("max"),  QT_TR_NOOP("mean"),
+                                   QT_TR_NOOP("median"), QT_TR_NOOP("std"), QT_TR_NOOP("skew"), QT_TR_NOOP("kurt")};
+    for (int i = 0; i < 8; ++i)
+        if (metric_name_lbls_[i])
+            metric_name_lbls_[i]->setText(tr(metric_names[i]));
+
+    // Footer
+    if (fetch_btn_)
+        fetch_btn_->setText(tr("FETCH"));
 }
 
 } // namespace fincept::surface

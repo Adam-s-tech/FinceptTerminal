@@ -1,11 +1,24 @@
 // src/screens/portfolio/views/EconomicsView.cpp
 #include "screens/portfolio/views/EconomicsView.h"
 
+#include "core/logging/Logger.h"
+#include "services/economics/EconomicsService.h"
+#include "storage/secure/SecureStorage.h"
 #include "ui/theme/Theme.h"
 
+#include <QColor>
+#include <QDate>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLineEdit>
+#include <QPointer>
+#include <QPushButton>
+#include <QTableWidgetItem>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -13,8 +26,50 @@
 
 namespace fincept::screens {
 
+// Correlates our EconomicsService::execute() call with its result_ready signal.
+static const QString kEconViewMacroRequestId = QStringLiteral("portfolio_macro");
+
 EconomicsView::EconomicsView(QWidget* parent) : QWidget(parent) {
     build_ui();
+
+    // Macro levels arrive through EconomicsService (the gateway for fred_data.py:
+    // it caches and paces the Python spawn). The view used to call PythonRunner
+    // itself, which D1 forbids for screens.
+    connect(&services::EconomicsService::instance(), &services::EconomicsService::result_ready, this,
+            [this](const QString& request_id, const services::EconomicsResult& res) {
+                if (request_id != kEconViewMacroRequestId)
+                    return;
+                macro_loading_ = false;
+                macro_loaded_ = true;
+                macro_values_.clear();
+                macro_dates_.clear();
+
+                if (res.success) {
+                    for (const auto v : res.data.value("data").toArray()) {
+                        const auto o = v.toObject();
+                        if (o.contains("error"))
+                            continue;
+                        const QString id = o.value("series_id").toString();
+                        const auto obs = o.value("observations").toArray();
+                        if (obs.isEmpty())
+                            continue;
+                        const auto last = obs.last().toObject();
+                        macro_values_[id] = last.value("value").toDouble();
+                        macro_dates_[id] = last.value("date").toString();
+                    }
+                } else {
+                    LOG_WARN("EconomicsView", "FRED macro fetch failed: " + res.error.left(200));
+                }
+
+                // No usable series at all (no key configured, rate limit, offline)
+                // reads as a table of dashes; say why and offer the key button.
+                if (macro_values_.isEmpty())
+                    macro_status_ = tr("Could not load live macro data. Add a free FRED API key in "
+                                       "Settings → API Credentials.");
+                else
+                    macro_status_.clear();
+                update_macro_table();
+            });
 }
 
 void EconomicsView::build_ui() {
@@ -57,16 +112,83 @@ void EconomicsView::build_ui() {
                                              "QHeaderView::section { background:%4; color:%5; border:none;"
                                              "  border-bottom:2px solid %6; padding:3px 8px; font-size:9px;"
                                              "  font-weight:700; letter-spacing:0.5px; }")
-                                         .arg(ui::colors::BG_BASE(), ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM(),
-                                              ui::colors::BG_SURFACE(), ui::colors::TEXT_SECONDARY(), ui::colors::AMBER()));
+                                         .arg(ui::colors::BG_BASE(), ui::colors::TEXT_PRIMARY(),
+                                              ui::colors::BORDER_DIM(), ui::colors::BG_SURFACE(),
+                                              ui::colors::TEXT_SECONDARY(), ui::colors::AMBER()));
     ind_layout->addWidget(indicators_table_, 1);
-    layout->addWidget(ind_section, 6);
+    layout->addWidget(ind_section, 5);
 
     // Separator
     auto* sep = new QWidget(this);
     sep->setFixedHeight(1);
     sep->setStyleSheet(QString("background:%1;").arg(ui::colors::BORDER_DIM()));
     layout->addWidget(sep);
+
+    // ── Middle: live macro conditions (FRED) ──────────────────────────────────
+    auto* macro_section = new QWidget(this);
+    auto* macro_layout = new QVBoxLayout(macro_section);
+    macro_layout->setContentsMargins(12, 8, 12, 8);
+    macro_layout->setSpacing(4);
+
+    macro_title_ = new QLabel(tr("CURRENT MACRO CONDITIONS  (LIVE · FRED)"));
+    macro_title_->setStyleSheet(
+        QString("color:%1; font-size:11px; font-weight:700; letter-spacing:1px;").arg(ui::colors::AMBER()));
+    macro_layout->addWidget(macro_title_);
+
+    macro_note_ = new QLabel(tr("Loading live macro data…"));
+    macro_note_->setWordWrap(true);
+    macro_note_->setStyleSheet(QString("color:%1; font-size:9px;").arg(ui::colors::TEXT_TERTIARY()));
+    macro_layout->addWidget(macro_note_);
+
+    // Shown only when no FRED key is configured — lets the user paste one inline.
+    macro_set_key_btn_ = new QPushButton(tr("➜ SET FREE FRED API KEY"));
+    macro_set_key_btn_->setCursor(Qt::PointingHandCursor);
+    macro_set_key_btn_->setFixedHeight(24);
+    macro_set_key_btn_->setStyleSheet(
+        QString(
+            "QPushButton { background:transparent; color:%1; border:1px solid %1; font-size:9px;"
+            "  font-weight:700; letter-spacing:1px; padding:0 10px; } QPushButton:hover { background:%1; color:#000; }")
+            .arg(ui::colors::AMBER()));
+    macro_set_key_btn_->setVisible(false);
+    connect(macro_set_key_btn_, &QPushButton::clicked, this, [this]() {
+        bool ok = false;
+        const QString key = QInputDialog::getText(
+            this, tr("FRED API Key"),
+            tr("Paste your free FRED API key (get one at https://fredaccount.stlouisfed.org/apikeys).\n"
+               "It is stored encrypted and shared with all FRED-backed features."),
+            QLineEdit::Normal, QString(), &ok);
+        if (!ok || key.trimmed().isEmpty())
+            return;
+        fincept::SecureStorage::instance().store("FRED_API_KEY", key.trimmed());
+        macro_loaded_ = false; // force a refetch with the new key
+        fetch_macro();
+    });
+    {
+        auto* btn_row = new QHBoxLayout;
+        btn_row->setContentsMargins(0, 0, 0, 0);
+        btn_row->addWidget(macro_set_key_btn_);
+        btn_row->addStretch();
+        macro_layout->addLayout(btn_row);
+    }
+
+    macro_table_ = new QTableWidget;
+    macro_table_->setColumnCount(3);
+    macro_table_->setHorizontalHeaderLabels({tr("INDICATOR"), tr("CURRENT"), tr("AS OF")});
+    macro_table_->setSelectionMode(QAbstractItemView::NoSelection);
+    macro_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    macro_table_->setShowGrid(false);
+    macro_table_->verticalHeader()->setVisible(false);
+    macro_table_->horizontalHeader()->setStretchLastSection(true);
+    macro_table_->setColumnWidth(0, 220);
+    macro_table_->setColumnWidth(1, 140);
+    macro_table_->setStyleSheet(indicators_table_->styleSheet());
+    macro_layout->addWidget(macro_table_, 1);
+    layout->addWidget(macro_section, 3);
+
+    auto* sep2 = new QWidget(this);
+    sep2->setFixedHeight(1);
+    sep2->setStyleSheet(QString("background:%1;").arg(ui::colors::BORDER_DIM()));
+    layout->addWidget(sep2);
 
     // ── Bottom: Portfolio Factor Sensitivity ──────────────────────────────────
     auto* sens_section = new QWidget(this);
@@ -85,7 +207,8 @@ void EconomicsView::build_ui() {
 
     sensitivity_table_ = new QTableWidget;
     sensitivity_table_->setColumnCount(4);
-    sensitivity_table_->setHorizontalHeaderLabels({tr("FACTOR SHOCK"), tr("SENSITIVITY"), tr("DIRECTION"), tr("ESTIMATED IMPACT")});
+    sensitivity_table_->setHorizontalHeaderLabels(
+        {tr("FACTOR SHOCK"), tr("SENSITIVITY"), tr("DIRECTION"), tr("ESTIMATED IMPACT")});
     sensitivity_table_->setSelectionMode(QAbstractItemView::NoSelection);
     sensitivity_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     sensitivity_table_->setShowGrid(false);
@@ -102,6 +225,83 @@ void EconomicsView::set_data(const portfolio::PortfolioSummary& summary, const Q
     has_data_ = true;
     update_indicators();
     update_sensitivity();
+    // Macro data is portfolio-independent — fetch once per view lifetime.
+    if (!macro_loaded_ && !macro_loading_)
+        fetch_macro();
+}
+
+// ── Live macro conditions (FRED) ──────────────────────────────────────────────
+
+namespace {
+// FRED series → friendly label + unit suffix, in display order.
+struct MacroSeries {
+    const char* id;
+    const char* label;
+    const char* suffix;
+};
+// Labels are marked with QT_TRANSLATE_NOOP so lupdate can extract them — a
+// bare tr(m.label) on a runtime const char* is invisible to the extractor and
+// these five strings never reached the .ts files.
+const MacroSeries kMacroSeries[] = {
+    {"DGS10", QT_TRANSLATE_NOOP("fincept::screens::EconomicsView", "10Y Treasury Yield"), "%"},
+    {"T10YIE", QT_TRANSLATE_NOOP("fincept::screens::EconomicsView", "Inflation (10Y breakeven)"), "%"},
+    {"A191RL1Q225SBEA", QT_TRANSLATE_NOOP("fincept::screens::EconomicsView", "Real GDP Growth (annualised)"), "%"},
+    {"DTWEXBGS", QT_TRANSLATE_NOOP("fincept::screens::EconomicsView", "USD Index (broad)"), ""},
+    {"DCOILWTICO", QT_TRANSLATE_NOOP("fincept::screens::EconomicsView", "WTI Crude Oil"), " $/bbl"},
+};
+} // namespace
+
+void EconomicsView::fetch_macro() {
+    macro_loading_ = true;
+    if (macro_note_)
+        macro_note_->setText(tr("Loading live macro data from FRED…"));
+
+    // Fetch the last ~120 days so we get a recent observation cheaply.
+    QStringList args;
+    for (const auto& m : kMacroSeries)
+        args << m.id;
+    args << QDate::currentDate().addDays(-120).toString("yyyy-MM-dd");
+
+    // fred_data.py multiple <series...> <start>; the result lands in the
+    // result_ready handler connected in the constructor.
+    services::EconomicsService::instance().execute(QStringLiteral("fred"), QStringLiteral("fred_data.py"),
+                                                   QStringLiteral("multiple"), args, kEconViewMacroRequestId);
+}
+
+void EconomicsView::update_macro_table() {
+    if (!macro_table_)
+        return;
+    if (macro_note_) {
+        macro_note_->setText(macro_status_.isEmpty()
+                                 ? tr("Live levels from the U.S. Federal Reserve (FRED). Your factor exposures below "
+                                      "show how the portfolio reacts to moves in each.")
+                                 : macro_status_);
+        macro_note_->setStyleSheet(
+            QString("color:%1; font-size:9px;")
+                .arg(macro_status_.isEmpty() ? ui::colors::TEXT_TERTIARY() : ui::colors::WARNING()));
+    }
+    // Offer the inline key-entry button whenever live data failed to load.
+    if (macro_set_key_btn_)
+        macro_set_key_btn_->setVisible(!macro_status_.isEmpty());
+    const int n = static_cast<int>(sizeof(kMacroSeries) / sizeof(kMacroSeries[0]));
+    macro_table_->setRowCount(n);
+    for (int r = 0; r < n; ++r) {
+        const auto& m = kMacroSeries[r];
+        macro_table_->setRowHeight(r, 26);
+        auto set = [&](int col, const QString& text, const char* color, int align) {
+            auto* it = new QTableWidgetItem(text);
+            it->setTextAlignment(static_cast<Qt::Alignment>(align) | Qt::AlignVCenter);
+            if (color)
+                it->setForeground(QColor(color));
+            macro_table_->setItem(r, col, it);
+        };
+        const bool have = macro_values_.contains(m.id);
+        const QString val =
+            have ? (QString::number(macro_values_.value(m.id), 'f', 2) + m.suffix) : QStringLiteral("—");
+        set(0, tr(m.label), ui::colors::TEXT_PRIMARY, Qt::AlignLeft);
+        set(1, val, have ? ui::colors::CYAN : ui::colors::TEXT_TERTIARY, Qt::AlignRight);
+        set(2, macro_dates_.value(m.id, QStringLiteral("—")), ui::colors::TEXT_TERTIARY, Qt::AlignRight);
+    }
 }
 
 void EconomicsView::changeEvent(QEvent* event) {
@@ -111,10 +311,14 @@ void EconomicsView::changeEvent(QEvent* event) {
 }
 
 void EconomicsView::retranslateUi() {
-    if (ind_title_)  ind_title_->setText(tr("PORTFOLIO ECONOMICS OVERVIEW"));
-    if (ind_note_)   ind_note_->setText(tr("Per-holding contribution to portfolio value, P&L, and risk"));
-    if (sens_title_) sens_title_->setText(tr("PORTFOLIO FACTOR SENSITIVITY"));
-    if (sens_note_)  sens_note_->setText(tr("Estimated portfolio impact from macro factor shocks, weighted by holdings"));
+    if (ind_title_)
+        ind_title_->setText(tr("PORTFOLIO ECONOMICS OVERVIEW"));
+    if (ind_note_)
+        ind_note_->setText(tr("Per-holding contribution to portfolio value, P&L, and risk"));
+    if (sens_title_)
+        sens_title_->setText(tr("PORTFOLIO FACTOR SENSITIVITY"));
+    if (sens_note_)
+        sens_note_->setText(tr("Estimated portfolio impact from macro factor shocks, weighted by holdings"));
 
     if (indicators_table_)
         indicators_table_->setHorizontalHeaderLabels(
@@ -130,7 +334,14 @@ void EconomicsView::retranslateUi() {
     }
 }
 
-// ── Sector inference (mirrors PortfolioSectorPanel, kept local) ───────────────
+// ── Sector inference — FALLBACK ONLY ─────────────────────────────────────────
+//
+// Prefer HoldingWithQuote::sector (populated from the import payload or the
+// SectorResolver) via sector_of() below. This static table only covers ~120 US
+// large caps and is what every other portfolio surface would disagree with:
+// PortfolioSectorPanel and AnalyticsSectorsView both read h.sector, so an
+// imported holding tagged "Consumer Staples" showed up here as "Consumer
+// Defensive" — or, for anything off this list, as "Other".
 static QString sector_for(const QString& sym) {
     const QString s = sym.toUpper();
     static const QHash<QString, QString> known = {
@@ -269,8 +480,60 @@ static QString sector_for(const QString& sym) {
     return "Other";
 }
 
+/// Resolved sector for a holding: the real one when we have it, the symbol
+/// heuristic otherwise.
+static QString sector_of(const portfolio::HoldingWithQuote& h) {
+    return h.sector.isEmpty() ? sector_for(h.symbol) : h.sector;
+}
+
+/// Maps the various sector vocabularies that can reach us (yfinance style,
+/// GICS style, import-file style) onto the keys used by the factor table in
+/// update_sensitivity(). Without this, a holding tagged "Financials" or
+/// "Consumer Discretionary" matched no row and its weight vanished from the
+/// exposure calculation entirely.
+static QString normalize_sector_key(const QString& sector) {
+    static const QHash<QString, QString> alias = {
+        {"financials", "Financial Services"},
+        {"financial", "Financial Services"},
+        {"consumer discretionary", "Consumer Cyclical"},
+        {"consumer staples", "Consumer Defensive"},
+        {"information technology", "Technology"},
+        {"tech", "Technology"},
+        {"health care", "Healthcare"},
+        {"communication services", "Communication"},
+        {"materials", "Basic Materials"},
+        {"industrial", "Industrials"},
+        {"etf", "ETF/Index"},
+        {"etf/index", "ETF/Index"},
+        {"index", "ETF/Index"},
+        {"us equity", "ETF/Index"},
+        {"crypto", "Cryptocurrency"},
+        {"bonds", "Other"},
+        {"fixed income", "Other"},
+        {"commodities", "Other"},
+        {"unclassified", "Other"},
+    };
+    const auto it = alias.find(sector.trimmed().toLower());
+    return it != alias.end() ? *it : sector;
+}
+
 void EconomicsView::update_indicators() {
     const auto& hv = summary_.holdings;
+
+    // Empty state — an empty grid gives the user nothing to act on.
+    indicators_table_->clearSpans();
+    if (hv.isEmpty()) {
+        indicators_table_->setRowCount(1);
+        indicators_table_->setRowHeight(0, 40);
+        auto* msg = new QTableWidgetItem(tr("No holdings in this portfolio yet."));
+        msg->setTextAlignment(Qt::AlignCenter);
+        msg->setForeground(QColor(ui::colors::TEXT_TERTIARY()));
+        msg->setFlags(Qt::ItemIsEnabled);
+        indicators_table_->setItem(0, 0, msg);
+        indicators_table_->setSpan(0, 0, 1, indicators_table_->columnCount());
+        return;
+    }
+
     indicators_table_->setRowCount(hv.size());
 
     // Sort by market value descending
@@ -295,13 +558,13 @@ void EconomicsView::update_indicators() {
         const char* pnl_pct_color = h.unrealized_pnl_percent >= 0 ? ui::colors::POSITIVE : ui::colors::NEGATIVE;
 
         set(0, h.symbol, ui::colors::CYAN);
-        set(1, sector_for(h.symbol), ui::colors::TEXT_SECONDARY);
+        set(1, sector_of(h), ui::colors::TEXT_SECONDARY);
         set(2, QString("%1%").arg(QString::number(h.weight, 'f', 1)), ui::colors::TEXT_PRIMARY);
         set(3, QString("%1 %2").arg(currency_).arg(QString::number(h.cost_basis, 'f', 2)), ui::colors::TEXT_SECONDARY);
         set(4, QString("%1 %2").arg(currency_).arg(QString::number(h.market_value, 'f', 2)), ui::colors::WARNING);
         set(5,
             QString("%1%2 %3")
-                .arg(h.unrealized_pnl >= 0 ? "+" : "")
+                .arg(h.unrealized_pnl >= 0 ? "+" : "-") // abs() below drops the sign, so say it here
                 .arg(currency_)
                 .arg(QString::number(std::abs(h.unrealized_pnl), 'f', 2)),
             pnl_color);
@@ -344,10 +607,36 @@ void EconomicsView::update_sensitivity() {
         {"Other", -0.08, +0.06, -0.03, -0.02, +0.00},
     };
 
-    // Build sector weight map from actual holdings
+    // Build sector weight map from actual holdings. Uses the resolved sector so
+    // the factor exposures agree with the SECTOR column above and with the
+    // sector donut on the landing view.
     QHash<QString, double> sector_weights;
-    for (const auto& h : summary_.holdings)
-        sector_weights[sector_for(h.symbol)] += h.weight / 100.0;
+    for (const auto& h : summary_.holdings) {
+        const QString key = normalize_sector_key(sector_of(h));
+        sector_weights[key] += h.weight / 100.0;
+    }
+
+    // Anything that still does not match a factor row is folded into "Other"
+    // so the exposures always sum over 100% of the book.
+    {
+        QHash<QString, double> matched;
+        double other = sector_weights.value("Other", 0.0);
+        for (auto it = sector_weights.begin(); it != sector_weights.end(); ++it) {
+            bool known = false;
+            for (const auto& sf : kSectorFactors) {
+                if (it.key() == QLatin1String(sf.sector)) {
+                    known = true;
+                    break;
+                }
+            }
+            if (known && it.key() != QLatin1String("Other"))
+                matched.insert(it.key(), it.value());
+            else if (it.key() != QLatin1String("Other"))
+                other += it.value();
+        }
+        matched.insert(QStringLiteral("Other"), other);
+        sector_weights = matched;
+    }
 
     // Compute weighted portfolio sensitivities
     double w_rate = 0, w_growth = 0, w_infl = 0, w_usd = 0, w_oil = 0;
@@ -404,7 +693,7 @@ void EconomicsView::update_sensitivity() {
         set(2, f.direction, color);
         set(3,
             QString("%1%2 %3")
-                .arg(impact >= 0 ? "+" : "")
+                .arg(impact >= 0 ? "+" : "-") // abs() below drops the sign, so say it here
                 .arg(currency_)
                 .arg(QString::number(std::abs(impact), 'f', 0)),
             color);

@@ -10,6 +10,7 @@
 #include <QMutex>
 #include <QNetworkAccessManager>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -22,11 +23,36 @@ namespace fincept::ai_chat {
 inline bool provider_supports_streaming(const QString& provider) {
     return provider == "openai" || provider == "anthropic" || provider == "gemini" || provider == "google" ||
            provider == "groq" || provider == "deepseek" || provider == "openrouter" || provider == "minimax" ||
-           provider == "kimi" || provider == "ollama" || provider == "xai" || provider == "fincept";
+           provider == "kimi" || provider == "ollama" || provider == "xai" || provider == "fincept" ||
+           provider == "astraflow" || provider == "astraflow_cn" || provider == "aihubmix";
 }
 
 inline bool provider_requires_api_key(const QString& provider) {
     return provider != "ollama" && provider != "fincept";
+}
+
+/// In-band sentinel prefixed onto a streamed chunk to mark it as chain-of-thought
+/// ("thinking") rather than answer text. Reasoning models (DeepSeek-R1, GLM, Kimi,
+/// MiniMax, …) stream `reasoning_content` (and Anthropic streams `thinking_delta`)
+/// before the real answer. The AI Chat tab strips this prefix and routes the
+/// remainder into a separate, collapsible Thinking section so it never mixes into
+/// the answer bubble; the floating Quick-Chat bubble simply drops these chunks.
+/// Uses STX (\x02) so it can't collide with model text — mirrors the existing
+/// \x01 __TOOL_CALL_CLEAR__ sentinel style.
+inline QString think_stream_prefix() {
+    return QStringLiteral("\x02__THINK__");
+}
+
+/// In-band sentinel marking a chunk as tool-activity progress ("Finding tools · …")
+/// rather than answer text. Same mechanism as think_stream_prefix (\x02) and the
+/// \x01 __TOOL_CALL_CLEAR__ sentinel; \x03 so the three can't collide.
+///
+/// Tool progress used to be appended straight into the answer bubble, which mixed
+/// plumbing into the reply and — because the label carried no arguments — rendered
+/// six different `tool_describe` calls as six identical "• tool_describe" lines.
+/// The AI Chat tab now routes these into their own collapsible Tools card.
+inline QString tool_stream_prefix() {
+    return QStringLiteral("\x03__TOOL__");
 }
 
 struct ConversationMessage {
@@ -41,6 +67,16 @@ struct LlmResponse {
     int completion_tokens = 0;
     int total_tokens = 0;
     bool success = false;
+    /// Failure looks transient (upstream/model error, not a malformed request),
+    /// so the caller may resubmit the identical prompt once.
+    bool retryable = false;
+    /// The request was stopped by cancel_active_request(). `content` then holds
+    /// whatever had streamed so far (possibly empty).
+    bool cancelled = false;
+    /// chat_session_id the request was issued with (chat_streaming only). The
+    /// finished_streaming() signal is global, so each consumer uses this to tell
+    /// its own response from another consumer's (tab vs. floating Quick Chat).
+    QString origin_session_id = {};
 };
 
 /// (chunk_text, is_done) — invoked on a background thread.
@@ -69,6 +105,15 @@ class LlmService : public QObject {
     /// Back-compat: false→None, true→All. Prefer the enum overload.
     void chat_streaming(const QString& user_message, const std::vector<ConversationMessage>& history,
                         StreamCallback on_chunk, bool use_tools);
+
+    /// Stop the request currently executing on the worker thread (streaming read,
+    /// tool loop, blocking POST). Safe from any thread; a no-op when idle. The
+    /// request finishes promptly with LlmResponse::cancelled = true. When
+    /// `chat_session_id` is non-empty only a request issued with that id is
+    /// cancelled, so the AI Chat tab's Stop never kills the Quick Chat bubble's
+    /// request (which carries no id). Work already handed to a tool keeps
+    /// running until the tool returns.
+    void cancel_active_request(const QString& chat_session_id = {});
 
     /// Call after the user changes LLM settings.
     void reload_config();
@@ -107,6 +152,22 @@ class LlmService : public QObject {
 
     mutable QMutex mutex_;
 
+    // INTERIM serialization guard: held for the WHOLE duration of each LLM request
+    // (chat() and the chat_streaming() worker) because do_request/do_streaming_request
+    // read provider_/api_key_/base_url_/model_ lock-free across the network call — a
+    // concurrent worker rewriting them mid-flight could send one provider's API key
+    // to another provider's base_url. Only ever acquired on worker threads (never the
+    // UI thread), and always BEFORE mutex_, never while holding it. Proper fix
+    // (deferred): thread a per-request config context through do_*_request instead
+    // of reading shared members.
+    QMutex request_serialize_mutex_;
+
+    // chat_session_id of the request currently holding request_serialize_mutex_
+    // (empty for callers that pass none) and whether one is running at all.
+    // Guarded by mutex_; read by cancel_active_request().
+    QString active_chat_session_;
+    bool request_active_ = false;
+
     // Lazily reloaded; mutable so const accessors can call ensure_config().
     mutable QString provider_;
     mutable QString api_key_;
@@ -136,6 +197,32 @@ class LlmService : public QObject {
     QJsonObject build_fincept_request(const QString& user_message, const std::vector<ConversationMessage>& history,
                                       bool with_tools);
 
+    // Provider-specific tool-array builders. Shared by the initial request
+    // builders AND the multi-round tool loops so the tools advertised on
+    // follow-up turns stay identical to the first turn (Anthropic/Gemini
+    // previously dropped tools on the follow-up, so they could never chain a
+    // second tool call). Honour the active ToolPolicy via apply_request_policy.
+    //
+    // `activated` carries the tools the model has discovered this turn via
+    // tool_list / tool_describe, exactly as the OpenAI path does. Without it
+    // these two providers saw a fixed slice of the catalogue and could never
+    // call anything they discovered — Tool RAG is on by default, so that slice
+    // is what "tools don't work on Gemini/Claude" actually looked like.
+    QJsonArray build_anthropic_tools(const QSet<QString>& activated = {}); // [{name, description, input_schema}]
+    QJsonArray build_gemini_tools(const QSet<QString>& activated = {});    // [{functionDeclarations:[...]}]
+
+    /// Stamp the output-token cap onto an OpenAI-shaped request body using the
+    /// field the target endpoint actually accepts.
+    ///
+    /// OpenAI/xAI native endpoints — and OpenAI-family models routed through a
+    /// pass-through aggregator — require `max_completion_tokens`; the o-series
+    /// and gpt-5 hard-reject `max_tokens` with a 400. EVERY OpenAI-shaped body
+    /// must go through this, tool-loop follow-ups included: those used to send
+    /// `max_tokens` unconditionally, so on a reasoning model the first turn
+    /// succeeded and every follow-up 400'd — the model called a tool once and
+    /// the answer never came back.
+    void apply_openai_token_limit(QJsonObject& body) const;
+
     QString get_endpoint_url() const;
     QMap<QString, QString> get_headers() const;
 
@@ -147,7 +234,12 @@ class LlmService : public QObject {
     LlmResponse do_streaming_request(const QString& user_message, const std::vector<ConversationMessage>& history,
                                      StreamCallback on_chunk);
 
-    LlmResponse do_tool_loop(QJsonArray loop_messages, const QString& url, const QMap<QString, QString>& headers);
+    // `activated_tools` is seeded from the first round of tool calls (executed
+    // by the caller) and grows as the model discovers more via tool_list /
+    // tool_describe. In Tool RAG mode these names are force-declared to the
+    // model each round so it can actually call what it discovers.
+    LlmResponse do_tool_loop(QJsonArray loop_messages, const QString& url, const QMap<QString, QString>& headers,
+                             QSet<QString> activated_tools = {});
 
     /// Returns nullopt if the content had no text/XML tool calls.
     std::optional<LlmResponse> try_extract_and_execute_text_tool_calls(const QString& content,
@@ -158,7 +250,14 @@ class LlmService : public QObject {
     static QMap<QString, QString> get_models_headers(const QString& provider, const QString& api_key);
     static QStringList parse_models_response(const QString& provider, const QByteArray& body);
 
-    static QString parse_sse_chunk(const QString& data, const QString& provider);
+    /// One parsed SSE delta. `is_reasoning` is true for chain-of-thought text
+    /// (OpenAI-compat `reasoning_content`, Anthropic `thinking_delta`) so the
+    /// streaming loop can route it to the Thinking channel instead of the answer.
+    struct SseDelta {
+        QString text;
+        bool is_reasoning = false;
+    };
+    static SseDelta parse_sse_chunk(const QString& data, const QString& provider);
 
     static void parse_usage(LlmResponse& resp, const QJsonObject& rj, const QString& provider);
 
@@ -168,6 +267,8 @@ class LlmService : public QObject {
         int status = 0;
         QByteArray body;
         QString error;
+        bool cancelled = false; // aborted by cancel_active_request()
+        int retry_after_s = 0;  // Retry-After header (seconds), 0 when absent
     };
     static HttpResult blocking_post(const QString& url, const QJsonObject& body, const QMap<QString, QString>& headers,
                                     int timeout_ms = 120000);
@@ -177,8 +278,16 @@ class LlmService : public QObject {
     static HttpResult eventloop_request(const QString& method, const QString& url, const QByteArray& body,
                                         const QMap<QString, QString>& headers, int timeout_ms = 30000);
 
-    /// POST /research/llm/async then poll /research/llm/status/{id}.
+    /// POST /research/llm/async then poll /research/llm/status/{id}. Runs a
+    /// multi-round tool loop — the endpoint takes a flat prompt, so each round's
+    /// assistant turn and tool results are appended to the prompt transcript.
     LlmResponse fincept_async_request(const QString& user_message, const std::vector<ConversationMessage>& history);
+
+    /// One submit+poll cycle against /research/llm/async. Body is {prompt,
+    /// max_tokens} only — see the note in LlmFinceptAsync.cpp on why `tools` is
+    /// NOT sent. Structured tool_calls, if the backend ever returns any, land in
+    /// *out_tool_calls (may be null).
+    LlmResponse fincept_submit_poll(const QString& prompt, QJsonArray* out_tool_calls);
 };
 
 } // namespace fincept::ai_chat

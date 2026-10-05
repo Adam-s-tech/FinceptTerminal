@@ -1,15 +1,28 @@
 #include "trading/brokers/motilal/MotilalBroker.h"
 
+#include "trading/brokers/BrokerClientOrderId.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
+#include "trading/instruments/InstrumentService.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 
+#include <algorithm>
+
 namespace fincept::trading {
 
 static constexpr const char* BASE = "https://openapi.motilaloswal.com";
+
+// Motilal's client-info block reports the *host application's* version
+// (alongside productname "FinceptTerminal") — it is not a Motilal API version.
+// Injected by CMake from CMAKE_PROJECT_VERSION so it can't drift from the
+// project version the way the previously hardcoded literal did.
+#ifndef FINCEPT_VERSION_STRING
+#    define FINCEPT_VERSION_STRING "0.0.0-dev"
+#endif
 
 static int64_t now_ts() {
     return QDateTime::currentSecsSinceEpoch();
@@ -34,7 +47,7 @@ const BrokerEnumMap<QString>& MotilalBroker::mo_enum_map() {
         x.set(OrderType::Market, "MARKET");
         x.set(OrderType::Limit, "LIMIT");
         x.set(OrderType::StopLoss, "STOPLOSSMARKET"); // SL-M: market-with-trigger
-        x.set(OrderType::StopLossLimit, "STOPLOSS"); // SL:    limit-with-trigger
+        x.set(OrderType::StopLossLimit, "STOPLOSS");  // SL:    limit-with-trigger
         x.set(ProductType::Intraday, "VALUEPLUS");
         x.set(ProductType::Delivery, "DELIVERY");
         x.set(ProductType::Margin, "NORMAL");
@@ -116,7 +129,7 @@ QMap<QString, QString> MotilalBroker::auth_headers(const BrokerCredentials& cred
         {"devicemodel", "PC"},
         {"manufacturer", "Generic"},
         {"productname", "FinceptTerminal"},
-        {"productversion", "4.0.3"},
+        {"productversion", FINCEPT_VERSION_STRING},
         {"browsername", "Chrome"},
         {"browserversion", "120.0"},
     };
@@ -159,7 +172,7 @@ TokenExchangeResponse MotilalBroker::exchange_token(const QString& api_key, cons
         {"devicemodel", "PC"},
         {"manufacturer", "Generic"},
         {"productname", "FinceptTerminal"},
-        {"productversion", "4.0.3"},
+        {"productversion", FINCEPT_VERSION_STRING},
         {"browsername", "Chrome"},
         {"browserversion", "120.0"},
     };
@@ -168,21 +181,24 @@ TokenExchangeResponse MotilalBroker::exchange_token(const QString& api_key, cons
     auto resp = http.post_json(QString("%1/rest/login/v3/authdirectapi").arg(BASE), body, login_headers);
 
     if (!resp.success)
-        return {false, "", "", "", "Login failed: " + resp.error, ""};
+        return {.success = false, .error = "Login failed: " + resp.error};
 
     QJsonDocument doc = QJsonDocument::fromJson(resp.raw_body.toUtf8());
     if (!doc.isObject())
-        return {false, "", "", "", "Login: invalid response", ""};
+        return {.success = false, .error = "Login: invalid response"};
 
     QJsonObject obj = doc.object();
     if (obj.value("status").toString() != "SUCCESS")
-        return {false, "", "", "", obj.value("message").toString("Login failed"), ""};
+        return {.success = false, .error = obj.value("message").toString("Login failed")};
 
     QString token = obj.value("AuthToken").toString();
     if (token.isEmpty())
-        return {false, "", "", "", "Login: no AuthToken in response", ""};
+        return {.success = false, .error = "Login: no AuthToken in response"};
 
-    return {true, token, "", api_key, "", ""};
+    // Motilal AuthToken is valid for the trading day; 2FA (TOTP/OTP) can't be
+    // replayed silently, so detect-only. Startup hint.
+    const QString extra = with_token_expiry({}, next_ist_flush_epoch(6, 0));
+    return {.success = true, .access_token = token, .user_id = api_key, .additional_data = extra};
 }
 
 // ---------- place_order ----------
@@ -190,21 +206,59 @@ TokenExchangeResponse MotilalBroker::exchange_token(const QString& api_key, cons
 OrderPlaceResponse MotilalBroker::place_order(const BrokerCredentials& creds, const UnifiedOrder& order) {
     QJsonObject body;
     body["exchange"] = mo_exchange(order.exchange);
-    body["symboltoken"] = order.instrument_token.toInt();
     body["buyorsell"] = (order.side == OrderSide::Buy) ? "BUY" : "SELL";
     body["ordertype"] = mo_enum_map().order_type_or(order.order_type, "MARKET");
     body["producttype"] = mo_enum_map().product_or(order.product_type, "DELIVERY");
     body["orderduration"] = "DAY";
     body["price"] = order.price;
     body["triggerprice"] = order.stop_price;
-    // Motilal's place endpoint expects `quantityinlot` (lots, not pieces). Sending
-    // `quantity` is silently ignored — orders go through with 0 quantity and reject.
-    body["quantityinlot"] = static_cast<int>(order.quantity);
+    // Motilal's place endpoint expects `quantityinlot` — LOTS for derivatives,
+    // shares for cash. UnifiedOrder.quantity is pieces app-wide, so convert via the
+    // master's lot size (cash rows carry marketlot=1 → no-op). A 75-piece NIFTY
+    // order must not transmit as 75 lots.
+    //
+    // Integer division must not be used to "let the broker reject it": that only
+    // holds below one lot. 100 pieces at lot 75 truncates to 1 lot = 75 pieces —
+    // accepted broker-side, but 25 pieces short of what the caller asked for and
+    // reported back as 100. Reject a non-multiple here instead of transmitting
+    // less than requested.
+    auto lot_inst = InstrumentService::instance().find_by_token(order.instrument_token.toUInt(), "motilal");
+    if (!lot_inst.has_value())
+        lot_inst = InstrumentService::instance().find(order.symbol, order.exchange, "motilal");
+
+    // symboltoken is the ONLY contract identifier in the payload. The equity ticket does not carry
+    // one (only the F&O chain fills UnifiedOrder::instrument_token), so take it from the resolved
+    // master row; the old 0 could never match a contract.
+    qint64 symbol_token = order.instrument_token.toLongLong();
+    if (symbol_token <= 0 && lot_inst.has_value())
+        symbol_token = lot_inst->instrument_token;
+    if (symbol_token <= 0)
+        return {false, "",
+                "Motilal place_order: symboltoken not found for " + order.exchange + ":" + order.symbol +
+                    " (instrument master not loaded yet?)"};
+    body["symboltoken"] = symbol_token;
+
+    // With no master row the lot size is unknown and the piece count below would go out as a LOT
+    // count — a 75-piece NIFTY order as 75 lots. Cash segments are 1:1; derivatives must refuse.
+    static const QStringList kLotSegments = {"NFO", "BFO", "CDS", "BCD", "MCX", "NCDEX"};
+    if (!lot_inst.has_value() && kLotSegments.contains(order.exchange.toUpper()))
+        return {false, "",
+                "Motilal place_order: lot size unknown for " + order.exchange + ":" + order.symbol +
+                    " (instrument master not loaded) — refusing to send a piece quantity as lots"};
+
+    const int qty = static_cast<int>(order.quantity);
+    const int lot = (lot_inst.has_value() && lot_inst->lot_size > 1) ? lot_inst->lot_size : 1;
+    if (lot > 1 && qty % lot != 0)
+        return {false, "", QString("Quantity %1 is not a multiple of lot size %2").arg(qty).arg(lot)};
+    body["quantityinlot"] = qty / lot;
     body["disclosedquantity"] = 0;
     body["amoorder"] = order.amo ? "Y" : "N";
     body["algoid"] = "";
     body["goodtilldate"] = "";
-    body["tag"] = "fincept";
+    // Stable per order intent (UnifiedOrder::client_order_id) so a retry after an 8s
+    // client-side timeout carries the same reference (see BrokerClientOrderId.h).
+    // Motilal caps `tag` at 10 chars.
+    body["tag"] = client_order_ref_for(order, 10);
     body["participantcode"] = "";
     body["clientcode"] = creds.user_id; // required for dealer accounts; harmless for investor
 
@@ -244,8 +298,39 @@ ApiResponse<QJsonObject> MotilalBroker::modify_order(const BrokerCredentials& cr
         body["newprice"] = mods.value("price").toDouble();
     if (mods.contains("triggerPrice"))
         body["newtriggerprice"] = mods.value("triggerPrice").toDouble();
-    if (mods.contains("quantity"))
-        body["newquantityinlot"] = mods.value("quantity").toInt();
+    if (mods.contains("quantity")) {
+        // Same pieces→lots conversion as place_order (newquantityinlot is LOTS).
+        // Recover the order's symboltoken from the order book → master lot size →
+        // convert. Falls back to raw pieces (legacy) if the order/token/lot is
+        // unresolved, so it never over-sizes silently.
+        int new_qty_lot = mods.value("quantity").toInt();
+        auto ob = BrokerHttp::instance().post_json(QString("%1/rest/book/v5/getorderbook").arg(BASE), QJsonObject{},
+                                                   auth_headers(creds));
+        if (ob.success) {
+            const auto doc = QJsonDocument::fromJson(ob.raw_body.toUtf8());
+            for (const auto& v : doc.object().value("data").toArray()) {
+                const auto o = v.toObject();
+                if (o.value("uniqueorderid").toString() == order_id) {
+                    const quint32 token = o.value("symboltoken").toVariant().toUInt();
+                    auto minst = InstrumentService::instance().find_by_token(token, "motilal");
+                    if (minst.has_value() && minst->lot_size > 1) {
+                        const int q = mods.value("quantity").toInt();
+                        // Same rule as place_order: truncating a non-multiple
+                        // silently modifies the order to fewer pieces than asked.
+                        if (q % minst->lot_size != 0)
+                            return {false, std::nullopt,
+                                    QString("Quantity %1 is not a multiple of lot size %2")
+                                        .arg(q)
+                                        .arg(minst->lot_size),
+                                    ts};
+                        new_qty_lot = q / minst->lot_size;
+                    }
+                    break;
+                }
+            }
+        }
+        body["newquantityinlot"] = new_qty_lot;
+    }
     body["newdisclosedquantity"] = 0;
     body["newgoodtilldate"] = mods.value("goodtilldate").toString("");
     body["lastmodifiedtime"] = mods.value("lastmodifiedtime").toString("");
@@ -599,32 +684,40 @@ ApiResponse<QVector<BrokerCandle>> MotilalBroker::get_history(const BrokerCreden
                                                               const QString& to_date) {
     int64_t ts = now_ts();
 
-    // Only daily / weekly / monthly are supported.
+    // Only daily / weekly / monthly are supported — Motilal Oswal has no public
+    // intraday history endpoint.
     const QString r = resolution.toUpper();
-    const bool is_daily = r == "D" || r == "1D" || r == "DAY" || r == "W" || r == "1W" || r == "WEEK" ||
-                          r == "M" || r == "1M" || r == "MONTH";
+    const bool is_daily = r == "D" || r == "1D" || r == "DAY" || r == "W" || r == "1W" || r == "WEEK" || r == "M" ||
+                          r == "1M" || r == "MONTH";
     if (!is_daily)
         return {false, std::nullopt,
                 "Motilal Oswal historical API supports only EOD bars (D/W/M). Intraday is unavailable.", ts};
 
-    // Parse "EX:SYMBOL:TOKEN" — token is required.
+    // Parse "EX:SYMBOL[:TOKEN]". Token keys the scripcode; resolve it from
+    // InstrumentService when the caller didn't pass it explicitly.
     QStringList parts = symbol.split(':');
     QString exch = parts.size() >= 1 ? parts[0] : "NSE";
     QString name = parts.size() >= 2 ? parts[1] : symbol;
     QString token = parts.size() >= 3 ? parts[2] : QString();
+    if (token.isEmpty()) {
+        auto tok = InstrumentService::instance().instrument_token(name, exch, creds.broker_id);
+        if (tok.has_value() && tok.value() > 0)
+            token = QString::number(static_cast<qlonglong>(tok.value()));
+    }
     if (token.isEmpty())
         return {false, std::nullopt, "MO history requires instrument token (format EXCHANGE:SYMBOL:TOKEN)", ts};
 
     QJsonObject body;
     body["clientcode"] = creds.user_id;
-    body["exchange"] = mo_exchange(exch);
+    body["exchangename"] = mo_exchange(exch); // documented field name
+    body["exchange"] = mo_exchange(exch);     // older deployments accept `exchange`
     body["scripcode"] = token.toInt();
     body["fromdate"] = from_date;
     body["todate"] = to_date;
 
     auto& http = BrokerHttp::instance();
-    auto resp = http.post_json(QString("%1/rest/report/v3/geteoddatabyexchangename").arg(BASE), body,
-                               auth_headers(creds));
+    auto resp =
+        http.post_json(QString("%1/rest/report/v3/geteoddatabyexchangename").arg(BASE), body, auth_headers(creds));
     if (!resp.success)
         return {false, std::nullopt, checked_error(resp, "get_history failed"), ts};
 
@@ -635,18 +728,37 @@ ApiResponse<QVector<BrokerCandle>> MotilalBroker::get_history(const BrokerCreden
     if (obj.value("status").toString() != "SUCCESS")
         return {false, std::nullopt, obj.value("message").toString("get_history failed"), ts};
 
+    // `geteoddatabyexchangename` can return one row per scrip for the whole
+    // exchange and may ignore the date range — keep only the requested scripcode
+    // and clamp [from, to] client-side so callers always get the right series.
+    const int want_scrip = token.toInt();
+    const QDate d_from = QDate::fromString(from_date, "yyyy-MM-dd");
+    const QDate d_to = QDate::fromString(to_date, "yyyy-MM-dd");
+
     QVector<BrokerCandle> candles;
     const QJsonArray rows = obj.value("data").toArray();
     candles.reserve(rows.size());
     for (const auto& v : rows) {
         const QJsonObject o = v.toObject();
-        BrokerCandle c;
+        if (want_scrip != 0 && o.contains("scripcode") && o.value("scripcode").toVariant().toInt() != want_scrip)
+            continue;
         const QString date_str = o.value("date").toString();
-        // MO returns "yyyy-MM-dd" or "dd-MMM-yyyy" depending on the deployment.
+        // Date formats seen across MO deployments: yyyy-MM-dd, dd-MM-yyyy, dd-MMM-yyyy.
         QDate d = QDate::fromString(date_str, "yyyy-MM-dd");
         if (!d.isValid())
+            d = QDate::fromString(date_str, "dd-MM-yyyy");
+        if (!d.isValid())
             d = QDate::fromString(date_str, "dd-MMM-yyyy");
-        c.timestamp = d.isValid() ? QDateTime(d, QTime(15, 30)).toSecsSinceEpoch() : 0;
+        if (d.isValid()) {
+            if (d_from.isValid() && d < d_from)
+                continue;
+            if (d_to.isValid() && d > d_to)
+                continue;
+        }
+        BrokerCandle c;
+        // BrokerCandle contract = ms. The date is an exchange (IST) trading day: anchor the 15:30
+        // close in IST, not the machine's zone, so the bar lands on the right calendar day.
+        c.timestamp = d.isValid() ? QDateTime(d, QTime(15, 30), ist_zone()).toMSecsSinceEpoch() : 0;
         c.open = o.value("open").toDouble();
         c.high = o.value("high").toDouble();
         c.low = o.value("low").toDouble();
@@ -654,6 +766,9 @@ ApiResponse<QVector<BrokerCandle>> MotilalBroker::get_history(const BrokerCreden
         c.volume = o.value("volume").toDouble();
         candles.append(c);
     }
+
+    std::sort(candles.begin(), candles.end(),
+              [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp < b.timestamp; });
     return {true, candles, "", ts};
 }
 
@@ -671,6 +786,17 @@ ApiResponse<QJsonObject> MotilalBroker::get_master_contract(const BrokerCredenti
     out["exchange"] = mo_exchange(exchange);
     out["csv"] = resp.raw_body;
     return {true, out, "", ts};
+}
+
+// ============================================================================
+// Pre-trade margin calculator — fallback estimator.
+// Motilal Oswal has no margin calculator API (OpenAlgo's
+// broker/motilal/api/margin_api.py raises NotImplementedError), so we use the
+// shared heuristic estimator (BrokerInterface.h::estimate_order_margin).
+// ============================================================================
+ApiResponse<OrderMargin> MotilalBroker::get_order_margins(const BrokerCredentials& /*creds*/,
+                                                          const UnifiedOrder& order) {
+    return {true, estimate_order_margin(order), "", now_ts()};
 }
 
 } // namespace fincept::trading

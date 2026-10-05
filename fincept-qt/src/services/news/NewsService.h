@@ -1,21 +1,23 @@
 #pragma once
+#include "datahub/Producer.h"
+
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
 #include <QVector>
-
-#    include "datahub/Producer.h"
 
 class QWebSocket;
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 namespace fincept::services {
 
@@ -75,6 +77,24 @@ struct RiskSignal {
     QString details;
 };
 
+/// Named entity surfaced by the /news/analyze endpoint. `kind` is one of
+/// "organization" / "person" / "location"; `detail` carries the secondary
+/// field (ticker for orgs, country_code for locations) when present.
+struct AnalysisEntity {
+    QString name;
+    QString detail;       // ticker (orgs) or country code (locations); may be empty
+    QString sector;       // orgs only
+    double sentiment = 0; // orgs only
+};
+
+/// Article fetch metadata reported by the analyze endpoint — lets the UI
+/// warn when the publisher blocked content and the analysis is metadata-only.
+struct AnalysisContent {
+    QString headline;
+    int word_count = 0;
+    QString fetch_note; // e.g. "Article content blocked by publisher (HTTP 401)..."
+};
+
 struct NewsAnalysis {
     SentimentAnalysis sentiment;
     MarketImpactData market_impact;
@@ -86,6 +106,10 @@ struct NewsAnalysis {
     RiskSignal geopolitical;
     RiskSignal operational;
     RiskSignal market;
+    QVector<AnalysisEntity> organizations;
+    QVector<AnalysisEntity> people;
+    QVector<AnalysisEntity> locations;
+    AnalysisContent content;
     int credits_used = 0;
     int credits_remaining = 0;
 };
@@ -116,9 +140,7 @@ struct HeadlineSummary {
 /// `news:category:*`, `news:cluster:*`. Existing `articles_updated`
 /// / `articles_partial` Qt signals remain live in parallel with hub
 /// publishes so consumers can migrate incrementally.
-class NewsService : public QObject
-    , public fincept::datahub::Producer
-{
+class NewsService : public QObject, public fincept::datahub::Producer {
     Q_OBJECT
   public:
     using ArticlesCallback = std::function<void(bool ok, QVector<NewsArticle>)>;
@@ -137,10 +159,15 @@ class NewsService : public QObject
     /// `news:symbol:<sym>` / `news:category:<cat>` derive from the
     /// general fetch + filter; `news:cluster:*` is push-only.
     void refresh(const QStringList& topics) override;
-    int max_requests_per_sec() const override;  // RSS — cap at 2/s
+    int max_requests_per_sec() const override; // RSS — cap at 2/s
 
     void fetch_all_news(bool force, ArticlesCallback cb);
     void analyze_article(const QString& url, AnalysisCallback cb);
+
+    /// Load a previously-persisted analysis for an article URL, if one exists.
+    /// Lets the detail panel re-show a prior ANALYZE result on reopen without
+    /// hitting the network. Returns nullopt when nothing is cached.
+    std::optional<NewsAnalysis> cached_analysis(const QString& url);
 
     /// Summarize top N headlines via AI. Cached for 10 min per headline signature.
     void summarize_headlines(const QVector<NewsArticle>& articles, int count, SummaryCallback cb);
@@ -160,8 +187,8 @@ class NewsService : public QObject
     // has customized it.
     struct EditorFeed {
         RSSFeed feed;
-        bool is_builtin = false;     // came from default_feeds()
-        bool is_customized = false;  // has an overlay row (built-ins only)
+        bool is_builtin = false;    // came from default_feeds()
+        bool is_customized = false; // has an overlay row (built-ins only)
         bool enabled = true;
     };
     QVector<RSSFeed> list_effective_feeds() const;
@@ -222,6 +249,29 @@ class NewsService : public QObject
     static void enrich_article(NewsArticle& article);
     static QString strip_html(const QString& html);
 
+    /// Deterministic article id. Hash of the (fragment/trailing-slash
+    /// normalised) link, falling back to source + headline when the item has no
+    /// link, so the same story keeps the same id across refreshes and across
+    /// feeds. Ids used to embed the fetch timestamp, which made every refresh
+    /// look like a brand-new set of articles — breaking seen/bookmark state,
+    /// notification dedup and the history merge.
+    static QString stable_article_id(const QString& link, const QString& source, const QString& headline);
+    /// Feed-supplied links are untrusted: only http(s) URLs are ever kept.
+    static bool is_web_url(const QString& url);
+
+    /// JSON round-trip used for the CacheManager copy of the article list.
+    /// Deserialising re-derives threat + source flag (not stored in the cache).
+    static QString serialize_articles(const QVector<NewsArticle>& articles);
+    static QVector<NewsArticle> deserialize_articles(const QString& json);
+
+    /// Append `incoming` to `all`, skipping ids already recorded in `seen_ids`.
+    static void merge_unique(QVector<NewsArticle>& all, QSet<QString>& seen_ids,
+                             const QVector<NewsArticle>& incoming);
+
+    /// Write a freshly fetched list to the news_articles table on a worker
+    /// thread (history, bookmarks, seen state and FTS all read from it).
+    void persist_articles_async(const QVector<NewsArticle>& articles);
+
     QNetworkAccessManager* nam_ = nullptr;
     QTimer* refresh_timer_ = nullptr;
     static constexpr int kArticleCacheTtlSec = 600; // 10 min
@@ -229,9 +279,18 @@ class NewsService : public QObject
     int feed_count_ = 0;
     QStringList active_sources_;
 
+    /// Last complete article list (RSS + live pushes). Lets a live push extend
+    /// the current list directly instead of depending on the cache TTL.
+    QVector<NewsArticle> latest_articles_;
+
     // WebSocket live feed
     QWebSocket* live_ws_ = nullptr;
     bool live_connected_ = false;
+    int live_reconnect_attempts_ = 0;
+    /// Bumped on every connect/disconnect so a reconnect timer armed for an
+    /// earlier socket becomes a no-op instead of re-opening a dropped one.
+    quint64 live_epoch_ = 0;
+    quint64 live_reconnect_token_ = 0; ///< only the latest armed reconnect timer may fire
 
     /// Publish `news:general` + fan out `news:symbol:<sym>` and
     /// `news:category:<cat>` derived slices. Called from both the

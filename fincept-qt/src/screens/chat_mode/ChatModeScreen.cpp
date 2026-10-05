@@ -49,6 +49,9 @@ void ChatModeScreen::wire_signals() {
             [this]() { fincept::ScreenStateManager::instance().notify_changed(this); });
     connect(message_panel_, &ChatMessagePanel::scroll_changed, this,
             [this]() { fincept::ScreenStateManager::instance().notify_changed(this); });
+    // Lite/Deep was toggled in the panel but never saved: every launch started on Lite again.
+    connect(message_panel_, &ChatMessagePanel::mode_toggled, this,
+            [this](StreamMode) { fincept::ScreenStateManager::instance().notify_changed(this); });
 
     // Session panel -> screen
     connect(session_panel_, &ChatSessionPanel::session_selected, this, &ChatModeScreen::on_session_selected);
@@ -157,8 +160,13 @@ void ChatModeScreen::on_session_selected(const QString& uuid) {
     ChatModeService::instance().activate_session(uuid, [](bool, QString) {});
 
     QPointer<ChatModeScreen> self = this;
-    ChatModeService::instance().get("/chat/sessions/" + uuid, [self](bool ok, QJsonDocument doc, QString err) {
+    ChatModeService::instance().get("/chat/sessions/" + uuid, [self, uuid](bool ok, QJsonDocument doc, QString err) {
         if (!self)
+            return;
+        // Clicking through sessions quickly leaves several loads in flight; a slow
+        // answer for an earlier pick used to land last and overwrite the transcript
+        // of the session now selected.
+        if (self->active_session_uuid_ != uuid)
             return;
         if (!ok) {
             LOG_WARN("ChatModeScreen", "Load session failed: " + err);
@@ -180,17 +188,18 @@ void ChatModeScreen::on_session_selected(const QString& uuid) {
 
 void ChatModeScreen::on_new_session() {
     QPointer<ChatModeScreen> self = this;
-    ChatModeService::instance().create_session("New Conversation", [self](bool ok, ChatSession session, QString err) {
-        if (!self)
-            return;
-        if (!ok) {
-            LOG_WARN("ChatModeScreen", "Create session failed: " + err);
-            return;
-        }
-        self->message_panel_->clear_messages();
-        self->session_panel_->refresh_sessions();
-        self->on_session_selected(session.uuid);
-    });
+    ChatModeService::instance().create_session(tr("New Conversation"),
+                                               [self](bool ok, ChatSession session, QString err) {
+                                                   if (!self)
+                                                       return;
+                                                   if (!ok) {
+                                                       LOG_WARN("ChatModeScreen", "Create session failed: " + err);
+                                                       return;
+                                                   }
+                                                   self->message_panel_->clear_messages();
+                                                   self->session_panel_->refresh_sessions();
+                                                   self->on_session_selected(session.uuid);
+                                               });
 }
 
 void ChatModeScreen::on_delete_session(const QString& uuid) {
@@ -235,9 +244,8 @@ void ChatModeScreen::on_rename_session(const QString& uuid, const QString& title
 void ChatModeScreen::on_send_requested(const QString& message, StreamMode mode) {
     LOG_INFO("ChatModeScreen",
              QString("Send [%1]: \"%2\"").arg(mode == StreamMode::Deep ? "deep" : "lite").arg(message.left(60)));
-    ensure_active_session([message, mode](const QString& uuid) {
-        ChatModeService::instance().stream_message(message, uuid, mode);
-    });
+    ensure_active_session(
+        [message, mode](const QString& uuid) { ChatModeService::instance().stream_message(message, uuid, mode); });
 }
 
 void ChatModeScreen::ensure_active_session(std::function<void(const QString&)> then) {
@@ -247,11 +255,15 @@ void ChatModeScreen::ensure_active_session(std::function<void(const QString&)> t
     }
     QPointer<ChatModeScreen> self = this;
     ChatModeService::instance().create_session(
-        "New Conversation", [self, then = std::move(then)](bool ok, ChatSession session, QString err) {
+        tr("New Conversation"), [self, then = std::move(then)](bool ok, ChatSession session, QString err) {
             if (!self)
                 return;
             if (!ok) {
                 LOG_WARN("ChatModeScreen", "Auto-create session failed: " + err);
+                // The message panel is already in its "streaming" state (typing indicator,
+                // composer locked, Stop button) — it only leaves that on a terminal event.
+                // Returning silently left it spinning forever with no way to recover.
+                self->message_panel_->on_stream_error(tr("Could not start a conversation: %1").arg(err));
                 return;
             }
             self->active_session_uuid_ = session.uuid;
@@ -268,6 +280,8 @@ QVariantMap ChatModeScreen::save_state() const {
     if (message_panel_) {
         s.insert("draft", message_panel_->draft_text());
         s.insert("scroll", message_panel_->scroll_position());
+        s.insert("mode", message_panel_->current_mode() == StreamMode::Deep ? QStringLiteral("deep")
+                                                                           : QStringLiteral("lite"));
     }
     return s;
 }
@@ -279,6 +293,10 @@ void ChatModeScreen::restore_state(const QVariantMap& state) {
 
     if (!message_panel_)
         return;
+
+    if (state.contains("mode"))
+        message_panel_->set_stream_mode(state.value("mode").toString() == QLatin1String("deep") ? StreamMode::Deep
+                                                                                              : StreamMode::Lite);
 
     const QString draft = state.value("draft").toString();
     if (!draft.isEmpty())

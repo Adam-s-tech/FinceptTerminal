@@ -39,12 +39,16 @@ inline QVector<Provider> all_providers() {
          QColor("#00E5FF"),
          {"backtest", "optimize", "walk_forward", "indicator", "indicator_signals", "labels", "splits", "returns",
           "signals", "labels_to_signals", "indicator_sweep"}},
-        {"backtestingpy", "Backtesting.py", QColor("#00D66F"),
+        {"backtestingpy",
+         "Backtesting.py",
+         QColor("#00D66F"),
          // Requires `pip install backtesting`. All commands surface a clean install
          // error when the dep is missing; kept in the provider list so users see
          // the option and can install it.
          {"backtest", "optimize", "walk_forward", "indicator"}},
-        {"fasttrade", "FastTrade", QColor("#FFC400"),
+        {"fasttrade",
+         "FastTrade",
+         QColor("#FFC400"),
          // Requires `pip install fast_trade`. Same rationale as backtestingpy.
          {"backtest"}},
         {"zipline",
@@ -253,8 +257,12 @@ inline QStringList ratio_metric_keys() {
 
 /// Keys whose values are already percentages (0-100 scale or 0-1 scale)
 inline QStringList pct_metric_keys() {
-    return {"total_return", "annualized_return", "max_drawdown", "win_rate", "volatility",
-            "totalReturn",  "annualizedReturn",  "maxDrawdown",  "winRate"};
+    // pnlPercent / pnl_percent are per-trade return FRACTIONS in every provider
+    // (vectorbt Return, backtesting.py ReturnPct, zipline, fasttrade) — they rendered as a
+    // bare 0.0304 in the DETAILS table instead of 3.04%. lossRate is 1 - winRate.
+    return {"total_return", "annualized_return", "max_drawdown", "win_rate",  "volatility",
+            "totalReturn",  "annualizedReturn",  "maxDrawdown",  "winRate",   "pnlPercent",
+            "pnl_percent",  "lossRate",          "loss_rate"};
 }
 
 /// Keys whose values are counts (integers)

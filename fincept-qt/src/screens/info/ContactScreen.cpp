@@ -1,13 +1,17 @@
 #include "screens/info/ContactScreen.h"
 
+#include "core/events/EventBus.h"
 #include "ui/theme/Theme.h"
 
 #include <QDesktopServices>
+#include <QEvent>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMetaMethod>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QShowEvent>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -51,7 +55,8 @@ static QWidget* make_contact_card(const QString& title, const QString& value, co
     vl->addWidget(v);
 
     auto* d = new QLabel(detail);
-    d->setStyleSheet(QString("color: %1; font-size: 11px; background: transparent; %2").arg(colors::TEXT_TERTIARY(), MF));
+    d->setStyleSheet(
+        QString("color: %1; font-size: 11px; background: transparent; %2").arg(colors::TEXT_TERTIARY(), MF));
     d->setWordWrap(true);
     vl->addWidget(d);
 
@@ -68,32 +73,69 @@ ContactScreen::ContactScreen(QWidget* parent) : QWidget(parent) {
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
-    auto* scroll = new QScrollArea;
-    scroll->setWidgetResizable(true);
-    scroll->setStyleSheet("QScrollArea { border: none; background: transparent; }");
+    scroll_ = new QScrollArea;
+    scroll_->setWidgetResizable(true);
+    scroll_->setStyleSheet("QScrollArea { border: none; background: transparent; }");
+    root->addWidget(scroll_, 1);
+    // The page itself is built on first show (see showEvent): this screen is
+    // constructed eagerly for the pre-login info stack, and a full page of
+    // labels with per-widget stylesheets is wasted work for a screen that is
+    // usually never opened.
+}
 
+void ContactScreen::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    if (!page_built_) {
+        page_built_ = true;
+        scroll_->setWidget(build_page());
+    }
+}
+
+// ── Re-translation ────────────────────────────────────────────────────────────
+// Static-content screen with no live state — on language change we rebuild
+// the page from scratch rather than caching every label/button as a member.
+// QScrollArea::setWidget() takes ownership and deletes the previous content.
+
+void ContactScreen::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange && scroll_ && page_built_) {
+        scroll_->setWidget(build_page());
+    }
+    QWidget::changeEvent(event);
+}
+
+// ── Page builder ──────────────────────────────────────────────────────────────
+
+QWidget* ContactScreen::build_page() {
     auto* page = new QWidget(this);
     page->setStyleSheet(QString("background: %1;").arg(colors::BG_BASE()));
     auto* vl = new QVBoxLayout(page);
     vl->setContentsMargins(24, 24, 24, 24);
     vl->setSpacing(12);
 
-    // ── Header ───────────────────────────────────────────────────────────────
-    auto* back_btn = new QPushButton("< BACK");
-    back_btn->setCursor(Qt::PointingHandCursor);
-    back_btn->setStyleSheet(QString("QPushButton { color: %1; background: transparent; border: none; "
-                                    "font-size: 12px; %2 } QPushButton:hover { color: %3; }")
-                                .arg(colors::TEXT_SECONDARY(), MF, colors::TEXT_PRIMARY()));
-    connect(back_btn, &QPushButton::clicked, this, &ContactScreen::navigate_back);
-    vl->addWidget(back_btn, 0, Qt::AlignLeft);
+    // The pre-login info stack connects navigate_back to "return to login". A
+    // docked copy (opened from the Help menu once signed in) has no listener, so
+    // a BACK button there would be dead — omit it and let the dock tab's own
+    // close button do the job.
+    const bool in_auth_stack = isSignalConnected(QMetaMethod::fromSignal(&ContactScreen::navigate_back));
 
-    auto* title = new QLabel("CONTACT US");
+    // ── Header ───────────────────────────────────────────────────────────────
+    if (in_auth_stack) {
+        auto* back_btn = new QPushButton(tr("< BACK"));
+        back_btn->setCursor(Qt::PointingHandCursor);
+        back_btn->setStyleSheet(QString("QPushButton { color: %1; background: transparent; border: none; "
+                                        "font-size: 12px; %2 } QPushButton:hover { color: %3; }")
+                                    .arg(colors::TEXT_SECONDARY(), MF, colors::TEXT_PRIMARY()));
+        connect(back_btn, &QPushButton::clicked, this, &ContactScreen::navigate_back);
+        vl->addWidget(back_btn, 0, Qt::AlignLeft);
+    }
+
+    auto* title = new QLabel(tr("CONTACT US"));
     title->setStyleSheet(QString("color: %1; font-size: 20px; font-weight: 700; letter-spacing: 1px; "
                                  "background: transparent; %2")
                              .arg(colors::AMBER(), MF));
     vl->addWidget(title);
 
-    auto* subtitle = new QLabel("Get in touch with our team");
+    auto* subtitle = new QLabel(tr("Get in touch with our team"));
     subtitle->setStyleSheet(
         QString("color: %1; font-size: 13px; background: transparent; %2").arg(colors::TEXT_TERTIARY(), MF));
     vl->addWidget(subtitle);
@@ -108,7 +150,7 @@ ContactScreen::ContactScreen(QWidget* parent) : QWidget(parent) {
         pvl->setContentsMargins(0, 0, 0, 0);
         pvl->setSpacing(0);
 
-        pvl->addWidget(make_header("@", "CONTACT INFORMATION", colors::AMBER));
+        pvl->addWidget(make_header("@", tr("CONTACT INFORMATION"), colors::AMBER));
 
         auto* body = new QWidget(this);
         body->setStyleSheet("background: transparent;");
@@ -116,10 +158,25 @@ ContactScreen::ContactScreen(QWidget* parent) : QWidget(parent) {
         grid->setContentsMargins(14, 12, 14, 12);
         grid->setSpacing(10);
 
-        grid->addWidget(make_contact_card("EMAIL SUPPORT", "support@fincept.in", "Response within 4-6 hours"), 0, 0);
-        grid->addWidget(make_contact_card("PHONE SUPPORT", "+1-800-FINCEPT", "Mon-Fri, 9AM-6PM EST"), 0, 1);
-        grid->addWidget(make_contact_card("SUPPORT HOURS", "Mon-Fri 9AM-6PM EST", "Saturday 10AM-4PM EST"), 1, 0);
-        grid->addWidget(make_contact_card("OFFICE", "Fincept Corporation", "New York, United States"), 1, 1);
+        // Brand/contact values (email, handles, company name) are shown verbatim
+        // — not translated.
+        //
+        // Only channels that actually exist are listed. The previous version
+        // advertised a "+1-800-FINCEPT" phone line, staffed weekend support
+        // hours, a "response within 4-6 hours" SLA and a New York office —
+        // none of which are documented anywhere in this project. Publishing
+        // unreachable contact details on a contact page is worse than
+        // publishing none.
+        grid->addWidget(
+            make_contact_card(tr("EMAIL SUPPORT"), "support@fincept.in", tr("Primary support channel")), 0, 0);
+        grid->addWidget(make_contact_card(tr("COMMUNITY"), "discord.gg/ae87a8ygbN", tr("Discussion and peer help")), 0,
+                        1);
+        grid->addWidget(make_contact_card(tr("ISSUE TRACKER"), "github.com/Fincept-Corporation/FinceptTerminal",
+                                          tr("Bug reports and feature requests")),
+                        1, 0);
+        grid->addWidget(make_contact_card(tr("IN-APP TICKETS"), tr("Support tab"),
+                                          tr("Open a tracked ticket from inside the terminal")),
+                        1, 1);
 
         pvl->addWidget(body);
         vl->addWidget(panel);
@@ -133,7 +190,7 @@ ContactScreen::ContactScreen(QWidget* parent) : QWidget(parent) {
         pvl->setContentsMargins(0, 0, 0, 0);
         pvl->setSpacing(0);
 
-        pvl->addWidget(make_header(">>", "QUICK ACTIONS", colors::CYAN));
+        pvl->addWidget(make_header(">>", tr("QUICK ACTIONS"), colors::CYAN));
 
         auto* body = new QWidget(this);
         body->setStyleSheet("background: transparent;");
@@ -153,23 +210,40 @@ ContactScreen::ContactScreen(QWidget* parent) : QWidget(parent) {
             return btn;
         };
 
-        auto* email_btn = make_action("Send Email");
+        auto* email_btn = make_action(tr("Send Email"));
+        email_btn->setAccessibleName(tr("Send an email to support"));
         connect(email_btn, &QPushButton::clicked, this,
                 []() { QDesktopServices::openUrl(QUrl("mailto:support@fincept.in")); });
         hl->addWidget(email_btn);
 
-        auto* discord_btn = make_action("Join Discord");
+        auto* discord_btn = make_action(tr("Join Discord"));
+        discord_btn->setAccessibleName(tr("Open the Fincept Discord server"));
         connect(discord_btn, &QPushButton::clicked, this,
                 []() { QDesktopServices::openUrl(QUrl("https://discord.gg/ae87a8ygbN")); });
         hl->addWidget(discord_btn);
 
-        auto* github_btn = make_action("GitHub Issues");
+        auto* github_btn = make_action(tr("GitHub Issues"));
+        github_btn->setAccessibleName(tr("Open the GitHub issue tracker"));
         connect(github_btn, &QPushButton::clicked, this, []() {
             QDesktopServices::openUrl(QUrl("https://github.com/Fincept-Corporation/FinceptTerminal/issues"));
         });
         hl->addWidget(github_btn);
 
+        // Signed in (docked copy): the "IN-APP TICKETS" channel above is one click
+        // away, so offer it instead of leaving it as a description.
+        if (!in_auth_stack) {
+            auto* tickets_btn = make_action(tr("Open Support Tab"));
+            tickets_btn->setAccessibleName(tr("Open the in-app support tickets tab"));
+            connect(tickets_btn, &QPushButton::clicked, this, []() {
+                EventBus::instance().publish(QStringLiteral("nav.switch_screen"),
+                                             QVariantMap{{QStringLiteral("screen_id"), QStringLiteral("support")}});
+            });
+            hl->addWidget(tickets_btn);
+        }
+
         hl->addStretch();
+        setTabOrder(email_btn, discord_btn);
+        setTabOrder(discord_btn, github_btn);
         pvl->addWidget(body);
         vl->addWidget(panel);
     }
@@ -182,7 +256,7 @@ ContactScreen::ContactScreen(QWidget* parent) : QWidget(parent) {
         pvl->setContentsMargins(0, 0, 0, 0);
         pvl->setSpacing(0);
 
-        pvl->addWidget(make_header("?", "COMMON ISSUES", colors::AMBER));
+        pvl->addWidget(make_header("?", tr("COMMON ISSUES"), colors::AMBER));
 
         auto* body = new QWidget(this);
         body->setStyleSheet("background: transparent;");
@@ -195,12 +269,12 @@ ContactScreen::ContactScreen(QWidget* parent) : QWidget(parent) {
             QString a;
         };
         const Issue issues[] = {
-            {"Cannot log in or forgot password",
-             "Use the Forgot Password option on the login screen, or contact support@fincept.in"},
-            {"Python setup fails or times out",
-             "Ensure you have a stable internet connection. Retry setup or check firewall settings."},
-            {"Data not loading or showing stale",
-             "Check your internet connection. Try refreshing the screen or restarting the terminal."},
+            {tr("Cannot log in or forgot password"),
+             tr("Use the Forgot Password option on the login screen, or contact support@fincept.in")},
+            {tr("Python setup fails or times out"),
+             tr("Ensure you have a stable internet connection. Retry setup or check firewall settings.")},
+            {tr("Data not loading or showing stale"),
+             tr("Check your internet connection. Try refreshing the screen or restarting the terminal.")},
         };
 
         for (const auto& issue : issues) {
@@ -222,8 +296,7 @@ ContactScreen::ContactScreen(QWidget* parent) : QWidget(parent) {
     }
 
     vl->addStretch();
-    scroll->setWidget(page);
-    root->addWidget(scroll, 1);
+    return page;
 }
 
 } // namespace fincept::screens

@@ -5,11 +5,10 @@
 //
 // Part of the partial-class split of ReportBuilderScreen.cpp.
 
-#include "screens/report_builder/ReportBuilderScreen.h"
-
 #include "core/session/ScreenStateManager.h"
 #include "datahub/DataHub.h"
 #include "datahub/DataHubMetaTypes.h"
+#include "screens/report_builder/ReportBuilderScreen.h"
 #include "services/file_manager/FileManagerService.h"
 #include "services/markets/MarketDataService.h"
 #include "services/report_builder/ReportBuilderService.h"
@@ -23,6 +22,7 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -37,7 +37,6 @@
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QShowEvent>
-#include <QHideEvent>
 #include <QTextDocument>
 #include <QTextFrame>
 #include <QVBoxLayout>
@@ -47,8 +46,12 @@ namespace fincept::screens {
 namespace rep = ::fincept::report;
 using Service = ::fincept::services::ReportBuilderService;
 
-void ReportBuilderScreen::on_toggle_left() { apply_left_collapsed(!left_collapsed_, /*animate=*/true); }
-void ReportBuilderScreen::on_toggle_right() { apply_right_collapsed(!right_collapsed_, /*animate=*/true); }
+void ReportBuilderScreen::on_toggle_left() {
+    apply_left_collapsed(!left_collapsed_, /*animate=*/true);
+}
+void ReportBuilderScreen::on_toggle_right() {
+    apply_right_collapsed(!right_collapsed_, /*animate=*/true);
+}
 
 void ReportBuilderScreen::apply_left_collapsed(bool collapsed, bool animate) {
     left_collapsed_ = collapsed;
@@ -70,8 +73,8 @@ void ReportBuilderScreen::apply_left_collapsed(bool collapsed, bool animate) {
     }
     if (left_toggle_btn_) {
         left_toggle_btn_->setText(collapsed ? "›" : "‹");
-        left_toggle_btn_->setToolTip(collapsed ? "Expand components panel  (Ctrl+B)"
-                                               : "Collapse components panel  (Ctrl+B)");
+        left_toggle_btn_->setToolTip(collapsed ? tr("Expand components panel  (Ctrl+B)")
+                                               : tr("Collapse components panel  (Ctrl+B)"));
     }
 }
 
@@ -95,8 +98,8 @@ void ReportBuilderScreen::apply_right_collapsed(bool collapsed, bool animate) {
     }
     if (right_toggle_btn_) {
         right_toggle_btn_->setText(collapsed ? "‹" : "›");
-        right_toggle_btn_->setToolTip(collapsed ? "Expand properties panel  (Ctrl+Shift+B)"
-                                                : "Collapse properties panel  (Ctrl+Shift+B)");
+        right_toggle_btn_->setToolTip(collapsed ? tr("Expand properties panel  (Ctrl+Shift+B)")
+                                                : tr("Collapse properties panel  (Ctrl+Shift+B)"));
     }
 }
 
@@ -193,7 +196,9 @@ void ReportBuilderScreen::on_component_added(int id, int /*index*/) {
 void ReportBuilderScreen::on_component_updated(int id) {
     refresh_canvas();
     refresh_structure();
-    if (id == selected_id_) {
+    // props_editing_: the update came from a keystroke in the properties panel itself;
+    // rebuilding it here would delete the editor the user is typing in.
+    if (id == selected_id_ && !props_editing_) {
         auto& svc = Service::instance();
         int sel_idx = svc.index_of(id);
         if (sel_idx >= 0)
@@ -221,6 +226,13 @@ void ReportBuilderScreen::on_component_removed(int id, int /*prior_index*/) {
 void ReportBuilderScreen::on_component_moved(int /*id*/, int /*from*/, int /*to*/) {
     refresh_canvas();
     refresh_structure();
+    // The properties panel addresses its component by INDEX, and a move changes the index
+    // of the selected component (or of the one it swapped with). It was never re-pointed,
+    // so after Move Up/Down — or an undo of one — edits typed into the panel landed in the
+    // neighbouring component.
+    const int sel_idx = (selected_id_ > 0) ? Service::instance().index_of(selected_id_) : -1;
+    if (sel_idx >= 0 && !props_editing_)
+        properties_->show_properties(&Service::instance().components()[sel_idx], sel_idx);
     ScreenStateManager::instance().notify_changed(this);
 }
 

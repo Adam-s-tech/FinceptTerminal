@@ -5,10 +5,9 @@
 //
 // Part of the partial-class split of SupportScreen.cpp.
 
+#include "auth/UserApi.h"
 #include "screens/support/SupportScreen.h"
 #include "screens/support/SupportScreen_internal.h"
-
-#include "auth/UserApi.h"
 #include "ui/theme/Theme.h"
 
 #include <QDateTime>
@@ -17,6 +16,8 @@
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QMessageBox>
+#include <QPointer>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSplitter>
@@ -29,17 +30,14 @@ namespace fincept::screens {
 using namespace fincept::screens::support_internal;
 
 void SupportScreen::load_tickets() {
+    last_load_ms_ = QDateTime::currentMSecsSinceEpoch();
     set_busy(true);
 
-    auth::UserApi::instance().get_tickets([this](auth::ApiResponse r) {
-        set_busy(false);
-
-        auto* lay = qobject_cast<QVBoxLayout*>(ticket_container_->layout());
-        if (!lay)
-            return;
-        while (lay->count() > 1)
-            delete lay->takeAt(0)->widget();
-        active_row_btn_ = nullptr;
+    QPointer<SupportScreen> self(this);
+    auth::UserApi::instance().get_tickets([self](auth::ApiResponse r) {
+        if (!self)
+            return; // screen closed while the request was in flight
+        self->set_busy(false);
 
         // Robust response unwrap:
         // API may return: {"tickets":[...]}  or  {"data":{"tickets":[...]}}
@@ -93,23 +91,77 @@ void SupportScreen::load_tickets() {
             else if (st == "resolved" || st == "closed")
                 ++done_c;
         }
-        stat_total_->setText(QString::number(all.size()));
-        stat_open_->setText(QString::number(open_c));
-        stat_resolved_->setText(QString::number(done_c));
+        self->stat_total_->setText(QString::number(all.size()));
+        self->stat_open_->setText(QString::number(open_c));
+        self->stat_resolved_->setText(QString::number(done_c));
 
-        if (all.isEmpty()) {
-            auto* empty = lbl(tr("No tickets yet"), ui::colors::TEXT_TERTIARY(), 12);
-            empty->setAlignment(Qt::AlignCenter);
-            empty->setContentsMargins(0, 40, 0, 0);
-            lay->insertWidget(0, empty);
-            return;
+        self->all_tickets_ = all;
+        self->load_failed_ = !r.success;
+        self->rebuild_ticket_rows();
+    });
+}
+
+// ── rebuild_ticket_rows ───────────────────────────────────────────────────────
+// Renders all_tickets_ into the sidebar, applying the search box and the status
+// filter combo. Both of those controls previously existed but were never
+// connected to anything — typing in the box or changing the filter did nothing.
+
+void SupportScreen::rebuild_ticket_rows() {
+    auto* lay = qobject_cast<QVBoxLayout*>(ticket_container_->layout());
+    if (!lay)
+        return;
+    clear_layout_keep_stretch(lay);
+    active_row_btn_ = nullptr;
+
+    const QString needle = search_input_ ? search_input_->text().trimmed().toLower() : QString();
+    // Combo order matches retranslateUi(): All / Open / In Progress / Pending /
+    // Resolved / Closed. Index 0 means "no status filter".
+    static const char* kFilterStatus[] = {"", "open", "in_progress", "pending", "resolved", "closed"};
+    const int fi = filter_combo_ ? filter_combo_->currentIndex() : 0;
+    const QString want_status = (fi > 0 && fi < static_cast<int>(sizeof(kFilterStatus) / sizeof(kFilterStatus[0])))
+                                    ? QString::fromLatin1(kFilterStatus[fi])
+                                    : QString();
+
+    QJsonArray all;
+    for (const auto& v : all_tickets_) {
+        const auto obj = v.toObject();
+        if (!want_status.isEmpty() && obj["status"].toString().toLower() != want_status)
+            continue;
+        if (!needle.isEmpty()) {
+            const QString hay = (obj["subject"].toString() + ' ' + obj["category"].toString() + ' ' +
+                                 obj["description"].toString() + ' ' + obj["id"].toVariant().toString())
+                                    .toLower();
+            if (!hay.contains(needle))
+                continue;
         }
+        all.append(v);
+    }
 
-        // Build sidebar rows
+    if (all.isEmpty()) {
+        QString msg;
+        if (load_failed_)
+            msg = tr("Could not load tickets.\nCheck your connection and press ↻ to retry.");
+        else if (!needle.isEmpty() || !want_status.isEmpty())
+            msg = tr("No tickets match this search or filter.");
+        else
+            msg = tr("No tickets yet");
+        auto* empty = lbl(msg, ui::colors::TEXT_TERTIARY(), 12, false, true);
+        empty->setAlignment(Qt::AlignCenter);
+        empty->setContentsMargins(0, 40, 0, 0);
+        lay->insertWidget(0, empty);
+        return;
+    }
+
+    // Build sidebar rows
+    {
         for (const auto& v : all) {
             auto obj = v.toObject();
             QString id = obj["id"].toVariant().toString();
             QString subject = obj["subject"].toString();
+            // The demo row's subject is rendered here rather than taken from the
+            // cached JSON so a language switch re-translates it without a refetch.
+            if (id == QLatin1String("DEMO-001"))
+                subject = tr("Welcome to Fincept Support");
             QString status = obj["status"].toString();
             QString priority = obj["priority"].toString();
             QString category = obj["category"].toString();
@@ -196,8 +248,7 @@ void SupportScreen::load_tickets() {
                                                           "padding:0 10px;letter-spacing:0.5px;%3")
                                                       .arg(status_color(st_c), ui::colors::BG_BASE(), MF));
 
-                detail_meta_lbl_->setText(
-                    tr("%1  ·  %2  ·  Opened %3").arg(cat_c.toLower(), pr_c.toLower(), cr_c));
+                detail_meta_lbl_->setText(tr("%1  ·  %2  ·  Opened %3").arg(cat_c.toLower(), pr_c.toLower(), cr_c));
 
                 detail_body_lbl_->setText(body_c.isEmpty() ? tr("No description provided.") : body_c);
 
@@ -210,8 +261,7 @@ void SupportScreen::load_tickets() {
 
                 // Clear messages
                 auto* mcl2 = qobject_cast<QVBoxLayout*>(messages_container_->layout());
-                while (mcl2->count() > 1)
-                    delete mcl2->takeAt(0)->widget();
+                clear_layout_keep_stretch(mcl2);
 
                 if (demo_c) {
                     // Canned demo message
@@ -235,10 +285,24 @@ void SupportScreen::load_tickets() {
                     mcl2->insertWidget(mcl2->count() - 1, m);
                 } else {
                     set_busy(true);
-                    auth::UserApi::instance().get_ticket_details(id_int, [this](auth::ApiResponse dr) {
-                        set_busy(false);
-                        if (!dr.success)
+                    QPointer<SupportScreen> guard(this);
+                    auth::UserApi::instance().get_ticket_details(id_int, [this, guard, id_int](auth::ApiResponse dr) {
+                        if (!guard)
                             return;
+                        set_busy(false);
+                        // The user may have clicked another ticket while this reply was
+                        // in flight; painting it now would show ticket A's conversation
+                        // under ticket B's header.
+                        if (selected_is_demo_ || selected_ticket_id_ != id_int)
+                            return;
+                        if (!dr.success) {
+                            auto* mcl_err = qobject_cast<QVBoxLayout*>(messages_container_->layout());
+                            if (mcl_err)
+                                mcl_err->insertWidget(0, lbl(tr("Could not load this conversation. "
+                                                                "Press ↻ to retry."),
+                                                             ui::colors::NEGATIVE(), 11, false, true));
+                            return;
+                        }
 
                         // Robust message unwrap — try all known shapes
                         auto dr_data = dr.data;
@@ -253,8 +317,7 @@ void SupportScreen::load_tickets() {
                         }
 
                         auto* mcl3 = qobject_cast<QVBoxLayout*>(messages_container_->layout());
-                        while (mcl3->count() > 1)
-                            delete mcl3->takeAt(0)->widget();
+                        clear_layout_keep_stretch(mcl3);
 
                         for (const auto& mv : msgs) {
                             auto mo = mv.toObject();
@@ -294,9 +357,8 @@ void SupportScreen::load_tickets() {
                         }
 
                         if (msgs.isEmpty()) {
-                            mcl3->insertWidget(
-                                0, lbl(tr("No messages yet — be the first to reply."),
-                                       ui::colors::TEXT_TERTIARY(), 11));
+                            mcl3->insertWidget(0, lbl(tr("No messages yet — be the first to reply."),
+                                                      ui::colors::TEXT_TERTIARY(), 11));
                         }
 
                         // Scroll to bottom
@@ -311,8 +373,14 @@ void SupportScreen::load_tickets() {
             });
 
             lay->insertWidget(lay->count() - 1, btn);
+
+            // A refresh (close/reopen, ↻, filter change) rebuilds every row; keep the
+            // ticket that is open in the detail pane highlighted.
+            if (content_stack_ && content_stack_->currentIndex() == 2 &&
+                ((is_demo && selected_is_demo_) || (!is_demo && !selected_is_demo_ && id_int == selected_ticket_id_)))
+                select_ticket_row(btn);
         }
-    });
+    }
 }
 
 // ── on_create_ticket ──────────────────────────────────────────────────────────
@@ -320,8 +388,24 @@ void SupportScreen::load_tickets() {
 void SupportScreen::on_create_ticket() {
     QString subject = subject_input_->text().trimmed();
     QString desc = desc_input_->toPlainText().trimmed();
-    if (subject.isEmpty() || desc.isEmpty())
+    // Silently doing nothing when a required field is blank looks like a broken
+    // button — tell the user which field is missing and focus it.
+    if (subject.isEmpty()) {
+        QMessageBox::information(this, tr("Subject required"), tr("Please enter a short subject for your ticket."));
+        subject_input_->setFocus();
         return;
+    }
+    if (desc.isEmpty()) {
+        QMessageBox::information(this, tr("Description required"), tr("Please describe the issue you are reporting."));
+        desc_input_->setFocus();
+        return;
+    }
+    if (desc.length() > 2000) {
+        QMessageBox::information(this, tr("Description too long"),
+                                 tr("Descriptions are limited to 2000 characters (currently %1).").arg(desc.length()));
+        desc_input_->setFocus();
+        return;
+    }
 
     set_busy(true);
     create_btn_->setText(tr("Submitting…"));
@@ -331,23 +415,36 @@ void SupportScreen::on_create_ticket() {
     const QString cat_key = category_combo_->currentData().toString();
     const QString pri_key = priority_combo_->currentData().toString();
 
-    auth::UserApi::instance().create_ticket(subject, desc, cat_key, pri_key,
-                                            [this](auth::ApiResponse r) {
-                                                set_busy(false);
-                                                create_btn_->setText(tr("Submit Ticket →"));
-                                                if (r.success) {
-                                                    subject_input_->clear();
-                                                    desc_input_->clear();
-                                                    content_stack_->setCurrentIndex(0);
-                                                    load_tickets();
-                                                }
-                                            });
+    QPointer<SupportScreen> self(this);
+    auth::UserApi::instance().create_ticket(subject, desc, cat_key, pri_key, [self](auth::ApiResponse r) {
+        if (!self)
+            return;
+        self->set_busy(false);
+        self->create_btn_->setText(tr("Submit Ticket →"));
+        if (r.success) {
+            self->subject_input_->clear();
+            self->desc_input_->clear();
+            self->content_stack_->setCurrentIndex(0);
+            self->load_tickets();
+        } else {
+            // The old code just returned — the ticket text stayed on screen with
+            // no indication that submission had failed.
+            QMessageBox::warning(self, tr("Could not create ticket"),
+                                 r.error.isEmpty() ? tr("The ticket could not be submitted. Please check your "
+                                                        "connection and try again — your text has been kept.")
+                                                   : tr("The ticket could not be submitted:\n%1").arg(r.error));
+        }
+    });
 }
 
 // ── on_send_message ───────────────────────────────────────────────────────────
 
 void SupportScreen::on_send_message() {
     if (selected_ticket_id_ < 0 || selected_is_demo_)
+        return;
+    // Ctrl+Enter bypasses the button's disabled state, so a held/repeated key
+    // would send the same reply several times while the first is in flight.
+    if (send_btn_ && !send_btn_->isEnabled())
         return;
     QString msg = msg_input_->toPlainText().trimmed();
     if (msg.isEmpty())
@@ -356,11 +453,19 @@ void SupportScreen::on_send_message() {
     set_busy(true);
     send_btn_->setText(tr("Sending…"));
 
-    auth::UserApi::instance().add_ticket_message(selected_ticket_id_, msg, [this, msg](auth::ApiResponse r) {
+    QPointer<SupportScreen> self(this);
+    auth::UserApi::instance().add_ticket_message(selected_ticket_id_, msg, [this, self, msg](auth::ApiResponse r) {
+        if (!self)
+            return;
         set_busy(false);
         send_btn_->setText(tr("Send Reply →"));
-        if (!r.success)
+        if (!r.success) {
+            QMessageBox::warning(this, tr("Reply not sent"),
+                                 r.error.isEmpty() ? tr("Your reply could not be sent. It has been kept in the "
+                                                        "box so you can try again.")
+                                                   : tr("Your reply could not be sent:\n%1").arg(r.error));
             return;
+        }
 
         msg_input_->clear();
         auto* mcl = qobject_cast<QVBoxLayout*>(messages_container_->layout());
@@ -394,11 +499,25 @@ void SupportScreen::on_send_message() {
 void SupportScreen::on_close_ticket() {
     if (selected_ticket_id_ < 0)
         return;
+    // Closing a ticket is destructive from the user's point of view (the reply
+    // box disappears) — confirm first.
+    if (QMessageBox::question(this, tr("Close ticket"),
+                              tr("Close ticket #%1? You can reopen it later.").arg(selected_ticket_id_),
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+
     set_busy(true);
-    auth::UserApi::instance().update_ticket_status(selected_ticket_id_, "closed", [this](auth::ApiResponse r) {
-        set_busy(false);
-        if (!r.success)
+    QPointer<SupportScreen> self(this);
+    auth::UserApi::instance().update_ticket_status(selected_ticket_id_, "closed", [this, self](auth::ApiResponse r) {
+        if (!self)
             return;
+        set_busy(false);
+        if (!r.success) {
+            QMessageBox::warning(this, tr("Could not close ticket"),
+                                 r.error.isEmpty() ? tr("The ticket status could not be updated.")
+                                                   : tr("The ticket status could not be updated:\n%1").arg(r.error));
+            return;
+        }
         selected_is_closed_ = true;
         close_btn_->hide();
         reopen_btn_->show();
@@ -412,10 +531,17 @@ void SupportScreen::on_reopen_ticket() {
     if (selected_ticket_id_ < 0)
         return;
     set_busy(true);
-    auth::UserApi::instance().update_ticket_status(selected_ticket_id_, "open", [this](auth::ApiResponse r) {
-        set_busy(false);
-        if (!r.success)
+    QPointer<SupportScreen> self(this);
+    auth::UserApi::instance().update_ticket_status(selected_ticket_id_, "open", [this, self](auth::ApiResponse r) {
+        if (!self)
             return;
+        set_busy(false);
+        if (!r.success) {
+            QMessageBox::warning(this, tr("Could not reopen ticket"),
+                                 r.error.isEmpty() ? tr("The ticket status could not be updated.")
+                                                   : tr("The ticket status could not be updated:\n%1").arg(r.error));
+            return;
+        }
         selected_is_closed_ = false;
         reopen_btn_->hide();
         close_btn_->show();

@@ -7,7 +7,10 @@ on:
 env:
   BUILD_TYPE: Release
   QT_VERSION: "6.8.3"
-  QT_MODULES: "qtcharts qtwebsockets qtmultimedia"
+  # qtserialport: the qtpositioning NMEA plugin (libqtposition_nmea) links
+  # Qt6SerialPort; without it linuxdeploy/macdeployqt/windeployqt fail resolving
+  # libQt6SerialPort. The app doesn't use serial GPS — this just satisfies deploy.
+  QT_MODULES: "qtcharts qtwebsockets qtmultimedia qtwebengine qtwebchannel qtpositioning qtserialport"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -35,12 +38,18 @@ jobs:
             cmake_extra: "-A ARM64"
 
           # ---- Linux x64 ----
+          # qt_arch is NOT empty: this leg used to skip install-qt-action and
+          # apt-install qt6-base-dev, which is Qt 6.2.4 on ubuntu-22.04 while
+          # CMakeLists.txt pins Qt 6.8 (FINCEPT_QT_PIN_MODE defaults to MINOR
+          # → find_package(Qt6 6.8 REQUIRED)). The job could never configure.
+          # release.yml:588-595 documents that exact trap and installs Qt via
+          # aqt; the fix had simply never been mirrored here.
           - os: ubuntu-22.04
             arch: x64
             platform: Linux
             artifact: FinceptTerminal-Linux-x64
             exe: FinceptTerminal
-            qt_arch: ""
+            qt_arch: linux_gcc_64
             cmake_extra: ""
 
           # ---- macOS ARM64 (Apple Silicon) ----
@@ -85,6 +94,13 @@ jobs:
       # Ubuntu 22.04's default g++ is 11.4, but CMakeLists.txt requires GCC 12.3+.
       # Install gcc-12/g++-12 from the Ubuntu Toolchain PPA (pre-enabled on
       # ubuntu-22.04 runners) and pin it via CC/CXX for the rest of the job.
+      #
+      # NO apt Qt packages here — ubuntu-22.04 ships Qt 6.2 and CMakeLists.txt
+      # pins Qt 6.8, so `qt6-base-dev` & friends made find_package(Qt6 6.8)
+      # fail outright. Qt comes from install-qt-action below (as it already
+      # did on Windows/macOS, and as release.yml does on all three platforms).
+      # The XCB / GL / fontconfig system libs stay: Qt's xcb platform plugin
+      # links against them at build time and loads them at runtime.
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -94,39 +110,65 @@ jobs:
             cmake ninja-build gcc-12 g++-12 \
             libssl-dev \
             libsecret-1-dev \
-            qt6-base-dev qt6-base-private-dev \
-            qt6-tools-dev qt6-tools-dev-tools \
-            libqt6charts6-dev libqt6websockets6-dev \
-            qt6-multimedia-dev libqt6multimediawidgets6 \
-            libqt6svg6-dev libqt6concurrent6 \
             libgl1-mesa-dev libglu1-mesa-dev \
-            libxkbcommon-dev libxkbcommon-x11-0 \
-            libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
-            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
-            libxcb-xinerama0 libxcb-xkb1 \
+            libxkbcommon-dev libxkbcommon-x11-0 libxkbcommon-x11-dev \
+            libxcb-cursor0 libxcb-cursor-dev \
+            libxcb-icccm4 libxcb-icccm4-dev \
+            libxcb-image0 libxcb-image0-dev \
+            libxcb-keysyms1 libxcb-keysyms1-dev \
+            libxcb-randr0 \
+            libxcb-render-util0 libxcb-render-util0-dev \
+            libxcb-shape0-dev libxcb-sync-dev libxcb-xfixes0-dev \
+            libxcb-xinerama0 libxcb-xinerama0-dev libxcb-xkb1 \
+            libdbus-1-dev libfontconfig1-dev libfreetype6-dev \
             pkg-config zip
           echo "CC=gcc-12"  >> "$GITHUB_ENV"
           echo "CXX=g++-12" >> "$GITHUB_ENV"
 
-      # ---- OpenSSL dev libs (Windows) ----
+      # ---- OpenSSL + zlib dev libs (Windows) ----
       # windows-2022 runners ship only the "Light" OpenSSL (no .lib files).
       # vcpkg is pre-installed on every windows-2022 runner at C:\vcpkg.
-      - name: Install OpenSSL (Windows)
+      # zlib is required by find_package(ZLIB) (InstrumentDecompress.cpp).
+      - name: Install OpenSSL + zlib (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
+          # zlib is linked STATICALLY (x64-windows-static-md). See release.yml's
+          # "Install OpenSSL + zlib" step for the full history: v4.1.0 shipped an
+          # exe importing an unbundled "z.dll" because ZLIB_ROOT was built from
+          # VCPKG_INSTALLATION_ROOT (backslashes, e.g. C:\vcpkg), which mangled
+          # the path FindZLIB consumed and let the link fall through to a stray
+          # system zlib named z.dll. Fix: normalise slashes + static zlib + pass
+          # ZLIB_ROOT/ZLIB_USE_STATIC_LIBS as -D cache vars at configure.
           VCPKG_ROOT="${VCPKG_INSTALLATION_ROOT:-C:/vcpkg}"
+          VCPKG_ROOT="${VCPKG_ROOT//\\//}"   # backslashes -> forward slashes (the v4.1.0 bug)
           echo "Using vcpkg at: $VCPKG_ROOT"
-          "$VCPKG_ROOT/vcpkg" install openssl:x64-windows --no-print-usage
+          "$VCPKG_ROOT/vcpkg" install openssl:x64-windows zlib:x64-windows-static-md --no-print-usage
           OPENSSL_DIR="$VCPKG_ROOT/installed/x64-windows"
+          ZLIB_DIR="$VCPKG_ROOT/installed/x64-windows-static-md"
           echo "OPENSSL_ROOT_DIR=$OPENSSL_DIR" >> "$GITHUB_ENV"
-          echo "OpenSSL installed at: $OPENSSL_DIR"
+          echo "ZLIB_ROOT=$ZLIB_DIR" >> "$GITHUB_ENV"
+          echo "OpenSSL installed at: $OPENSSL_DIR ; static zlib at: $ZLIB_DIR"
           ls "$OPENSSL_DIR/lib/libcrypto.lib" && echo "libcrypto.lib confirmed"
+          # vcpkg's static-md zlib ships the archive as "zs.lib", which stock
+          # CMake FindZLIB does not search for. Alias it to "zlib.lib" (a name
+          # FindZLIB looks for) so find_package(ZLIB) links the static archive.
+          if [ ! -f "$ZLIB_DIR/lib/zlib.lib" ]; then
+            ALT="$(ls "$ZLIB_DIR"/lib/z*.lib 2>/dev/null | head -1 || true)"
+            if [ -n "$ALT" ]; then cp "$ALT" "$ZLIB_DIR/lib/zlib.lib"; echo "Aliased $(basename "$ALT") -> zlib.lib"; fi
+          fi
+          if [ ! -f "$ZLIB_DIR/lib/zlib.lib" ]; then
+            echo "::error::static zlib archive not found in $ZLIB_DIR/lib"
+            ls -la "$ZLIB_DIR/lib/" 2>&1 || true
+            exit 1
+          fi
+          echo "static zlib confirmed: $ZLIB_DIR/lib/zlib.lib"
 
-      # ---- Qt6 target (Windows/macOS) ----
+      # ---- Qt6 target (all platforms) ----
+      # Linux is no longer excluded — see the matrix comment on the Linux
+      # entry: apt Qt 6.2 can never satisfy CMakeLists' 6.8 pin.
       - name: Install Qt6
-        if: runner.os != 'Linux'
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
@@ -148,15 +190,45 @@ jobs:
           set-env: false
           dir: "${{ runner.temp }}/qt-host"
 
+      # ---- yt-dlp (bundled for dashboard video playback) ----
+      - name: Install yt-dlp
+        shell: bash
+        run: pip install yt-dlp
+
+      # ---- Strip dangling Qt SQL driver plugin CMake configs (aqt workaround) ----
+      # aqtinstall ships Qt6Sql's MySQL/PSQL/ODBC/Mimer *DriverPlugin CMake
+      # target files but NOT the plugin binaries they reference, so
+      # find_package(Qt6 ... Sql) aborts at CONFIGURE time ("references the
+      # file .../libqsqlmysql.so but this file does not exist"). We only use
+      # SQLite. Mirrors release.yml's identically-named step in all three of
+      # its build jobs. MUST run before "Configure CMake".
+      - name: Remove dangling Qt SQL driver plugin CMake configs
+        shell: bash
+        run: |
+          set -euo pipefail
+          SQL_CMAKE="${QT_ROOT_DIR}/lib/cmake/Qt6Sql"
+          if [ -d "${SQL_CMAKE}" ]; then
+            for drv in QMYSQLDriverPlugin QPSQLDriverPlugin QODBCDriverPlugin QMimerSQLDriverPlugin; do
+              rm -fv "${SQL_CMAKE}/Qt6${drv}"*.cmake || true
+            done
+          else
+            echo "::warning::${SQL_CMAKE} not found — skipping SQL plugin config cleanup"
+          fi
+
       # ---- Configure CMake ----
+      # CMAKE_PREFIX_PATH is required now that Qt comes from install-qt-action
+      # instead of apt (it was absent while this leg relied on system Qt).
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
         working-directory: fincept-qt
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_PREFIX_PATH="${QT_ROOT_DIR}" \
+            -DOPENSSL_ROOT_DIR=/usr \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DFINCEPT_REQUIRE_BUNDLED_YTDLP=ON \
             ${{ matrix.cmake_extra }}
 
       - name: Configure CMake (Windows x64 / macOS x64 / macOS arm64)
@@ -168,10 +240,18 @@ jobs:
           if [ -n "${OPENSSL_ROOT_DIR:-}" ]; then
             OPENSSL_ARG="-DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR}"
           fi
+          # ZLIB_ROOT is set only on Windows (static zlib via vcpkg); on macOS it
+          # is empty so find_package(ZLIB) uses the system zlib as before.
+          ZLIB_ARG=""
+          if [ -n "${ZLIB_ROOT:-}" ]; then
+            ZLIB_ARG="-DZLIB_ROOT=${ZLIB_ROOT} -DZLIB_USE_STATIC_LIBS=ON"
+          fi
           cmake -B build \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_PREFIX_PATH="${QT_ROOT_DIR}" \
             ${OPENSSL_ARG} \
+            ${ZLIB_ARG} \
+            -DFINCEPT_REQUIRE_BUNDLED_YTDLP=ON \
             ${{ runner.os == 'macOS' && '-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache' || '' }} \
             ${{ matrix.cmake_extra }}
 
@@ -185,12 +265,18 @@ jobs:
           if [ -n "${OPENSSL_ROOT_DIR:-}" ]; then
             OPENSSL_ARG="-DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR}"
           fi
+          ZLIB_ARG=""
+          if [ -n "${ZLIB_ROOT:-}" ]; then
+            ZLIB_ARG="-DZLIB_ROOT=${ZLIB_ROOT} -DZLIB_USE_STATIC_LIBS=ON"
+          fi
           cmake -B build \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_PREFIX_PATH="${QT_ROOT_DIR}" \
             -DQT_HOST_PATH="${HOST_QT}" \
             -T ClangCL \
             ${OPENSSL_ARG} \
+            ${ZLIB_ARG} \
+            -DFINCEPT_REQUIRE_BUNDLED_YTDLP=ON \
             ${{ matrix.cmake_extra }}
 
       # ---- Build ----
@@ -226,6 +312,36 @@ jobs:
             exit 1
           fi
           echo "Binary verified: $BINARY ($(du -sh "$BINARY" | cut -f1))"
+
+      # ---- Run headless self-tests ----
+      # Exercise each of the freshly built binary's --selftest-* checks under Qt's
+      # offscreen platform (no display / GPU needed). A non-zero exit fails the
+      # job. Runs the build-tree binary (not the packaged AppImage / .app) so it
+      # needs no FUSE mount or codesigning. Skipped on cross-compiled targets
+      # (Windows arm64, macOS x64) whose binaries can't execute on the host
+      # runner's architecture. timeout-minutes bounds any unexpected hang.
+      #
+      # The flag list used to be spelled out here and DRIFTED: main.cpp
+      # dispatches 10 --selftest-* flags, this loop listed 9, so
+      # --selftest-live-table ran nowhere. It now lives in
+      # .github/scripts/ci_app_checks.sh, which prefers `--selftest-list` from
+      # the binary itself and is shared with release.yml and build-pr.yml.
+      - name: Run self-tests (headless)
+        if: "!(matrix.platform == 'Windows' && matrix.arch == 'arm64') && !(matrix.platform == 'macOS' && matrix.arch == 'x64')"
+        shell: bash
+        working-directory: fincept-qt
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            BINARY="build/Release/${{ matrix.exe }}"
+          elif [ "${{ runner.os }}" == "macOS" ] && [ ! -f "build/${{ matrix.exe }}" ]; then
+            BINARY="build/${{ matrix.exe }}.app/Contents/MacOS/${{ matrix.exe }}"
+          else
+            BINARY="build/${{ matrix.exe }}"
+          fi
+          export LD_LIBRARY_PATH="${QT_ROOT_DIR}/lib:${LD_LIBRARY_PATH:-}"
+          bash ../.github/scripts/ci_app_checks.sh selftests "$BINARY" ci
 
       # ---- Package: Windows (windeployqt + manual DLL sweep) ----
       - name: Package (Windows)
@@ -301,6 +417,20 @@ jobs:
             if [ -f "${QT_BIN}/${ssl_dll}" ] && [ ! -f "dist/${ssl_dll}" ]; then
               cp "${QT_BIN}/${ssl_dll}" dist/
               echo "Copied ${ssl_dll}"
+            fi
+          done
+
+          # zlib — the app now links zlib STATICALLY (x64-windows-static-md), so
+          # there is no runtime zlib DLL to ship. This loop is a harmless fallback
+          # for any transitive dynamic-zlib need; ZLIB_ROOT is the static-md dir
+          # and has no bin/*.dll, so it normally copies nothing. See release.yml.
+          for zlib_dll in zlib1.dll; do
+            if [ -n "${ZLIB_ROOT:-}" ] && [ -f "${ZLIB_ROOT}/bin/${zlib_dll}" ] && [ ! -f "dist/${zlib_dll}" ]; then
+              cp "${ZLIB_ROOT}/bin/${zlib_dll}" dist/
+              echo "Copied ${zlib_dll}"
+            elif [ -f "${QT_BIN}/${zlib_dll}" ] && [ ! -f "dist/${zlib_dll}" ]; then
+              cp "${QT_BIN}/${zlib_dll}" dist/
+              echo "Copied ${zlib_dll}"
             fi
           done
 
@@ -536,7 +666,14 @@ jobs:
             mkdir -p "${APP_BUNDLE}/Contents/MacOS"
             cp "build/${{ matrix.exe }}" "${APP_BUNDLE}/Contents/MacOS/${{ matrix.exe }}"
             chmod +x "${APP_BUNDLE}/Contents/MacOS/${{ matrix.exe }}"
-            cat > "${APP_BUNDLE}/Contents/Info.plist" <<'PLIST'
+            # Version comes from CMakeLists.txt, never a literal — a hardcoded
+            # 4.3.0 here shipped a bundle whose CFBundleVersion disagreed with
+            # the binary the moment the project version moved, which breaks the
+            # auto-updater's version comparison. Heredoc delimiter is unquoted
+            # (<<PLIST, not <<'PLIST') so ${VERSION} interpolates.
+            VERSION=$(grep -Eo 'project\(FinceptTerminal VERSION [0-9]+\.[0-9]+\.[0-9]+' CMakeLists.txt | awk '{print $3}')
+            [ -n "${VERSION}" ] || { echo "::error::Could not parse VERSION from CMakeLists.txt"; exit 1; }
+            cat > "${APP_BUNDLE}/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
@@ -544,8 +681,8 @@ jobs:
             <key>CFBundleIdentifier</key><string>com.fincept.terminal</string>
             <key>CFBundleName</key><string>FinceptTerminal</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>4.0.3</string>
-            <key>CFBundleVersion</key><string>4.0.3</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
             <key>LSMinimumSystemVersion</key><string>13.0</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
@@ -690,11 +827,60 @@ jobs:
           export OUTPUT="FinceptTerminal-Linux-x86_64.AppImage"
           export UPDATE_INFORMATION="gh-releases-zsync|Fincept-Corporation|FinceptTerminal|latest|FinceptTerminal-Linux-x86_64.AppImage.zsync"
 
+          # ── OpenSSL must be bundled as a MATCHED PAIR (#352) ───────────────
+          # The app only calls libcrypto APIs, so ld's --as-needed drops
+          # libssl.so.3 from DT_NEEDED and linuxdeploy (which walks DT_NEEDED)
+          # bundled libcrypto.so.3 alone. Qt then dlopen()s the HOST libssl.so.3,
+          # which needs OPENSSL_3.3.0 from the stale bundled libcrypto 3.0.2:
+          #   qt.tlsbackend.ossl: Failed to load libssl/libcrypto  → all HTTPS dies.
+          # Keep this in sync with the same block in release.yml.
+          resolve_soname() {
+            local soname="$1" path
+            path=$(ldconfig -p | awk -v s="${soname}" '$1 == s && /x86-64/ { print $NF; exit }')
+            if [ -z "${path}" ] || [ "$(basename "${path}")" != "${soname}" ]; then
+              path="/usr/lib/x86_64-linux-gnu/${soname}"
+            fi
+            if [ ! -e "${path}" ]; then
+              echo "::error::${soname} not found on the runner — cannot bundle a consistent OpenSSL pair (#352)" >&2
+              exit 1
+            fi
+            printf '%s' "${path}"
+          }
+          OPENSSL_ARGS=()
+          for _so in libssl.so.3 libcrypto.so.3; do
+            _path=$(resolve_soname "${_so}")
+            echo "Bundling OpenSSL library: ${_path}"
+            OPENSSL_ARGS+=(--library "${_path}")
+          done
+
           ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
             --plugin qt \
             --output appimage \
+            "${OPENSSL_ARGS[@]}" \
             2>&1 || true
+
+          # ── Guard: never ship a half-bundled OpenSSL again (#352) ──────────
+          SSL_BUNDLED=$(find AppDir -name 'libssl.so.3' -print -quit)
+          CRYPTO_BUNDLED=$(find AppDir -name 'libcrypto.so.3' -print -quit)
+          if [ -z "${SSL_BUNDLED}" ] || [ -z "${CRYPTO_BUNDLED}" ]; then
+            echo "::error::AppImage must bundle libssl.so.3 AND libcrypto.so.3 (ssl='${SSL_BUNDLED}' crypto='${CRYPTO_BUNDLED}') — a bundled libcrypto next to the host libssl breaks all TLS (#352)"
+            exit 1
+          fi
+          if LD_LIBRARY_PATH="$(dirname "${SSL_BUNDLED}")" ldd "${SSL_BUNDLED}" \
+               | grep -q 'libcrypto\.so\.3 => not found'; then
+            echo "::error::Bundled libssl.so.3 cannot resolve the bundled libcrypto.so.3"
+            LD_LIBRARY_PATH="$(dirname "${SSL_BUNDLED}")" ldd "${SSL_BUNDLED}" || true
+            exit 1
+          fi
+          echo "OpenSSL pair OK: ${SSL_BUNDLED} + ${CRYPTO_BUNDLED}"
+
+          TLS_PLUGIN=$(find AppDir -name 'libqopensslbackend.so' -print -quit)
+          if [ -z "${TLS_PLUGIN}" ]; then
+            echo "::error::Qt TLS backend plugin (libqopensslbackend.so) missing from AppDir — HTTPS would fail at runtime"
+            exit 1
+          fi
+          echo "Qt TLS plugin OK: ${TLS_PLUGIN}"
 
           # Verify AppImage was created
           if [ ! -f "$OUTPUT" ]; then

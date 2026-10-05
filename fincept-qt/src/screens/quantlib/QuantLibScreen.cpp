@@ -8,6 +8,7 @@
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
 #include "services/quantlib/QuantLibClient.h"
+#include "ui/tables/NumericTableWidgetItem.h"
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
 
@@ -15,10 +16,16 @@
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonParseError>
+#include <QKeySequence>
 #include <QPointer>
 #include <QScrollArea>
+#include <QShortcut>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace {
 using namespace fincept::ui;
@@ -101,10 +108,22 @@ namespace fincept::screens {
 
 using namespace fincept::ui;
 
+// MODULE_ENDPOINTS catalog + endpoint_examples() live in
+// QuantLibScreen_Data.cpp. Forward-declared here (not just above
+// populate_panels) because build_modules() derives its per-module endpoint
+// counts from the catalog rather than hard-coding them.
+const QHash<QString, QStringList>& module_endpoints();
+
 // ── Module definitions ──────────────────────────────────────────────────────
+//
+// The third field is a *fallback* endpoint count. The real count is taken from
+// module_endpoints() in build_modules() — the hard-coded numbers had drifted
+// away from the catalog (e.g. "analysis" advertised 122 endpoints while the
+// catalog lists 46), so the sidebar was quoting figures the screen could not
+// deliver.
 
 static QList<QuantModule> build_modules() {
-    return {
+    QList<QuantModule> mods = {
         {"core",
          "Core",
          51,
@@ -113,7 +132,8 @@ static QList<QuantModule> build_modules() {
          "Analysis",
          122,
          {"Fundamentals", "Profitability", "Liquidity", "Efficiency", "Growth", "Leverage", "Valuation Ratios",
-          "DCF Valuation"}},
+          "Cash Flow", "Earnings Quality", "DCF Valuation", "Residual/SOTP", "Credit & Distress", "Startup/VC",
+          "Industry"}},
         {"curves", "Curves", 31, {"Build & Query", "Transforms", "NS/NSS Fitting", "Specialized"}},
         {"economics", "Economics", 25, {"Equilibrium", "Game Theory", "Auctions", "Utility Theory"}},
         {"instruments", "Instruments", 26, {"Bonds", "Swaps/FRA", "Markets", "Credit/Futures"}},
@@ -135,6 +155,101 @@ static QList<QuantModule> build_modules() {
         {"stochastic", "Stochastic", 36, {"Processes", "Exact", "Simulation", "Sampling", "Theory"}},
         {"volatility", "Volatility", 14, {"Surface", "SABR", "Local Vol"}},
     };
+
+    // Replace the declared counts with what the catalog actually exposes.
+    const auto& catalog = module_endpoints();
+    for (auto& m : mods) {
+        const auto it = catalog.find(m.id);
+        m.endpoint_count = (it != catalog.end()) ? int(it.value().size()) : 0;
+    }
+    return mods;
+}
+
+// Map a sidebar sub-panel name onto the path segment that identifies it, so
+// clicking a panel narrows the endpoint list instead of only relabelling the
+// header. Panels with no entry (and any panel whose filter matches nothing)
+// fall back to showing every endpoint in the module — never an empty combo.
+static QStringList panel_path_tokens(const QString& panel) {
+    static const QHash<QString, QStringList> kOverrides = {
+        {"Operations", {"/ops/"}},
+        {"Black-Scholes", {"/bs/"}},
+        {"Black76", {"/black76"}},
+        {"Bachelier", {"/bachelier"}},
+        {"Build & Query",
+         {"/build", "/query", "/discount", "/forward", "/zero", "/curve-points", "/interpolate",
+          "/instantaneous-forward"}},
+        {"NS/NSS Fitting", {"/ns", "/nss", "/fit", "/nelson-siegel/"}},
+        {"Day Count", {"/day-count", "/daycount"}},
+        {"Short Rate", {"/vasicek", "/cir", "/short-rate"}},
+        {"Hull-White", {"/hull-white", "/hw"}},
+        {"Jump Diffusion", {"/jump", "/merton", "/kou", "/variance-gamma"}},
+        {"Dupire/SVI", {"/dupire", "/svi"}},
+        {"Risk Metrics", {"/var", "/cvar", "/risk/", "/drawdown"}},
+        {"Local Vol", {"/local-vol", "/localvol", "/dupire"}},
+        {"Time Series", {"/timeseries", "/time-series", "/ts/", "/arima", "/garch", "/changepoint/", "/hmm/"}},
+        // Panels whose name does not appear as a path segment. Without an entry
+        // the default token matched nothing, so clicking the panel silently
+        // showed the module's whole endpoint list instead of narrowing it.
+        {"Valuation Ratios", {"/ratios/valuation/"}},
+        {"DCF Valuation", {"/valuation/dcf/", "/valuation/comparable", "/valuation/screen", "/valuation/factor-models"}},
+        {"Cash Flow", {"/ratios/cashflow/", "/fundamentals/cashflow"}},
+        {"Earnings Quality", {"/ratios/quality/", "/fundamentals/quality"}},
+        {"Residual/SOTP", {"/residual-income/", "/valuation/segment/", "/valuation/proforma/"}},
+        {"Credit & Distress", {"/valuation/credit/", "/valuation/predictive/"}},
+        {"Startup/VC", {"/valuation/startup/"}},
+        {"Leverage", {"/leverage/", "/solvency", "/capital-structure"}},
+        {"Transforms", {"/parallel-shift", "/twist", "/butterfly", "/key-rate-shift", "/roll", "/scale", "/time-shift"}},
+        {"Specialized",
+         {"/composite", "/proxy", "/real-rate", "/monotonicity-check", "/smoothness-penalty", "/constrained-fit",
+          "/multicurve/", "/cross-currency-basis", "/inflation/"}},
+        {"Equilibrium", {"/equilibrium/"}},
+        {"Game Theory", {"/games/"}},
+        {"Utility Theory", {"/utility/"}},
+        {"Bonds", {"/bond/"}},
+        {"Swaps/FRA", {"/swap/", "/fra/", "/ois/"}},
+        {"Markets", {"/fx/", "/money-market/", "/commodity/", "/equity/"}},
+        {"Credit/Futures", {"/cds/", "/futures/"}},
+        {"Validation", {"/validation/", "/metrics/"}},
+        {"GP/Neural Net", {"/gp/", "/nn/"}},
+        {"Factor/Covariance", {"/factor/", "/covariance/"}},
+        {"Diff/FFT/Int", {"/differentiation/", "/fft/", "/integration/"}},
+        {"Interp/LinAlg", {"/interpolation/", "/linalg/"}},
+        {"ODE/Roots/Opt", {"/ode/", "/roots/", "/optimize/", "/least-squares/"}},
+        {"Entropy", {"/entropy/", "/divergence/", "/max-entropy"}},
+        {"Thermodynamics", {"/thermodynamics/", "/boltzmann", "/ising"}},
+        {"Optimization", {"/optimize/", "/black-litterman/", "/risk-parity"}},
+        {"Numerical", {"/binomial/", "/kirk/", "/margrabe", "/basket-levy"}},
+        {"Basel III", {"/basel/"}},
+        {"SA-CCR", {"/saccr/"}},
+        {"IFRS 9", {"/ifrs9/"}},
+        {"Stress Test", {"/stress/"}},
+        {"VaR/Stress", {"/var/", "/backtest", "/stress/", "/correlation-stress"}},
+        {"EVT/XVA", {"/evt/", "/xva/", "/tail-risk/", "/copula/", "/portfolio-risk/"}},
+        {"Calendars", {"/calendar/", "/adjustment/", "/schedule/"}},
+        {"Bond Analytics",
+         {"/bond-yield", "/duration", "/modified-duration", "/convexity", "/pv01", "/dv01", "-spread", "/oas"}},
+        {"Rates/IV",
+         {"/implied-vol", "/forward-rate", "/zero-rate", "/discount-factor", "/par-rate", "/bootstrap/",
+          "/calibration/"}},
+        {"Cashflows", {"/irr", "/xirr", "/basis", "/carry", "/implied-repo-rate", "/forward-futures-conversion"}},
+        {"Continuous Dist",
+         {"/normal/", "/lognormal/", "/student-t/", "/chi-squared/", "/f/", "/gamma/", "/beta/", "/exponential/"}},
+        {"Discrete Dist",
+         {"/poisson/", "/binomial/", "/geometric/", "/hypergeometric/", "/negative-binomial/", "/pgf"}},
+        {"Processes",
+         {"/gbm/", "/ou/", "/cir/", "/heston/", "/merton/", "/vasicek/", "/wiener/", "/poisson/", "/variance-gamma/",
+          "/brownian-bridge/", "/correlated-bm/"}},
+    };
+    const auto ov = kOverrides.constFind(panel);
+    if (ov != kOverrides.constEnd())
+        return ov.value();
+
+    // Default: the panel name lower-cased with spaces → hyphens, e.g.
+    // "Risk Metrics" → "/risk-metrics/", "Distributions" → "/distributions/".
+    QString token = panel.toLower();
+    token.replace(' ', '-');
+    token.replace('/', '-');
+    return {"/" + token + "/", "/" + token};
 }
 
 // ── Constructor ─────────────────────────────────────────────────────────────
@@ -146,7 +261,12 @@ QuantLibScreen::QuantLibScreen(QWidget* parent) : QWidget(parent) {
     setup_ui();
     connect(&ThemeManager::instance(), &ThemeManager::theme_changed, this,
             [this](const ThemeTokens&) { setStyleSheet(kStyle()); });
-    LOG_INFO("QuantLib", "Screen constructed — 18 modules, 590+ endpoints");
+    int total_endpoints = 0;
+    for (const auto& m : modules_)
+        total_endpoints += m.endpoint_count;
+    LOG_INFO("QuantLib", QString("Screen constructed — %1 modules, %2 endpoints")
+                             .arg(modules_.size())
+                             .arg(total_endpoints));
 }
 
 // ── UI Setup ────────────────────────────────────────────────────────────────
@@ -179,8 +299,21 @@ void QuantLibScreen::setup_ui() {
     root->addWidget(splitter, 1);
     root->addWidget(create_status_bar());
 
+    // Explicit keyboard path: modules → endpoint → request body → execute.
+    // Done here (not in the create_* helpers) because setTabOrder only holds
+    // once the widgets sit in their final parents.
+    module_tree_->setAccessibleName(tr("QuantLib modules"));
+    setTabOrder(module_tree_, endpoint_combo_);
+    setTabOrder(endpoint_combo_, param_input1_);
+    setTabOrder(param_input1_, exec_btn_);
+    setTabOrder(exec_btn_, result_table_);
+
     // Select first module
     on_module_changed(0);
+
+    // Populates the data-derived chrome (header module/endpoint counts) that
+    // used to be a hard-coded literal. Must run after the widgets exist.
+    retranslateUi();
 }
 
 QWidget* QuantLibScreen::create_header() {
@@ -193,18 +326,20 @@ QWidget* QuantLibScreen::create_header() {
 
     auto* title_col = new QVBoxLayout;
     title_col->setSpacing(0);
-    auto* title = new QLabel("QUANTLIB SUITE");
-    title->setObjectName("qlHeaderTitle");
-    auto* sub = new QLabel("18 MODULES | 590+ QUANTITATIVE ENDPOINTS");
-    sub->setObjectName("qlHeaderSub");
-    title_col->addWidget(title);
-    title_col->addWidget(sub);
+    header_title_ = new QLabel(tr("QUANTLIB SUITE"));
+    header_title_->setObjectName("qlHeaderTitle");
+    // Derived, not hard-coded: the old "590+" was the sum of the stale
+    // per-module counts and overstated the catalog by ~75 endpoints.
+    header_sub_ = new QLabel;
+    header_sub_->setObjectName("qlHeaderSub");
+    title_col->addWidget(header_title_);
+    title_col->addWidget(header_sub_);
     hl->addLayout(title_col);
     hl->addStretch(1);
 
-    auto* badge = new QLabel("API POWERED");
-    badge->setObjectName("qlHeaderBadge");
-    hl->addWidget(badge);
+    header_badge_ = new QLabel(tr("API POWERED"));
+    header_badge_->setObjectName("qlHeaderBadge");
+    hl->addWidget(header_badge_);
 
     return bar;
 }
@@ -217,12 +352,12 @@ QWidget* QuantLibScreen::create_sidebar() {
     vl->setContentsMargins(0, 0, 0, 0);
     vl->setSpacing(0);
 
-    auto* title = new QLabel("MODULES");
-    title->setStyleSheet(QString("color: %1; font-weight: 700; "
-                                 "letter-spacing: 0.5px; background: transparent; "
-                                 "padding: 8px 12px; border-bottom: 1px solid %2;")
-                             .arg(colors::TEXT_SECONDARY(), colors::BORDER_DIM()));
-    vl->addWidget(title);
+    sidebar_title_ = new QLabel(tr("MODULES"));
+    sidebar_title_->setStyleSheet(QString("color: %1; font-weight: 700; "
+                                          "letter-spacing: 0.5px; background: transparent; "
+                                          "padding: 8px 12px; border-bottom: 1px solid %2;")
+                                      .arg(colors::TEXT_SECONDARY(), colors::BORDER_DIM()));
+    vl->addWidget(sidebar_title_);
 
     module_tree_ = new QTreeWidget;
     module_tree_->setHeaderHidden(true);
@@ -245,15 +380,21 @@ QWidget* QuantLibScreen::create_sidebar() {
     connect(module_tree_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item) {
         if (!item)
             return;
-        // Check if it's a module (top level) or panel (child)
         if (!item->parent()) {
-            int idx = item->data(0, Qt::UserRole).toInt();
-            on_module_changed(idx);
+            // Module header — clear any sub-panel filter carried over from the
+            // previously selected module.
+            active_panel_.clear();
+            status_panel_->clear();
+            on_module_changed(item->data(0, Qt::UserRole).toInt());
         } else {
-            // Panel clicked
-            int mod_idx = item->parent()->data(0, Qt::UserRole).toInt();
-            on_module_changed(mod_idx);
+            const int mod_idx = item->parent()->data(0, Qt::UserRole).toInt();
+            if (mod_idx < 0 || mod_idx >= modules_.size())
+                return;
+            // Set the panel BEFORE on_module_changed() so populate_panels()
+            // applies the filter — previously the panel was only a label and the
+            // endpoint list never narrowed.
             active_panel_ = item->data(0, Qt::UserRole + 1).toString();
+            on_module_changed(mod_idx);
             status_panel_->setText(active_panel_);
             center_title_->setText(modules_[mod_idx].name.toUpper() + " / " + active_panel_.toUpper());
         }
@@ -289,9 +430,9 @@ QWidget* QuantLibScreen::create_center_panel() {
     ephdr->setFixedHeight(34);
     auto* ephl = new QHBoxLayout(ephdr);
     ephl->setContentsMargins(12, 0, 12, 0);
-    auto* ept = new QLabel("ENDPOINT");
-    ept->setObjectName("qlPanelTitle");
-    ephl->addWidget(ept);
+    endpoint_panel_title_ = new QLabel(tr("ENDPOINT"));
+    endpoint_panel_title_->setObjectName("qlPanelTitle");
+    ephl->addWidget(endpoint_panel_title_);
     ephl->addStretch(1);
     epvl->addWidget(ephdr);
 
@@ -304,9 +445,9 @@ QWidget* QuantLibScreen::create_center_panel() {
     ebl->addWidget(endpoint_combo_);
 
     // JSON body input — users enter the exact fields the API expects
-    auto* json_label = new QLabel("REQUEST BODY (JSON)");
-    json_label->setObjectName("qlLabel");
-    ebl->addWidget(json_label);
+    json_body_label_ = new QLabel(tr("REQUEST BODY (JSON)"));
+    json_body_label_->setObjectName("qlLabel");
+    ebl->addWidget(json_body_label_);
 
     param_input1_ = new QLineEdit;
     param_input1_->setPlaceholderText(
@@ -331,29 +472,39 @@ QWidget* QuantLibScreen::create_center_panel() {
         helpers->addWidget(btn);
     };
 
-    add_helper("BS Price", "{\"spot\":100,\"strike\":105,\"risk_free_rate\":0.05,\"volatility\":0.2,\"time_to_"
-                           "maturity\":1.0,\"option_type\":\"call\"}");
-    add_helper("GBM Sim", "{\"S0\":100,\"mu\":0.05,\"sigma\":0.2,\"T\":1.0,\"n_steps\":52,\"n_paths\":5}");
-    add_helper("VaR", "{\"portfolio_value\":1000000,\"volatility\":0.02,\"confidence\":0.99,\"horizon\":1}");
-    add_helper("Heston", "{\"spot\":100,\"strike\":105,\"r\":0.05,\"T\":1.0,\"v0\":0.04,\"kappa\":1.5,"
-                         "\"theta\":0.04,\"sigma_v\":0.3,\"rho\":-0.7,\"option_type\":\"call\"}");
+    add_helper(tr("BS Price"), "{\"spot\":100,\"strike\":105,\"risk_free_rate\":0.05,\"volatility\":0.2,\"time_to_"
+                               "maturity\":1.0,\"option_type\":\"call\"}");
+    add_helper(tr("GBM Sim"), "{\"S0\":100,\"mu\":0.05,\"sigma\":0.2,\"T\":1.0,\"n_steps\":52,\"n_paths\":5}");
+    add_helper(tr("VaR"), "{\"portfolio_value\":1000000,\"volatility\":0.02,\"confidence\":0.99,\"horizon\":1}");
+    add_helper(tr("Heston"), "{\"spot\":100,\"strike\":105,\"r\":0.05,\"T\":1.0,\"v0\":0.04,\"kappa\":1.5,"
+                             "\"theta\":0.04,\"sigma_v\":0.3,\"rho\":-0.7,\"option_type\":\"call\"}");
     helpers->addStretch(1);
     ebl->addLayout(helpers);
 
-    // Hide unused inputs
-    param_input2_ = new QLineEdit;
-    param_input2_->hide();
-    param_input3_ = new QLineEdit;
-    param_input3_->hide();
-    param_input4_ = new QLineEdit;
-    param_input4_->hide();
+    // (param_input2_ / 3_ / 4_ removed — they were parentless, hidden, never
+    //  added to a layout and never read: three leaked QLineEdits per screen.)
 
-    exec_btn_ = new QPushButton("EXECUTE COMPUTATION");
+    exec_btn_ = new QPushButton(tr("EXECUTE COMPUTATION"));
     exec_btn_->setObjectName("qlExecBtn");
     exec_btn_->setCursor(Qt::PointingHandCursor);
     exec_btn_->setFixedHeight(34);
+    exec_btn_->setToolTip(tr("Send the request body to the selected endpoint (Ctrl+Enter)"));
     connect(exec_btn_, &QPushButton::clicked, this, &QuantLibScreen::on_execute);
     ebl->addWidget(exec_btn_);
+
+    // Ctrl+Enter executes from anywhere in the screen — the request body is a
+    // single-line QLineEdit, so Return alone would be ambiguous with editing.
+    auto* exec_sc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Return")), this);
+    exec_sc->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(exec_sc, &QShortcut::activated, this, &QuantLibScreen::on_execute);
+
+    // Accessibility: none of these controls had names, so a screen reader
+    // announced "tree"/"combo box"/"edit"/"button".
+    // (Tab order is set at the end of setup_ui(), once every widget has been
+    //  re-parented into its final place — setTabOrder is order-sensitive.)
+    endpoint_combo_->setAccessibleName(tr("Endpoint"));
+    param_input1_->setAccessibleName(tr("Request body (JSON)"));
+    exec_btn_->setAccessibleName(tr("Execute computation"));
 
     epvl->addWidget(ep_body);
     vl->addWidget(ep_panel);
@@ -376,9 +527,9 @@ QWidget* QuantLibScreen::create_right_panel() {
     toolbar->setFixedHeight(32);
     auto* tbl = new QHBoxLayout(toolbar);
     tbl->setContentsMargins(12, 0, 12, 0);
-    auto* rt = new QLabel("RESULTS");
-    rt->setObjectName("qlPanelTitle");
-    tbl->addWidget(rt);
+    results_title_ = new QLabel(tr("RESULTS"));
+    results_title_->setObjectName("qlPanelTitle");
+    tbl->addWidget(results_title_);
     tbl->addStretch(1);
     result_status_ = new QLabel;
     result_status_->setObjectName("qlResultStatus");
@@ -390,7 +541,7 @@ QWidget* QuantLibScreen::create_right_panel() {
 
     result_view_ = new QTextEdit;
     result_view_->setReadOnly(true);
-    result_view_->setPlaceholderText("Select a module and endpoint, then execute to see results...");
+    result_view_->setPlaceholderText(tr("Select a module and endpoint, then execute to see results..."));
     result_stack_->addWidget(result_view_);
 
     result_table_ = new QTableWidget;
@@ -412,12 +563,12 @@ QWidget* QuantLibScreen::create_status_bar() {
     auto* hl = new QHBoxLayout(bar);
     hl->setContentsMargins(16, 0, 16, 0);
 
-    auto* left = new QLabel("QUANTLIB SUITE");
-    left->setObjectName("qlStatusText");
-    hl->addWidget(left);
+    status_left_ = new QLabel(tr("QUANTLIB SUITE"));
+    status_left_->setObjectName("qlStatusText");
+    hl->addWidget(status_left_);
     hl->addStretch(1);
 
-    status_module_ = new QLabel("MODULE: CORE");
+    status_module_ = new QLabel(tr("MODULE: %1").arg(QStringLiteral("CORE")));
     status_module_->setObjectName("qlStatusText");
     hl->addWidget(status_module_);
 
@@ -434,6 +585,47 @@ QWidget* QuantLibScreen::create_status_bar() {
     return bar;
 }
 
+// ── Live language switch ─────────────────────────────────────────────────────
+
+void QuantLibScreen::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void QuantLibScreen::retranslateUi() {
+    // Fixed chrome. Module/panel/endpoint names are API-catalog data and are
+    // intentionally not translated.
+    if (header_title_)
+        header_title_->setText(tr("QUANTLIB SUITE"));
+    if (header_sub_) {
+        int total = 0;
+        for (const auto& m : modules_)
+            total += m.endpoint_count;
+        header_sub_->setText(tr("%1 MODULES | %2 QUANTITATIVE ENDPOINTS").arg(modules_.size()).arg(total));
+    }
+    if (header_badge_)
+        header_badge_->setText(tr("API POWERED"));
+    if (sidebar_title_)
+        sidebar_title_->setText(tr("MODULES"));
+    // endpoint_panel_title_ carries the live "(n of m)" counts — repopulating
+    // rebuilds it in the new language and preserves the current selection.
+    if (endpoint_panel_title_)
+        populate_panels(active_module_);
+    if (json_body_label_)
+        json_body_label_->setText(tr("REQUEST BODY (JSON)"));
+    if (results_title_)
+        results_title_->setText(tr("RESULTS"));
+    if (status_left_)
+        status_left_->setText(tr("QUANTLIB SUITE"));
+    if (exec_btn_ && !loading_)
+        exec_btn_->setText(tr("EXECUTE COMPUTATION"));
+
+    // Status module prefix (module name itself is data)
+    if (status_module_ && active_module_ >= 0 && active_module_ < modules_.size())
+        status_module_->setText(tr("MODULE: %1").arg(modules_[active_module_].name.toUpper()));
+}
+
 // ── Slots ───────────────────────────────────────────────────────────────────
 
 void QuantLibScreen::on_module_changed(int index) {
@@ -442,19 +634,11 @@ void QuantLibScreen::on_module_changed(int index) {
     active_module_ = index;
 
     const auto& m = modules_[index];
-    status_module_->setText("MODULE: " + m.name.toUpper());
+    status_module_->setText(tr("MODULE: %1").arg(m.name.toUpper()));
     center_title_->setText(m.name.toUpper());
 
     populate_panels(index);
     LOG_INFO("QuantLib", "Module: " + m.name);
-    ScreenStateManager::instance().notify_changed(this);
-}
-
-void QuantLibScreen::on_panel_changed(QListWidgetItem* item) {
-    if (!item)
-        return;
-    active_panel_ = item->text();
-    status_panel_->setText(active_panel_);
     ScreenStateManager::instance().notify_changed(this);
 }
 
@@ -464,73 +648,130 @@ void QuantLibScreen::on_endpoint_changed(int index) {
     const QString ep = endpoint_combo_->currentText();
     status_endpoint_->setText(ep);
 
-    // Auto-fill example body if user hasn't typed anything
-    if (param_input1_->text().trimmed().isEmpty()) {
-        const auto& examples = endpoint_examples();
-        auto it = examples.find(ep);
-        if (it != examples.end())
-            param_input1_->setText(it.value());
-        else
-            param_input1_->clear();
-    }
+    // Auto-fill the example body when the field is empty OR still holds an
+    // example we injected ourselves. Previously the body was only filled once,
+    // so switching endpoints left the previous endpoint's payload behind and
+    // the request failed with a confusing schema error.
+    const auto& examples = endpoint_examples();
+    const QString current = param_input1_->text().trimmed();
+    const bool is_stale_example =
+        !current.isEmpty() && std::any_of(examples.cbegin(), examples.cend(),
+                                          [&current](const QString& ex) { return ex.trimmed() == current; });
+    if (!current.isEmpty() && !is_stale_example)
+        return; // user-authored body — never clobber it
+
+    const auto it = examples.constFind(ep);
+    if (it != examples.constEnd())
+        param_input1_->setText(it.value());
+    else
+        param_input1_->clear();
 }
 
 void QuantLibScreen::on_execute() {
     if (loading_)
         return;
 
-    QString endpoint = endpoint_combo_->currentText();
-    if (endpoint.isEmpty())
+    const QString endpoint = endpoint_combo_->currentText();
+    if (endpoint.isEmpty()) {
+        // Used to return silently — the button appeared dead.
+        display_error(tr("Select an endpoint first."));
         return;
+    }
 
     // Parse JSON body from input
     QJsonObject params;
-    QString body_text = param_input1_->text().trimmed();
+    const QString body_text = param_input1_->text().trimmed();
     if (!body_text.isEmpty()) {
-        auto doc = QJsonDocument::fromJson(body_text.toUtf8());
-        if (doc.isObject()) {
-            params = doc.object();
-        } else {
-            result_view_->setPlainText("ERROR: Invalid JSON in request body.\n\n"
-                                       "Expected format: {\"key\": value, ...}\n"
-                                       "Example: {\"spot\": 100, \"strike\": 105, \"risk_free_rate\": 0.05}");
+        QJsonParseError perr{};
+        const auto doc = QJsonDocument::fromJson(body_text.toUtf8(), &perr);
+        if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+            result_view_->setPlainText(tr("ERROR: Invalid JSON in request body — %1 (offset %2)\n\n"
+                                          "Expected format: {\"key\": value, ...}\n"
+                                          "Example: {\"spot\": 100, \"strike\": 105, \"risk_free_rate\": 0.05}")
+                                           .arg(perr.errorString())
+                                           .arg(perr.offset));
             result_stack_->setCurrentIndex(0);
+            result_status_->setText(tr("Invalid JSON"));
             return;
         }
+        params = doc.object();
     }
 
     execute_api(endpoint, params);
 }
 
 // ── Data ────────────────────────────────────────────────────────────────────
-
-// Real API endpoint paths per module (from api.fincept.in OpenAPI spec)
-
-// MODULE_ENDPOINTS catalog + endpoint_examples() definition live in
-// QuantLibScreen_Data.cpp. module_endpoints() is the free-function accessor
-// used by populate_panels(); endpoint_examples() is a static member.
-// Forward declaration — we're already inside `namespace fincept::screens` (opened
-// at line 100), so no extra namespace wrapping.
-const QHash<QString, QStringList>& module_endpoints();
+//
+// module_endpoints() (the real api.fincept.in endpoint paths) and
+// endpoint_examples() live in QuantLibScreen_Data.cpp; module_endpoints() is
+// forward-declared near build_modules() above.
 
 void QuantLibScreen::populate_panels(int module_index) {
-    endpoint_combo_->clear();
-
+    if (module_index < 0 || module_index >= modules_.size())
+        return;
     const auto& m = modules_[module_index];
-    auto it = module_endpoints().find(m.id);
-    if (it != module_endpoints().end()) {
-        for (const auto& ep : it.value()) {
-            endpoint_combo_->addItem(ep);
+
+    const auto it = module_endpoints().constFind(m.id);
+    const QStringList all = (it != module_endpoints().constEnd()) ? it.value() : QStringList{};
+
+    // Narrow to the active sub-panel when it maps onto a path segment. Falls
+    // back to the full list when the panel has no match, so a filter miss can
+    // never leave the user staring at an empty endpoint combo.
+    QStringList shown = all;
+    bool filtered = false;
+    if (!active_panel_.isEmpty()) {
+        const QStringList tokens = panel_path_tokens(active_panel_);
+        QStringList hits;
+        for (const auto& ep : all) {
+            for (const auto& t : tokens) {
+                if (ep.contains(t, Qt::CaseInsensitive)) {
+                    hits << ep;
+                    break;
+                }
+            }
         }
+        if (!hits.isEmpty()) {
+            shown = hits;
+            filtered = true;
+        }
+    }
+
+    // Rebuild without firing on_endpoint_changed() for every intermediate state,
+    // and keep the user's endpoint selected when it survives the new filter.
+    const QString previous = endpoint_combo_->currentText();
+    {
+        const QSignalBlocker block(endpoint_combo_);
+        endpoint_combo_->clear();
+        endpoint_combo_->addItems(shown);
+        const int keep = previous.isEmpty() ? -1 : endpoint_combo_->findText(previous);
+        if (keep >= 0)
+            endpoint_combo_->setCurrentIndex(keep);
+    }
+
+    if (endpoint_panel_title_) {
+        endpoint_panel_title_->setText(filtered
+                                           ? tr("ENDPOINT — %1 (%2 of %3)")
+                                                 .arg(active_panel_.toUpper())
+                                                 .arg(shown.size())
+                                                 .arg(all.size())
+                                           : tr("ENDPOINT (%1)").arg(all.size()));
     }
 
     connect(endpoint_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             &QuantLibScreen::on_endpoint_changed, Qt::UniqueConnection);
+
+    // The signal blocker above suppressed the initial index change, so drive the
+    // first selection explicitly. Previously the status bar showed no endpoint
+    // and no example body was pre-filled until the user touched the combo.
+    if (endpoint_combo_->count() > 0)
+        on_endpoint_changed(endpoint_combo_->currentIndex());
+    else if (status_endpoint_)
+        status_endpoint_->clear();
 }
 
 void QuantLibScreen::execute_api(const QString& endpoint, const QJsonObject& params) {
     set_loading(true);
-    result_status_->setText("Computing...");
+    result_status_->setText(tr("Computing..."));
 
     QPointer<QuantLibScreen> self = this;
     services::QuantLibClient::instance().call(endpoint, params, [self, endpoint](mcp::ToolResult result) {
@@ -563,7 +804,7 @@ void QuantLibScreen::display_result_array(const QJsonArray& arr) {
     if (arr.isEmpty()) {
         result_view_->setPlainText("[]");
         result_stack_->setCurrentIndex(0);
-        result_status_->setText("Empty");
+        result_status_->setText(tr("Empty"));
         return;
     }
 
@@ -588,7 +829,8 @@ void QuantLibScreen::display_result_array(const QJsonArray& arr) {
                 QString text = val.isDouble() ? QString::number(val.toDouble(), 'g', 10)
                                : val.isNull() ? "--"
                                               : val.toVariant().toString();
-                auto* item = new QTableWidgetItem(text);
+                QTableWidgetItem* item = val.isDouble() ? new ui::NumericTableWidgetItem(text, val.toDouble())
+                                                         : new QTableWidgetItem(text);
                 item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
                 if (val.isDouble())
                     item->setForeground(QColor(val.toDouble() < 0 ? colors::NEGATIVE() : colors::CYAN()));
@@ -598,12 +840,12 @@ void QuantLibScreen::display_result_array(const QJsonArray& arr) {
         result_table_->resizeColumnsToContents();
         result_table_->setSortingEnabled(true);
         result_stack_->setCurrentIndex(1);
-        result_status_->setText(QString::number(rows) + " results");
+        result_status_->setText(tr("%1 results").arg(rows));
     } else {
         // Array of scalars (e.g. currency list, calendar list) → two-column table: Index | Value
         result_table_->setSortingEnabled(false);
         result_table_->setColumnCount(2);
-        result_table_->setHorizontalHeaderLabels({"#", "Value"});
+        result_table_->setHorizontalHeaderLabels({tr("#"), tr("Value")});
         int rows = qMin(arr.size(), 1000);
         result_table_->setRowCount(rows);
         for (int r = 0; r < rows; ++r) {
@@ -613,78 +855,74 @@ void QuantLibScreen::display_result_array(const QJsonArray& arr) {
         result_table_->resizeColumnsToContents();
         result_table_->setSortingEnabled(true);
         result_stack_->setCurrentIndex(1);
-        result_status_->setText(QString::number(rows) + " items");
+        result_status_->setText(tr("%1 items").arg(rows));
     }
 }
 
 void QuantLibScreen::display_result(const QJsonObject& result) {
     // result is already the unwrapped payload from QuantLibClient
     if (result.isEmpty()) {
-        result_view_->setPlainText("(empty response)");
+        result_view_->setPlainText(tr("(empty response)"));
         result_stack_->setCurrentIndex(0);
-        result_status_->setText("OK");
+        result_status_->setText(tr("OK"));
         return;
     }
 
-    { // flat object → Key/Value table
-        // Flat object result (e.g. {"price": 8.02, "delta": 0.45, ...}) → two-column table: Key | Value
-        auto obj = result;
-        if (!obj.isEmpty()) {
-            result_table_->setSortingEnabled(false);
-            result_table_->setColumnCount(2);
-            result_table_->setHorizontalHeaderLabels({"Field", "Value"});
-            result_table_->setRowCount(obj.size());
-            int r = 0;
-            for (auto it = obj.begin(); it != obj.end(); ++it, ++r) {
-                auto* key_item = new QTableWidgetItem(it.key());
-                key_item->setForeground(QColor(colors::TEXT_SECONDARY()));
-                result_table_->setItem(r, 0, key_item);
+    // Flat object result (e.g. {"price": 8.02, "delta": 0.45, ...}) → Field/Value
+    // table. `result` is non-empty here (the early return above covers the empty
+    // case), so the old post-block "raw JSON fallback" was unreachable.
+    result_table_->setSortingEnabled(false);
+    result_table_->setColumnCount(2);
+    result_table_->setHorizontalHeaderLabels({tr("Field"), tr("Value")});
+    result_table_->setRowCount(result.size());
+    int r = 0;
+    for (auto it = result.begin(); it != result.end(); ++it, ++r) {
+        auto* key_item = new QTableWidgetItem(it.key());
+        key_item->setForeground(QColor(colors::TEXT_SECONDARY()));
+        result_table_->setItem(r, 0, key_item);
 
-                QString text;
-                auto val = it.value();
-                if (val.isDouble())
-                    text = QString::number(val.toDouble(), 'g', 10);
-                else if (val.isBool())
-                    text = val.toBool() ? "true" : "false";
-                else if (val.isNull() || val.isUndefined())
-                    text = "--";
-                else if (val.isArray() || val.isObject())
-                    text = QJsonDocument(val.isArray() ? QJsonDocument(val.toArray()) : QJsonDocument(val.toObject()))
-                               .toJson(QJsonDocument::Compact);
-                else
-                    text = val.toString();
+        QString text;
+        const auto val = it.value();
+        if (val.isDouble())
+            text = QString::number(val.toDouble(), 'g', 10);
+        else if (val.isBool())
+            text = val.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+        else if (val.isNull() || val.isUndefined())
+            text = QStringLiteral("--");
+        else if (val.isArray())
+            text = QString::fromUtf8(QJsonDocument(val.toArray()).toJson(QJsonDocument::Compact));
+        else if (val.isObject())
+            text = QString::fromUtf8(QJsonDocument(val.toObject()).toJson(QJsonDocument::Compact));
+        else
+            text = val.toString();
 
-                auto* val_item = new QTableWidgetItem(text);
-                val_item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-                if (val.isDouble())
-                    val_item->setForeground(QColor(val.toDouble() < 0 ? colors::NEGATIVE() : colors::CYAN()));
-                result_table_->setItem(r, 1, val_item);
-            }
-            result_table_->resizeColumnsToContents();
-            result_table_->setSortingEnabled(true);
-            result_stack_->setCurrentIndex(1);
-            result_status_->setText(QString::number(obj.size()) + " fields");
-            return;
-        }
+        auto* val_item = new QTableWidgetItem(text);
+        // Nested payloads are compacted onto one line — expose the full text on
+        // hover so a long path/vector isn't silently elided.
+        if (val.isArray() || val.isObject())
+            val_item->setToolTip(text);
+        val_item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        if (val.isDouble())
+            val_item->setForeground(QColor(val.toDouble() < 0 ? colors::NEGATIVE() : colors::CYAN()));
+        result_table_->setItem(r, 1, val_item);
     }
-
-    // Fallback: raw JSON
-    result_view_->setPlainText(QJsonDocument(result).toJson(QJsonDocument::Indented));
-    result_stack_->setCurrentIndex(0);
-    result_status_->setText("OK");
+    result_table_->resizeColumnsToContents();
+    result_table_->setSortingEnabled(true);
+    result_stack_->setCurrentIndex(1);
+    result_status_->setText(tr("%1 fields").arg(result.size()));
 }
 
 void QuantLibScreen::display_error(const QString& error) {
-    result_view_->setPlainText("ERROR: " + error);
+    result_view_->setPlainText(tr("ERROR: %1").arg(error));
     result_stack_->setCurrentIndex(0);
-    result_status_->setText("Error");
+    result_status_->setText(tr("Error"));
     LOG_ERROR("QuantLib", error);
 }
 
 void QuantLibScreen::set_loading(bool loading) {
     loading_ = loading;
     exec_btn_->setEnabled(!loading);
-    exec_btn_->setText(loading ? "COMPUTING..." : "EXECUTE COMPUTATION");
+    exec_btn_->setText(loading ? tr("COMPUTING...") : tr("EXECUTE COMPUTATION"));
 }
 
 // ── IStatefulScreen ───────────────────────────────────────────────────────────
@@ -707,9 +945,10 @@ void QuantLibScreen::restore_state(const QVariantMap& state) {
         auto items = module_tree_->findItems(panel, Qt::MatchExactly | Qt::MatchRecursive);
         if (!items.isEmpty()) {
             module_tree_->setCurrentItem(items.first());
-            // on_panel_changed expects QListWidgetItem* — extract text directly
             active_panel_ = items.first()->text(0);
             status_panel_->setText(active_panel_);
+            // Re-apply the endpoint filter for the restored panel.
+            populate_panels(active_module_);
             ScreenStateManager::instance().notify_changed(this);
         }
     }

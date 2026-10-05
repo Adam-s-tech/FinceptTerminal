@@ -40,9 +40,11 @@ IlostatPanel::IlostatPanel(QWidget* parent) : EconPanelBase(kIlostatSourceId, kI
 }
 
 void IlostatPanel::activate() {
-    show_empty("Select a series, enter a country code, then click FETCH\n"
-               "Source: ILO ILOSTAT SDMX REST API (sdmx.ilo.org) — no API key required\n"
-               "Country codes: USA, GBR, DEU, FRA, IND, CHN, JPN, BRA, ZAF, G7=CAN+USA+GBR+DEU+FRA+ITA+JPN");
+    show_empty(tr("Select a series, enter a country code, then click FETCH\n"
+                  "Source: ILO ILOSTAT SDMX REST API (sdmx.ilo.org) — no API key required\n"
+                  "Series are ANNUAL, both sexes, age 15+, harmonised (modelled) estimates — percent.\n"
+                  "Country codes (ISO-3): USA, GBR, DEU, FRA, IND, CHN, JPN, BRA, ZAF · "
+                  "G7 = CAN+USA+GBR+DEU+FRA+ITA+JPN"));
 }
 
 void IlostatPanel::build_controls(QHBoxLayout* thl) {
@@ -64,10 +66,13 @@ void IlostatPanel::build_controls(QHBoxLayout* thl) {
     country_edit_ = new QLineEdit("USA");
     country_edit_->setFixedHeight(26);
     country_edit_->setFixedWidth(120);
-    country_edit_->setPlaceholderText("ISO-2 code…");
-    country_edit_->setToolTip("ISO-2 country code, e.g. USA, GBR, DEU\n"
-                              "Multiple: CAN+USA+GBR\n"
-                              "All countries: ALL");
+    // ILOSTAT SDMX uses ISO-3166 alpha-3 (USA/GBR/DEU) — the field was
+    // mislabelled "ISO-2" while every example it gave was alpha-3.
+    country_edit_->setPlaceholderText(tr("ISO-3 code…"));
+    country_edit_->setToolTip(tr("ISO-3 country code, e.g. USA, GBR, DEU\n"
+                                 "Multiple: CAN+USA+GBR\n"
+                                 "All countries: ALL"));
+    country_edit_->setAccessibleName(tr("ILOSTAT country code"));
 
     start_edit_ = new QLineEdit("2010");
     start_edit_->setFixedHeight(26);
@@ -77,15 +82,15 @@ void IlostatPanel::build_controls(QHBoxLayout* thl) {
     end_edit_->setFixedHeight(26);
     end_edit_->setFixedWidth(52);
 
-    thl->addWidget(mk_lbl("SERIES"));
+    thl->addWidget(series_lbl_ = mk_lbl(tr("SERIES")));
     thl->addWidget(series_combo_);
     thl->addSpacing(6);
-    thl->addWidget(mk_lbl("COUNTRY"));
+    thl->addWidget(country_lbl_ = mk_lbl(tr("COUNTRY")));
     thl->addWidget(country_edit_);
     thl->addSpacing(6);
-    thl->addWidget(mk_lbl("FROM"));
+    thl->addWidget(from_lbl_ = mk_lbl(tr("FROM")));
     thl->addWidget(start_edit_);
-    thl->addWidget(mk_lbl("TO"));
+    thl->addWidget(to_lbl_ = mk_lbl(tr("TO")));
     thl->addWidget(end_edit_);
 }
 
@@ -98,11 +103,11 @@ void IlostatPanel::on_fetch() {
     const QString end = end_edit_->text().trimmed();
 
     if (country.isEmpty()) {
-        show_error("Please enter a country code (e.g. USA)");
+        show_error(tr("Please enter a country code (e.g. USA)"));
         return;
     }
 
-    show_loading("Fetching ILO: " + series.label + " — " + country + "…");
+    show_loading(tr("Fetching ILO: %1 — %2…").arg(series.label, country));
 
     services::EconomicsService::instance().execute(kIlostatSourceId, kIlostatScript, series.command,
                                                    {country, "A", "SEX_T", "AGE_YTHADULT_YGE15", start, end},
@@ -129,7 +134,7 @@ void IlostatPanel::on_result(const QString& request_id, const services::Economic
     QJsonArray rows = result.data["data"].toArray();
 
     if (rows.isEmpty()) {
-        show_error("No data returned — try a different country code or year range");
+        show_error(tr("No data returned — try a different country code or year range"));
         return;
     }
 
@@ -147,6 +152,32 @@ void IlostatPanel::on_result(const QString& request_id, const services::Economic
 
     display(rows, title);
     LOG_INFO("IlostatPanel", QString("Displayed %1 rows: %2").arg(rows.size()).arg(title));
+}
+
+// ── i18n ──────────────────────────────────────────────────────────────────────
+
+void IlostatPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    EconPanelBase::changeEvent(event);
+}
+
+void IlostatPanel::retranslateUi() {
+    if (series_lbl_)
+        series_lbl_->setText(tr("SERIES"));
+    if (country_lbl_)
+        country_lbl_->setText(tr("COUNTRY"));
+    if (from_lbl_)
+        from_lbl_->setText(tr("FROM"));
+    if (to_lbl_)
+        to_lbl_->setText(tr("TO"));
+    if (country_edit_) {
+        country_edit_->setPlaceholderText(tr("ISO-3 code…"));
+        country_edit_->setToolTip(tr("ISO-3 country code, e.g. USA, GBR, DEU\n"
+                                     "Multiple: CAN+USA+GBR\n"
+                                     "All countries: ALL"));
+    }
+    EconPanelBase::retranslateUi();
 }
 
 } // namespace fincept::screens

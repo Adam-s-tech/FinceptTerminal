@@ -23,9 +23,7 @@ namespace fincept::services::maritime {
 /// All requests are asynchronous and post results back through the
 /// `ports_found(results, context)` signal where `context` echoes the caller's
 /// query string so multiple in-flight searches can be disambiguated.
-class PortsCatalog : public QObject
-    , public fincept::datahub::Producer
-{
+class PortsCatalog : public QObject, public fincept::datahub::Producer {
     Q_OBJECT
   public:
     static PortsCatalog& instance();
@@ -38,6 +36,12 @@ class PortsCatalog : public QObject
     void refresh(const QStringList& topics) override;
     int max_requests_per_sec() const override;
 
+    /// The `context` string ports_found/error_occurred will echo for a given request.
+    /// Exposed so a caller can remember which request it is waiting for and drop the
+    /// replies of superseded ones (typeahead replies can arrive out of order).
+    static QString name_context(const QString& query);
+    static QString bbox_context(double min_lat, double max_lat, double min_lng, double max_lng);
+
     /// Free-text name search. Falls back to Marine Regions if Wikidata
     /// returns zero rows. `limit` caps the returned vector size.
     void search_by_name(const QString& query, int limit = 50);
@@ -45,9 +49,7 @@ class PortsCatalog : public QObject
     /// Geographic bbox search. Falls back to Overpass if Wikidata returns
     /// fewer than 3 ports — useful in regions where Wikidata coverage is
     /// thin (e.g. inland rivers, small Pacific atolls).
-    void search_by_bbox(double min_lat, double max_lat,
-                        double min_lng, double max_lng,
-                        int limit = 100);
+    void search_by_bbox(double min_lat, double max_lat, double min_lng, double max_lng, int limit = 100);
 
   signals:
     /// `context` is the original query string ("name:rotterdam" or
@@ -64,13 +66,13 @@ class PortsCatalog : public QObject
     // with the same `context` string the public API received so the caller
     // never has to disambiguate.
     void fetch_wikidata_by_name(const QString& query, int limit, const QString& context);
-    void fetch_wikidata_by_bbox(double min_lat, double max_lat,
-                                double min_lng, double max_lng,
-                                int limit, const QString& context);
+    void fetch_wikidata_by_bbox(double min_lat, double max_lat, double min_lng, double max_lng, int limit,
+                                const QString& context);
     void fetch_marineregions_by_name(const QString& query, int limit, const QString& context);
-    void fetch_overpass_by_bbox(double min_lat, double max_lat,
-                                double min_lng, double max_lng,
-                                int limit, const QString& context);
+    /// `seed` = ports Wikidata already found for this bbox; they are merged with the OSM
+    /// hits (and returned on their own if Overpass fails) instead of being dropped.
+    void fetch_overpass_by_bbox(double min_lat, double max_lat, double min_lng, double max_lng, int limit,
+                                const QString& context, const QVector<PortRecord>& seed = {});
 
     QNetworkAccessManager* nam_ = nullptr;
     bool hub_registered_ = false;

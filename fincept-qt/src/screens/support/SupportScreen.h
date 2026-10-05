@@ -1,7 +1,10 @@
 #pragma once
 #include <QComboBox>
+#include <QJsonArray>
 #include <QLabel>
 #include <QLineEdit>
+#include <QList>
+#include <QPair>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSplitter>
@@ -26,6 +29,9 @@ class SupportScreen : public QWidget {
 
   protected:
     void changeEvent(QEvent* event) override;
+    /// Refresh the ticket list when the panel is shown again after a while —
+    /// replies from the support team otherwise only appeared on a manual ↻.
+    void showEvent(QShowEvent* event) override;
 
   private:
     // ── Layout ────────────────────────────────────────────────────────────────
@@ -85,6 +91,21 @@ class SupportScreen : public QWidget {
     bool selected_is_closed_ = false;
     QPushButton* active_row_btn_ = nullptr; // currently highlighted sidebar row
 
+    /// Last successfully-fetched ticket set (plus the demo row). Cached so the
+    /// search box and status filter can re-render the sidebar without a network
+    /// round-trip.
+    QJsonArray all_tickets_;
+    bool load_failed_ = false;
+    /// Wall-clock ms of the last load_tickets() call; showEvent() only refetches
+    /// when the data is older than a minute.
+    qint64 last_load_ms_ = 0;
+    /// Categories the support API returned as (display text, API key) pairs.
+    /// Kept so a language switch — which rebuilds the create page with its
+    /// default category list — can restore the server-provided set.
+    QList<QPair<QString, QString>> server_categories_;
+    /// Fill category_combo_ from server_categories_ (no-op until the API answered).
+    void populate_category_combo();
+
     // ── Builders ─────────────────────────────────────────────────────────────
     QWidget* build_sidebar();
     QWidget* build_empty_state();
@@ -99,6 +120,11 @@ class SupportScreen : public QWidget {
     static QString status_color(const QString& s);
     static QString priority_color(const QString& p);
     static QString status_label(const QString& s);
+
+    /// Re-render the sidebar rows from all_tickets_, honouring the search box
+    /// and the status filter combo. Called by load_tickets() and whenever
+    /// either control changes — no refetch.
+    void rebuild_ticket_rows();
 
     // ── Slots ─────────────────────────────────────────────────────────────────
     void load_tickets();

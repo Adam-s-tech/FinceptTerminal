@@ -7,6 +7,7 @@
 //   │  definition, cbbo-1s, …) │  dataset / …    │ ERRORS       │
 //   └──────────────────────────┴─────────────────┴──────────────┘
 
+#include <QEvent>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -28,12 +29,10 @@ class SurfaceDataInspector : public QWidget {
 
     // Push a tabular schema view (definition / ohlcv / statistics / ...).
     // Each name is shown as a tab. Headers seed the columns, rows seed cells.
-    void show_table(const QString& tab_name, const QStringList& headers,
-                    const QVector<QStringList>& rows);
+    void show_table(const QString& tab_name, const QStringList& headers, const QVector<QStringList>& rows);
 
     // Set the lineage block (dataset / schema / symbology / symbols / dates / count / cost).
-    void set_lineage(const QString& dataset, const QString& schema,
-                     const QString& symbology, const QString& symbols,
+    void set_lineage(const QString& dataset, const QString& schema, const QString& symbology, const QString& symbols,
                      const QString& date_range, qint64 row_count, double cost_usd);
 
     // Status / errors area
@@ -43,6 +42,9 @@ class SurfaceDataInspector : public QWidget {
 
     void clear();
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private slots:
     void on_tab_changed(int index);
     void on_view_raw_clicked();
@@ -50,6 +52,7 @@ class SurfaceDataInspector : public QWidget {
 
   private:
     void setup_ui();
+    void retranslateUi();
 
     struct TableSnapshot {
         QString name;
@@ -57,10 +60,18 @@ class SurfaceDataInspector : public QWidget {
         QVector<QStringList> rows;
     };
 
+    // Column section headers (cached for retranslateUi)
+    QLabel* col1_header_ = nullptr;
+    QLabel* col2_header_ = nullptr;
+    QLabel* col3_header_ = nullptr;
+
     QTabBar* tab_bar_ = nullptr;
     QTableView* table_view_ = nullptr;
     QStandardItemModel* table_model_ = nullptr;
     QPushButton* export_btn_ = nullptr;
+
+    // Lineage key labels in declared order: dataset/schema/symbology/symbols/range/rows/cost
+    QLabel* lin_keys_[7] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 
     QLabel* lin_dataset_ = nullptr;
     QLabel* lin_schema_ = nullptr;

@@ -8,8 +8,6 @@
 //
 // Part of the partial-class split of PortfolioScreen.cpp.
 
-#include "screens/portfolio/PortfolioScreen.h"
-
 #include "core/session/ScreenStateManager.h"
 #include "core/symbol/SymbolContext.h"
 #include "core/symbol/SymbolRef.h"
@@ -23,6 +21,7 @@
 #include "screens/portfolio/PortfolioOrderPanel.h"
 #include "screens/portfolio/PortfolioPanelHeader.h"
 #include "screens/portfolio/PortfolioPerfChart.h"
+#include "screens/portfolio/PortfolioScreen.h"
 #include "screens/portfolio/PortfolioSectorPanel.h"
 #include "screens/portfolio/PortfolioStatsRibbon.h"
 #include "screens/portfolio/PortfolioStatusBar.h"
@@ -47,6 +46,7 @@
 #include <QSplitter>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <memory>
 
 namespace fincept::screens {
@@ -61,9 +61,20 @@ void PortfolioScreen::on_portfolios_loaded(QVector<portfolio::Portfolio> portfol
         summary_loaded_ = false;
     } else {
         command_bar_->set_has_portfolios(true);
-        // Auto-select first portfolio if none selected
-        if (selected_id_.isEmpty()) {
+        const auto selected_it =
+            std::find_if(portfolios.begin(), portfolios.end(),
+                         [this](const portfolio::Portfolio& p) { return p.id == selected_id_; });
+        if (selected_id_.isEmpty() || selected_it == portfolios.end()) {
+            // Nothing selected - or the remembered selection (restore_state) names
+            // a portfolio that no longer exists, which would otherwise park the
+            // screen on a permanent "could not load" caption.
             on_portfolio_selected(portfolios.first().id);
+        } else {
+            // restore_state() runs before this list exists, so on_portfolio_selected()
+            // could not look the portfolio up then: the selector still read
+            // "SELECT PORTFOLIO" and the status bar had no name. Sync them now.
+            command_bar_->set_selected_portfolio(*selected_it);
+            status_bar_->set_portfolio_name(selected_it->name);
         }
     }
     update_content_state();
@@ -76,6 +87,12 @@ void PortfolioScreen::on_portfolio_selected(const QString& id) {
     selected_id_ = id;
     ScreenStateManager::instance().notify_changed(this);
     summary_loaded_ = false;
+    // Drop any error caption left over from a previous failed load.
+    if (loading_label_) {
+        loading_label_->setText(tr("Loading portfolio data…"));
+        loading_label_->setStyleSheet(
+            QString("color:%1; font-size:11px; font-weight:600; letter-spacing:0.8px;").arg(ui::colors::AMBER()));
+    }
     active_detail_ = std::nullopt;
     command_bar_->set_detail_view(std::nullopt);
     if (txn_panel_)
@@ -103,13 +120,21 @@ void PortfolioScreen::on_summary_loaded(portfolio::PortfolioSummary summary) {
     current_summary_ = summary;
     summary_loaded_ = true;
 
-    command_bar_->set_summary(summary);
     command_bar_->set_refreshing(false);
     stats_ribbon_->set_summary(summary);
     status_bar_->set_summary(summary);
+    status_bar_->set_feed_state(true);
 
     update_main_view_data();
     update_content_state();
+
+    // Keep an open detail view / FFN view live. They were only handed the summary
+    // when first opened, so prices, P&L and weights froze until the user left and
+    // re-entered the tab (and F5 appeared to do nothing there).
+    if (active_detail_.has_value() && detail_wrapper_)
+        detail_wrapper_->update_data(summary, summary.portfolio.currency);
+    if (show_ffn_ && ffn_view_)
+        ffn_view_->set_data(summary, summary.portfolio.currency);
 
     // Auto-select highest weighted holding if none selected
     if (selected_symbol_.isEmpty() && !summary.holdings.isEmpty()) {
@@ -128,7 +153,7 @@ void PortfolioScreen::on_summary_loaded(portfolio::PortfolioSummary summary) {
     services::PortfolioService::instance().compute_metrics(summary);
 
     // Load performance history for the chart
-    services::PortfolioService::instance().load_snapshots(summary.portfolio.id);
+    services::PortfolioService::instance().load_snapshots(summary.portfolio.id, kSnapshotHistoryDays);
 
     // Load recent transactions for the history panel
     if (txn_panel_)
@@ -148,8 +173,7 @@ void PortfolioScreen::on_summary_loaded(portfolio::PortfolioSummary summary) {
     // compute_metrics() regresses against SPY regardless of currency.
     {
         auto& svc = services::PortfolioService::instance();
-        const QString bench = services::PortfolioService::default_benchmark_for_currency(
-            summary.portfolio.currency);
+        const QString bench = services::PortfolioService::default_benchmark_for_currency(summary.portfolio.currency);
         svc.fetch_benchmark_history(bench, "1y");
         if (bench != QStringLiteral("SPY"))
             svc.fetch_benchmark_history("SPY", "1y");
@@ -159,11 +183,37 @@ void PortfolioScreen::on_summary_loaded(portfolio::PortfolioSummary summary) {
     services::PortfolioService::instance().fetch_risk_free_rate();
 }
 
-void PortfolioScreen::on_summary_error(QString portfolio_id, QString /*error*/) {
+void PortfolioScreen::on_summary_error(QString portfolio_id, QString error) {
     if (portfolio_id != selected_id_)
         return;
-    // Show empty state with error — for now just revert to empty
+
+    // Always clear the spinner — it used to spin forever after a failed
+    // refresh because only the success path called set_refreshing(false).
+    command_bar_->set_refreshing(false);
+
+    if (summary_loaded_) {
+        // We already have data on screen. Keep showing it (P11: never blank a
+        // populated view) and flag the feed as stale instead.
+        status_bar_->set_feed_state(
+            false, error.isEmpty() ? tr("The last refresh failed — values shown may be out of date.")
+                                   : tr("The last refresh failed — values shown may be out of date.\n%1").arg(error));
+        return;
+    }
+
+    // Nothing rendered yet. update_content_state() parks on the loading
+    // skeleton whenever a portfolio is selected but no summary has arrived, so
+    // a first-load failure used to shimmer "Loading portfolio data…" forever
+    // with no way to tell that it had already given up. Turn the skeleton
+    // caption into an error + retry hint instead.
     summary_loaded_ = false;
+    status_bar_->set_feed_state(false, error);
+    if (loading_label_) {
+        loading_label_->setText(error.isEmpty()
+                                    ? tr("Could not load this portfolio. Press ↻ (F5) to retry.")
+                                    : tr("Could not load this portfolio: %1\nPress ↻ (F5) to retry.").arg(error));
+        loading_label_->setStyleSheet(
+            QString("color:%1; font-size:11px; font-weight:600; letter-spacing:0.8px;").arg(ui::colors::NEGATIVE()));
+    }
     update_content_state();
 }
 
@@ -212,9 +262,23 @@ void PortfolioScreen::on_portfolio_deleted(QString id) {
 }
 
 void PortfolioScreen::on_asset_changed(QString portfolio_id) {
-    if (portfolio_id == selected_id_) {
-        services::PortfolioService::instance().refresh_summary(portfolio_id);
-    }
+    if (portfolio_id != selected_id_)
+        return;
+    // A burst of add_asset()/sell_asset() calls (the demo portfolio adds twelve in
+    // a row, an import adds one per holding) emits this once per asset. Each
+    // refresh is a quote fetch plus correlation/benchmark/metrics work, and the
+    // earlier ones are immediately superseded - queue one refresh for the burst.
+    if (asset_refresh_queued_)
+        return;
+    asset_refresh_queued_ = true;
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            asset_refresh_queued_ = false;
+            if (!selected_id_.isEmpty())
+                services::PortfolioService::instance().refresh_summary(selected_id_);
+        },
+        Qt::QueuedConnection);
 }
 
 void PortfolioScreen::on_create_requested() {
@@ -267,7 +331,6 @@ void PortfolioScreen::request_refresh() {
 
 // ── Phase 3: Main view construction ──────────────────────────────────────────
 
-
 void PortfolioScreen::on_symbol_selected(const QString& symbol) {
     selected_symbol_ = symbol;
     if (heatmap_)
@@ -280,8 +343,7 @@ void PortfolioScreen::on_symbol_selected(const QString& symbol) {
     // Publish to the linked group so other panels (Equity Research, Watchlist
     // …) follow the selection. Only when actually linked.
     if (link_group_ != SymbolGroup::None && !symbol.isEmpty()) {
-        SymbolContext::instance().set_group_symbol(
-            link_group_, SymbolRef::equity(symbol), this);
+        SymbolContext::instance().set_group_symbol(link_group_, SymbolRef::equity(symbol), this);
     }
 }
 
@@ -339,16 +401,16 @@ void PortfolioScreen::animate_order_panel_in() {
     order_panel_anim_->start();
 }
 
-
 void PortfolioScreen::load_demo_portfolio() {
     auto& svc = services::PortfolioService::instance();
 
     // Connect BEFORE create_portfolio() — create_portfolio() emits portfolio_created
     // synchronously, so the lambda must be connected first or it will never fire.
-    QMetaObject::Connection* conn = new QMetaObject::Connection;
+    // shared_ptr: the handle is also needed after the call (below), and the raw
+    // new/delete pair leaked whenever the create failed.
+    auto conn = std::make_shared<QMetaObject::Connection>();
     *conn = connect(&svc, &services::PortfolioService::portfolio_created, this, [this, conn](portfolio::Portfolio p) {
         disconnect(*conn);
-        delete conn;
 
         auto& svc = services::PortfolioService::instance();
 
@@ -381,6 +443,12 @@ void PortfolioScreen::load_demo_portfolio() {
 
     // Create the demo portfolio (emits portfolio_created synchronously)
     svc.create_portfolio(tr("Demo Portfolio"), tr("Fincept User"), "USD", tr("Sample portfolio for demonstration"));
+
+    // If creation failed nothing was emitted and the one-shot is still armed -
+    // it would then fire for the NEXT portfolio the user creates and stuff twelve
+    // demo holdings into it. Disarm it.
+    if (*conn)
+        disconnect(*conn);
 }
 
 } // namespace fincept::screens

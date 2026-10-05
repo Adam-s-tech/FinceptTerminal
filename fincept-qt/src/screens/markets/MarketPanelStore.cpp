@@ -1,5 +1,6 @@
 #include "screens/markets/MarketPanelStore.h"
 
+#include "core/logging/Logger.h"
 #include "services/markets/MarketDataService.h"
 #include "storage/repositories/SettingsRepository.h"
 
@@ -9,6 +10,18 @@
 
 namespace fincept::screens {
 
+namespace {
+constexpr const char* kPanelStoreTag = "MarketPanels";
+
+/// Set when load() could not *read* the stored panel set (as opposed to
+/// reading a genuinely absent one). While it is set, save() refuses to write:
+/// the panels in memory are the built-in defaults, and MarketsScreen persists
+/// the whole set on every panel edit, so one transient DB error would otherwise
+/// replace the user's panels wholesale. Cleared by the next successful load,
+/// and by reset_to_defaults() (explicit user intent to overwrite).
+bool g_panel_load_failed = false;
+} // namespace
+
 MarketPanelStore& MarketPanelStore::instance() {
     static MarketPanelStore inst;
     return inst;
@@ -16,7 +29,15 @@ MarketPanelStore& MarketPanelStore::instance() {
 
 QVector<MarketPanelConfig> MarketPanelStore::load() {
     auto result = SettingsRepository::instance().get(kSettingsKey);
-    if (!result.is_ok() || result.value().isEmpty())
+    if (result.is_err()) {
+        LOG_ERROR(kPanelStoreTag, QString("settings read failed for '%1' — showing the built-in panels read-only, "
+                                          "leaving the stored set untouched: %2")
+                                      .arg(QString::fromLatin1(kSettingsKey), QString::fromStdString(result.error())));
+        g_panel_load_failed = true;
+        return build_defaults();
+    }
+    g_panel_load_failed = false;
+    if (result.value().isEmpty())
         return build_defaults();
 
     auto doc = QJsonDocument::fromJson(result.value().toUtf8());
@@ -27,8 +48,8 @@ QVector<MarketPanelConfig> MarketPanelStore::load() {
     for (const auto& v : doc.array()) {
         QJsonObject obj = v.toObject();
         MarketPanelConfig cfg;
-        cfg.id        = obj["id"].toString();
-        cfg.title     = obj["title"].toString();
+        cfg.id = obj["id"].toString();
+        cfg.title = obj["title"].toString();
         cfg.show_name = obj["show_name"].toBool(false);
         for (const auto& s : obj["symbols"].toArray())
             cfg.symbols << s.toString();
@@ -41,7 +62,7 @@ QVector<MarketPanelConfig> MarketPanelStore::load() {
         }
         if (cfg.column_order.isEmpty())
             cfg.column_order = default_market_columns();
-        cfg.column_index   = obj["column_index"].toInt(0);
+        cfg.column_index = obj["column_index"].toInt(0);
         cfg.splitter_index = obj["splitter_index"].toInt(0);
         if (!cfg.id.isEmpty() && !cfg.title.isEmpty())
             panels.append(cfg);
@@ -52,7 +73,10 @@ QVector<MarketPanelConfig> MarketPanelStore::load() {
     // Migration: if all panels have column_index==0 (old save format), redistribute evenly
     bool all_zero = true;
     for (const auto& p : panels) {
-        if (p.column_index != 0) { all_zero = false; break; }
+        if (p.column_index != 0) {
+            all_zero = false;
+            break;
+        }
     }
     if (all_zero && panels.size() > 1) {
         for (int i = 0; i < panels.size(); ++i)
@@ -63,11 +87,17 @@ QVector<MarketPanelConfig> MarketPanelStore::load() {
 }
 
 void MarketPanelStore::save(const QVector<MarketPanelConfig>& panels) {
+    if (g_panel_load_failed) {
+        LOG_WARN(kPanelStoreTag, "Skipping panel save — the stored panel set could not be read this session, so the "
+                                 "on-screen defaults must not overwrite it");
+        return;
+    }
+
     QJsonArray arr;
     for (const auto& cfg : panels) {
         QJsonObject obj;
-        obj["id"]        = cfg.id;
-        obj["title"]     = cfg.title;
+        obj["id"] = cfg.id;
+        obj["title"] = cfg.title;
         obj["show_name"] = cfg.show_name;
         QJsonArray syms;
         for (const auto& s : cfg.symbols)
@@ -76,17 +106,19 @@ void MarketPanelStore::save(const QVector<MarketPanelConfig>& panels) {
         QJsonArray cols;
         for (const auto& c : cfg.column_order)
             cols.append(c);
-        obj["column_order"]    = cols;
-        obj["column_index"]    = cfg.column_index;
-        obj["splitter_index"]  = cfg.splitter_index;
+        obj["column_order"] = cols;
+        obj["column_index"] = cfg.column_index;
+        obj["splitter_index"] = cfg.splitter_index;
         arr.append(obj);
     }
     SettingsRepository::instance().set(kSettingsKey,
-                                       QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)),
-                                       kCategory);
+                                       QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)), kCategory);
 }
 
 void MarketPanelStore::reset_to_defaults() {
+    // Explicit user intent to overwrite the stored set with the defaults —
+    // the only path allowed to lift the read-failure guard.
+    g_panel_load_failed = false;
     save(build_defaults());
 }
 

@@ -5,14 +5,13 @@
 //
 // Part of the partial-class split of DataSourcesScreen.cpp.
 
-#include "screens/data_sources/DataSourcesScreen.h"
-
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
 #include "screens/data_sources/ConnectionConfigDialog.h"
 #include "screens/data_sources/ConnectionTester.h"
 #include "screens/data_sources/ConnectorRegistry.h"
 #include "screens/data_sources/DataSourcesHelpers.h"
+#include "screens/data_sources/DataSourcesScreen.h"
 #include "screens/data_sources/DataSourcesStyles.h"
 #include "screens/data_sources/ImportExportConnections.h"
 #include "ui/theme/Theme.h"
@@ -35,6 +34,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QShortcut>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStandardPaths>
@@ -99,6 +99,12 @@ void DataSourcesScreen::setup_ui() {
     poll_timer_ = new QTimer(this);
     poll_timer_->setInterval(30000);
     connect(poll_timer_, &QTimer::timeout, this, &DataSourcesScreen::on_poll_timer);
+
+    // Search debounce — 200 ms after the last keystroke, one rebuild.
+    search_debounce_ = new QTimer(this);
+    search_debounce_->setSingleShot(true);
+    search_debounce_->setInterval(200);
+    connect(search_debounce_, &QTimer::timeout, this, &DataSourcesScreen::rebuild_all_views);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,9 +120,9 @@ QWidget* DataSourcesScreen::build_screen_header() {
     hl->setContentsMargins(14, 0, 14, 0);
     hl->setSpacing(0);
 
-    auto* title = new QLabel("DATA SOURCES");
-    title->setObjectName("dsScreenTitle");
-    hl->addWidget(title);
+    header_title_ = new QLabel(tr("DATA SOURCES"));
+    header_title_->setObjectName("dsScreenTitle");
+    hl->addWidget(header_title_);
 
     // Separator
     auto* sep = new QFrame;
@@ -125,44 +131,50 @@ QWidget* DataSourcesScreen::build_screen_header() {
     sep->setStyleSheet(QString("background:%1;margin:8px 12px;").arg(col::BORDER_DIM()));
     hl->addWidget(sep);
 
-    auto* subtitle = new QLabel(QString("%1 CONNECTORS").arg(ConnectorRegistry::instance().count()));
-    subtitle->setObjectName("dsScreenSubtitle");
-    hl->addWidget(subtitle);
+    header_subtitle_ = new QLabel(tr("%1 CONNECTORS").arg(ConnectorRegistry::instance().count()));
+    header_subtitle_->setObjectName("dsScreenSubtitle");
+    hl->addWidget(header_subtitle_);
 
     hl->addStretch();
 
     // Search
     search_edit_ = new QLineEdit;
     search_edit_->setObjectName("dsSearch");
-    search_edit_->setPlaceholderText("search connectors...");
+    search_edit_->setPlaceholderText(tr("search connectors..."));
     search_edit_->setFixedSize(240, 26);
+    search_edit_->setClearButtonEnabled(true);
+    search_edit_->setAccessibleName(tr("Search connectors"));
     connect(search_edit_, &QLineEdit::textChanged, this, &DataSourcesScreen::on_search_changed);
     hl->addWidget(search_edit_);
 
     hl->addSpacing(12);
 
     // IO buttons (right side)
-    auto make_io_btn = [&](const QString& label) -> QPushButton* {
+    auto make_io_btn = [&](const QString& label, const QString& a11y, const QString& tip) -> QPushButton* {
         auto* btn = new QPushButton(label);
         btn->setObjectName("dsBtn");
         btn->setFixedHeight(26);
         btn->setCursor(Qt::PointingHandCursor);
+        btn->setAccessibleName(a11y);
+        btn->setToolTip(tip);
         return btn;
     };
 
-    auto* import_btn = make_io_btn("IMPORT");
-    connect(import_btn, &QPushButton::clicked, this, &DataSourcesScreen::on_import_connections);
-    hl->addWidget(import_btn);
+    import_btn_ = make_io_btn(tr("IMPORT"), tr("Import connections"), tr("Load connections from a JSON file"));
+    connect(import_btn_, &QPushButton::clicked, this, &DataSourcesScreen::on_import_connections);
+    hl->addWidget(import_btn_);
     hl->addSpacing(4);
 
-    auto* export_btn = make_io_btn("EXPORT");
-    connect(export_btn, &QPushButton::clicked, this, &DataSourcesScreen::on_export_connections);
-    hl->addWidget(export_btn);
+    export_btn_ = make_io_btn(tr("EXPORT"), tr("Export connections"),
+                              tr("Write connections to a JSON file (secrets are redacted by default)"));
+    connect(export_btn_, &QPushButton::clicked, this, &DataSourcesScreen::on_export_connections);
+    hl->addWidget(export_btn_);
     hl->addSpacing(4);
 
-    auto* tpl_btn = make_io_btn("TEMPLATE");
-    connect(tpl_btn, &QPushButton::clicked, this, &DataSourcesScreen::on_download_template);
-    hl->addWidget(tpl_btn);
+    tpl_btn_ = make_io_btn(tr("TEMPLATE"), tr("Download connector template"),
+                           tr("Write a blank JSON template containing every connector"));
+    connect(tpl_btn_, &QPushButton::clicked, this, &DataSourcesScreen::on_download_template);
+    hl->addWidget(tpl_btn_);
 
     hl->addSpacing(16);
 
@@ -195,7 +207,7 @@ QWidget* DataSourcesScreen::build_stats_strip() {
     hl->setContentsMargins(0, 0, 0, 0);
     hl->setSpacing(0);
 
-    auto make_stat = [&](const QString& label, QLabel** out, int idx) -> QWidget* {
+    auto make_stat = [&](const QString& label, QLabel** out, QLabel** label_out, int idx) -> QWidget* {
         auto* box = new QFrame;
         box->setObjectName("dsStatBox");
         box->setCursor(Qt::PointingHandCursor);
@@ -219,13 +231,15 @@ QWidget* DataSourcesScreen::build_stats_strip() {
         vl->addWidget(lbl);
 
         *out = val;
+        if (label_out)
+            *label_out = lbl;
         return box;
     };
 
-    hl->addWidget(make_stat("UNIVERSE", &universe_stat_value_, 0));
-    hl->addWidget(make_stat("CONFIGURED", &configured_stat_value_, 1));
-    hl->addWidget(make_stat("ACTIVE", &active_stat_value_, 2));
-    hl->addWidget(make_stat("AUTH REQ", &auth_stat_value_, 3));
+    hl->addWidget(make_stat(tr("UNIVERSE"), &universe_stat_value_, &universe_stat_label_, 0));
+    hl->addWidget(make_stat(tr("CONFIGURED"), &configured_stat_value_, &configured_stat_label_, 1));
+    hl->addWidget(make_stat(tr("ACTIVE"), &active_stat_value_, &active_stat_label_, 2));
+    hl->addWidget(make_stat(tr("AUTH REQ"), &auth_stat_value_, &auth_stat_label_, 3));
 
     return strip;
 }
@@ -265,17 +279,17 @@ QWidget* DataSourcesScreen::build_tab_bar() {
         return btn;
     };
 
-    auto* browse_tab = make_tab("BROWSE", 0);
-    auto* conns_tab = make_tab("CONNECTIONS", 1);
+    browse_tab_ = make_tab(tr("BROWSE"), 0);
+    conns_tab_ = make_tab(tr("CONNECTIONS"), 1);
 
-    hl->addWidget(browse_tab);
-    hl->addWidget(conns_tab);
+    hl->addWidget(browse_tab_);
+    hl->addWidget(conns_tab_);
     hl->addStretch();
 
-    // Count label
-    count_label_ = new QLabel;
-    count_label_->setObjectName("dsScreenSubtitle");
-    hl->addWidget(count_label_);
+    // NOTE: count_label_ deliberately lives in build_connector_panel(), not
+    // here. This bar used to create its own QLabel and assign it to the same
+    // member, which the connector panel then overwrote — leaving an orphaned,
+    // permanently-blank label in the tab bar.
 
     return bar;
 }
@@ -329,9 +343,9 @@ QWidget* DataSourcesScreen::build_category_panel() {
     hdr->setFixedHeight(30);
     auto* hdr_hl = new QHBoxLayout(hdr);
     hdr_hl->setContentsMargins(14, 0, 14, 0);
-    auto* hdr_title = new QLabel("CATEGORY");
-    hdr_title->setObjectName("dsSidebarTitle");
-    hdr_hl->addWidget(hdr_title);
+    category_hdr_title_ = new QLabel(tr("CATEGORY"));
+    category_hdr_title_->setObjectName("dsSidebarTitle");
+    hdr_hl->addWidget(category_hdr_title_);
     vl->addWidget(hdr);
 
     // Category list
@@ -347,9 +361,9 @@ QWidget* DataSourcesScreen::build_category_panel() {
     prov_hdr->setFixedHeight(28);
     auto* prov_hl = new QHBoxLayout(prov_hdr);
     prov_hl->setContentsMargins(14, 0, 14, 0);
-    auto* prov_title = new QLabel("TOP PROVIDERS");
-    prov_title->setObjectName("dsSidebarTitle");
-    prov_hl->addWidget(prov_title);
+    provider_hdr_title_ = new QLabel(tr("TOP PROVIDERS"));
+    provider_hdr_title_->setObjectName("dsSidebarTitle");
+    prov_hl->addWidget(provider_hdr_title_);
     vl->addWidget(prov_hdr);
 
     provider_ladder_ = new QListWidget;
@@ -382,9 +396,9 @@ QWidget* DataSourcesScreen::build_connector_panel() {
     hdr_hl->setContentsMargins(12, 0, 12, 0);
     hdr_hl->setSpacing(8);
 
-    auto* panel_title = new QLabel("CONNECTORS");
-    panel_title->setObjectName("dsConnPanelTitle");
-    hdr_hl->addWidget(panel_title);
+    connector_panel_title_ = new QLabel(tr("CONNECTORS"));
+    connector_panel_title_->setObjectName("dsConnPanelTitle");
+    hdr_hl->addWidget(connector_panel_title_);
 
     hdr_hl->addStretch();
 
@@ -398,7 +412,8 @@ QWidget* DataSourcesScreen::build_connector_panel() {
     connector_table_ = new QTableWidget;
     connector_table_->setObjectName("dsConnectorTable");
     connector_table_->setColumnCount(7);
-    connector_table_->setHorizontalHeaderLabels({"", "CONNECTOR", "CATEGORY", "AUTH", "TYPE", "ACTIVE", "TOTAL"});
+    connector_table_->setHorizontalHeaderLabels(
+        {"", tr("CONNECTOR"), tr("CATEGORY"), tr("AUTH"), tr("TYPE"), tr("ACTIVE"), tr("TOTAL")});
     connector_table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Fixed);
     connector_table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     connector_table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
@@ -452,9 +467,9 @@ QWidget* DataSourcesScreen::build_detail_panel() {
     hdr->setFixedHeight(30);
     auto* hdr_hl = new QHBoxLayout(hdr);
     hdr_hl->setContentsMargins(12, 0, 12, 0);
-    auto* hdr_title = new QLabel("INSPECTOR");
-    hdr_title->setObjectName("dsDetailTitle");
-    hdr_hl->addWidget(hdr_title);
+    inspector_hdr_title_ = new QLabel(tr("INSPECTOR"));
+    inspector_hdr_title_->setObjectName("dsDetailTitle");
+    hdr_hl->addWidget(inspector_hdr_title_);
     vl->addWidget(hdr);
 
     // Scrollable content
@@ -485,10 +500,10 @@ QWidget* DataSourcesScreen::build_detail_panel() {
 
     auto* id_text = new QVBoxLayout;
     id_text->setSpacing(2);
-    detail_title_ = new QLabel("Select a connector");
+    detail_title_ = new QLabel(tr("Select a connector"));
     detail_title_->setObjectName("dsDetailName");
     id_text->addWidget(detail_title_);
-    detail_description_ = new QLabel("Double-click to configure");
+    detail_description_ = new QLabel(tr("Double-click to configure"));
     detail_description_->setObjectName("dsDetailDesc");
     detail_description_->setWordWrap(true);
     id_text->addWidget(detail_description_);
@@ -497,7 +512,7 @@ QWidget* DataSourcesScreen::build_detail_panel() {
     body_vl->addWidget(id_block);
 
     // ── Metadata rows ────────────────────────────────────────────────────────
-    auto make_info_row = [&](const QString& label, QLabel** value_out) -> QWidget* {
+    auto make_info_row = [&](const QString& label, QLabel** value_out, QLabel** label_out) -> QWidget* {
         auto* row = new QWidget(this);
         row->setObjectName("dsInfoRow");
         row->setFixedHeight(28);
@@ -512,17 +527,19 @@ QWidget* DataSourcesScreen::build_detail_panel() {
         val->setObjectName("dsInfoValue");
         hl->addWidget(val);
         *value_out = val;
+        if (label_out)
+            *label_out = lbl;
         return row;
     };
 
-    body_vl->addWidget(make_info_row("CATEGORY", &detail_category_value_));
-    body_vl->addWidget(make_info_row("TYPE", &detail_transport_value_));
-    body_vl->addWidget(make_info_row("AUTH", &detail_auth_value_));
-    body_vl->addWidget(make_info_row("TESTABLE", &detail_test_value_));
-    body_vl->addWidget(make_info_row("FIELDS", &detail_fields_value_));
-    body_vl->addWidget(make_info_row("CONFIGURED", &detail_configured_value_));
-    body_vl->addWidget(make_info_row("ACTIVE", &detail_enabled_value_));
-    body_vl->addWidget(make_info_row("LAST STATUS", &detail_last_status_value_));
+    body_vl->addWidget(make_info_row(tr("CATEGORY"), &detail_category_value_, &detail_category_label_));
+    body_vl->addWidget(make_info_row(tr("TYPE"), &detail_transport_value_, &detail_transport_label_));
+    body_vl->addWidget(make_info_row(tr("AUTH"), &detail_auth_value_, &detail_auth_label_));
+    body_vl->addWidget(make_info_row(tr("TESTABLE"), &detail_test_value_, &detail_test_label_));
+    body_vl->addWidget(make_info_row(tr("FIELDS"), &detail_fields_value_, &detail_fields_label_));
+    body_vl->addWidget(make_info_row(tr("CONFIGURED"), &detail_configured_value_, &detail_configured_label_));
+    body_vl->addWidget(make_info_row(tr("ACTIVE"), &detail_enabled_value_, &detail_enabled_label_));
+    body_vl->addWidget(make_info_row(tr("LAST STATUS"), &detail_last_status_value_, &detail_last_status_label_));
 
     // ── Fields section label ─────────────────────────────────────────────────
     auto* fields_hdr = new QWidget(this);
@@ -530,15 +547,15 @@ QWidget* DataSourcesScreen::build_detail_panel() {
     fields_hdr->setFixedHeight(26);
     auto* fh_hl = new QHBoxLayout(fields_hdr);
     fh_hl->setContentsMargins(12, 0, 12, 0);
-    auto* fh_lbl = new QLabel("CONFIG FIELDS");
-    fh_lbl->setObjectName("dsSectionSep");
-    fh_hl->addWidget(fh_lbl);
+    config_fields_label_ = new QLabel(tr("CONFIG FIELDS"));
+    config_fields_label_->setObjectName("dsSectionSep");
+    fh_hl->addWidget(config_fields_label_);
     body_vl->addWidget(fields_hdr);
 
     field_table_ = new QTableWidget;
     field_table_->setObjectName("dsFieldTable");
     field_table_->setColumnCount(3);
-    field_table_->setHorizontalHeaderLabels({"FIELD", "TYPE", "REQ"});
+    field_table_->setHorizontalHeaderLabels({tr("FIELD"), tr("TYPE"), tr("REQ")});
     field_table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     field_table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
     field_table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
@@ -559,9 +576,9 @@ QWidget* DataSourcesScreen::build_detail_panel() {
     conns_hdr->setFixedHeight(26);
     auto* ch_hl = new QHBoxLayout(conns_hdr);
     ch_hl->setContentsMargins(12, 0, 12, 0);
-    auto* ch_lbl = new QLabel("SAVED CONNECTIONS");
-    ch_lbl->setObjectName("dsSectionSep");
-    ch_hl->addWidget(ch_lbl);
+    detail_saved_conns_label_ = new QLabel(tr("SAVED CONNECTIONS"));
+    detail_saved_conns_label_->setObjectName("dsSectionSep");
+    ch_hl->addWidget(detail_saved_conns_label_);
     body_vl->addWidget(conns_hdr);
 
     detail_connections_list_ = new QListWidget;
@@ -570,6 +587,17 @@ QWidget* DataSourcesScreen::build_detail_panel() {
     detail_connections_list_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     connect(detail_connections_list_, &QListWidget::itemClicked, this,
             &DataSourcesScreen::on_detail_connection_activated);
+    connect(detail_connections_list_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+        if (item && (item->flags() & Qt::ItemIsEnabled))
+            on_connection_edit(item->data(Qt::UserRole).toString());
+    });
+    detail_connections_list_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(detail_connections_list_, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        const auto* item = detail_connections_list_->itemAt(pos);
+        if (!item || !(item->flags() & Qt::ItemIsEnabled))
+            return;
+        show_connection_menu(item->data(Qt::UserRole).toString(), detail_connections_list_->viewport()->mapToGlobal(pos));
+    });
     body_vl->addWidget(detail_connections_list_);
 
     // ── Action buttons ───────────────────────────────────────────────────────
@@ -579,31 +607,36 @@ QWidget* DataSourcesScreen::build_detail_panel() {
     act_vl->setContentsMargins(12, 10, 12, 10);
     act_vl->setSpacing(6);
 
-    new_connection_btn_ = new QPushButton("+ ADD CONNECTION");
+    new_connection_btn_ = new QPushButton(tr("+ ADD CONNECTION"));
     new_connection_btn_->setObjectName("dsBtnAccent");
     new_connection_btn_->setFixedHeight(28);
     new_connection_btn_->setCursor(Qt::PointingHandCursor);
     new_connection_btn_->setEnabled(false);
+    new_connection_btn_->setAccessibleName(tr("Add connection for the selected connector"));
     connect(new_connection_btn_, &QPushButton::clicked, this, &DataSourcesScreen::on_connection_add);
     act_vl->addWidget(new_connection_btn_);
 
     auto* edit_test_hl = new QHBoxLayout;
     edit_test_hl->setSpacing(6);
 
-    edit_connection_btn_ = new QPushButton("EDIT");
+    edit_connection_btn_ = new QPushButton(tr("EDIT"));
     edit_connection_btn_->setObjectName("dsBtn");
     edit_connection_btn_->setFixedHeight(26);
     edit_connection_btn_->setCursor(Qt::PointingHandCursor);
     edit_connection_btn_->setEnabled(false);
+    edit_connection_btn_->setAccessibleName(tr("Edit selected connection"));
     connect(edit_connection_btn_, &QPushButton::clicked, this,
             [this]() { on_connection_edit(effective_detail_connection_id()); });
     edit_test_hl->addWidget(edit_connection_btn_);
 
-    test_connection_btn_ = new QPushButton("TEST");
+    test_connection_btn_ = new QPushButton(tr("TEST"));
     test_connection_btn_->setObjectName("dsBtnGreen");
     test_connection_btn_->setFixedHeight(26);
     test_connection_btn_->setCursor(Qt::PointingHandCursor);
     test_connection_btn_->setEnabled(false);
+    test_connection_btn_->setAccessibleName(tr("Test selected connection"));
+    test_connection_btn_->setToolTip(tr("Opens a TCP connection to the endpoint (file connectors: checks the saved "
+                                        "path exists and is readable). Does not validate API keys."));
     connect(test_connection_btn_, &QPushButton::clicked, this,
             [this]() { on_connection_test(effective_detail_connection_id()); });
     edit_test_hl->addWidget(test_connection_btn_);
@@ -638,13 +671,14 @@ QWidget* DataSourcesScreen::build_connections_page() {
     hdr_hl->setContentsMargins(12, 0, 12, 0);
     hdr_hl->setSpacing(8);
 
-    auto* hdr_title = new QLabel("SAVED CONNECTIONS");
-    hdr_title->setObjectName("dsConnPanelTitle");
-    hdr_hl->addWidget(hdr_title);
+    conns_page_title_ = new QLabel(tr("SAVED CONNECTIONS"));
+    conns_page_title_->setObjectName("dsConnPanelTitle");
+    hdr_hl->addWidget(conns_page_title_);
     hdr_hl->addStretch();
 
-    auto* add_conn_btn = new QPushButton("+ ADD");
-    add_conn_btn->setObjectName("dsBtnAccent");
+    conns_add_btn_ = new QPushButton(tr("+ ADD"));
+    conns_add_btn_->setObjectName("dsBtnAccent");
+    auto* add_conn_btn = conns_add_btn_;
     add_conn_btn->setFixedHeight(24);
     add_conn_btn->setCursor(Qt::PointingHandCursor);
     connect(add_conn_btn, &QPushButton::clicked, this, &DataSourcesScreen::on_connection_add);
@@ -663,32 +697,40 @@ QWidget* DataSourcesScreen::build_connections_page() {
     // Search
     conn_search_edit_ = new QLineEdit;
     conn_search_edit_->setObjectName("dsSearchConn");
-    conn_search_edit_->setPlaceholderText("filter connections...");
+    conn_search_edit_->setPlaceholderText(tr("filter connections..."));
     conn_search_edit_->setFixedSize(220, 22);
+    conn_search_edit_->setClearButtonEnabled(true);
+    conn_search_edit_->setAccessibleName(tr("Filter saved connections"));
     connect(conn_search_edit_, &QLineEdit::textChanged, this, &DataSourcesScreen::on_connections_search_changed);
     tb_hl->addWidget(conn_search_edit_);
 
     tb_hl->addStretch();
 
-    // Bulk buttons
-    bulk_enable_btn_ = new QPushButton("ENABLE ALL");
+    // Bulk buttons. ENABLE ALL / DISABLE ALL act on the *filtered* rows, not
+    // the whole store — say so, because the labels imply otherwise.
+    bulk_enable_btn_ = new QPushButton(tr("ENABLE ALL"));
     bulk_enable_btn_->setObjectName("dsBtnGreen");
     bulk_enable_btn_->setFixedHeight(22);
     bulk_enable_btn_->setCursor(Qt::PointingHandCursor);
+    bulk_enable_btn_->setAccessibleName(tr("Enable all listed connections"));
+    bulk_enable_btn_->setToolTip(tr("Enables every connection currently listed (the filter applies)"));
     connect(bulk_enable_btn_, &QPushButton::clicked, this, &DataSourcesScreen::on_bulk_enable_all);
     tb_hl->addWidget(bulk_enable_btn_);
 
-    bulk_disable_btn_ = new QPushButton("DISABLE ALL");
+    bulk_disable_btn_ = new QPushButton(tr("DISABLE ALL"));
     bulk_disable_btn_->setObjectName("dsBtn");
     bulk_disable_btn_->setFixedHeight(22);
     bulk_disable_btn_->setCursor(Qt::PointingHandCursor);
+    bulk_disable_btn_->setAccessibleName(tr("Disable all listed connections"));
+    bulk_disable_btn_->setToolTip(tr("Disables every connection currently listed (the filter applies)"));
     connect(bulk_disable_btn_, &QPushButton::clicked, this, &DataSourcesScreen::on_bulk_disable_all);
     tb_hl->addWidget(bulk_disable_btn_);
 
-    bulk_delete_btn_ = new QPushButton("DELETE SEL");
+    bulk_delete_btn_ = new QPushButton(tr("DELETE SEL"));
     bulk_delete_btn_->setObjectName("dsBtnDanger");
     bulk_delete_btn_->setFixedHeight(22);
     bulk_delete_btn_->setCursor(Qt::PointingHandCursor);
+    bulk_delete_btn_->setAccessibleName(tr("Delete selected connections"));
     connect(bulk_delete_btn_, &QPushButton::clicked, this, &DataSourcesScreen::on_bulk_delete_selected);
     tb_hl->addWidget(bulk_delete_btn_);
 
@@ -699,7 +741,7 @@ QWidget* DataSourcesScreen::build_connections_page() {
     connections_table_->setObjectName("dsConnectionsTable");
     connections_table_->setColumnCount(8);
     connections_table_->setHorizontalHeaderLabels(
-        {"", "NAME", "PROVIDER", "CATEGORY", "TYPE", "STATUS", "TAGS", "UPDATED"});
+        {"", tr("NAME"), tr("PROVIDER"), tr("CATEGORY"), tr("TYPE"), tr("STATUS"), tr("TAGS"), tr("UPDATED")});
     connections_table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Fixed);
     connections_table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     connections_table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
@@ -724,28 +766,39 @@ QWidget* DataSourcesScreen::build_connections_page() {
                                       QString("QTableWidget { alternate-background-color: %1; }").arg(col::ROW_ALT()));
     connect(connections_table_, &QTableWidget::itemSelectionChanged, this,
             &DataSourcesScreen::on_connection_selection_changed);
+    // Per-connection actions. This page used to offer only the enable toggle and the
+    // bulk buttons, leaving edit / duplicate / test / delete of one connection with
+    // no way in from here.
+    connect(connections_table_, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
+        const auto* item = connections_table_->item(row, 1);
+        if (item && !item->data(Qt::UserRole).toString().isEmpty())
+            on_connection_edit(item->data(Qt::UserRole).toString());
+    });
+    connections_table_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(connections_table_, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        const int row = connections_table_->rowAt(pos.y()); // rowAt: also covers the checkbox column
+        if (row < 0)
+            return;
+        const auto* name_item = connections_table_->item(row, 1);
+        if (!name_item || name_item->data(Qt::UserRole).toString().isEmpty())
+            return;
+        if (!name_item->isSelected())
+            connections_table_->selectRow(row);
+        show_connection_menu(name_item->data(Qt::UserRole).toString(), connections_table_->viewport()->mapToGlobal(pos));
+    });
+    auto* delete_shortcut = new QShortcut(QKeySequence(Qt::Key_Delete), connections_table_);
+    delete_shortcut->setContext(Qt::WidgetShortcut);
+    connect(delete_shortcut, &QShortcut::activated, this, &DataSourcesScreen::on_bulk_delete_selected);
 
     vl->addWidget(connections_table_, 1);
     return page;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Command bar stub (unused — kept for ABI compat)
-// ─────────────────────────────────────────────────────────────────────────────
-
-QWidget* DataSourcesScreen::build_command_bar() {
-    auto* w = new QWidget(this);
-    w->setFixedHeight(0);
-    return w;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// apply_screen_styles — no-op (styles applied inline in setup_ui)
+// apply_screen_styles — no-op (styles applied once in setup_ui via
+// screen_stylesheet(); kept because it is part of the class's build contract)
 // ─────────────────────────────────────────────────────────────────────────────
 
 void DataSourcesScreen::apply_screen_styles() {}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Config dialog (thin wrapper — implementation in ConnectionConfigDialog.cpp)
-// ─────────────────────────────────────────────────────────────────────────────
 } // namespace fincept::screens::datasources

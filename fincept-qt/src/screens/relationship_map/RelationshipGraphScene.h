@@ -26,8 +26,13 @@ class RelationshipGraphScene : public QGraphicsScene {
     void clear_graph();
 
   signals:
-    void center_card_clicked(const QString& ticker);
+    /// Double-click on a node that is a tradable symbol (the centre company or a peer).
+    void symbol_open_requested(const QString& ticker);
+    void node_activated(const QString& label, const QString& sub, const QString& category);
     void background_clicked();
+
+  protected:
+    void mousePressEvent(QGraphicsSceneMouseEvent* event) override;
 
   private:
     // kept as no-ops for ABI stability — layout is now pure radial/deterministic

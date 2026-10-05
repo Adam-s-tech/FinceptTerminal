@@ -11,6 +11,8 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <functional>
+
 namespace fincept::screens::widgets {
 
 class LoadingOverlay;
@@ -78,6 +80,21 @@ class BaseWidget : public QFrame {
     /// so the gear icon appears. Also hides the icon if set to false later.
     void set_configurable(bool configurable);
 
+    /// Coalesce repeated re-render requests into a single call on the next
+    /// event-loop turn.
+    ///
+    /// Hub deliveries arrive one topic at a time: a widget subscribed to N
+    /// symbols gets N callbacks per refresh cycle, and a naive
+    /// `rebuild_from_cache()` inside each callback rebuilds the whole table N
+    /// times (O(N^2) widget churn + N full CSS reparses per row). Routing the
+    /// rebuild through this helper collapses a whole delivery burst into one
+    /// render. The last functor wins, so passing a lambda that reads current
+    /// state is always correct.
+    ///
+    /// The timer is bound to `this` as its context object, so a pending render
+    /// is dropped automatically if the widget is destroyed first.
+    void schedule_render(std::function<void()> fn);
+
     /// Re-arms the loading watchdog on becoming visible. Many subclasses call
     /// `set_loading(true)` from their constructor, which arms the watchdog
     /// before the widget is mounted and before any subscription has been
@@ -90,6 +107,28 @@ class BaseWidget : public QFrame {
     /// SHOULD override and call BaseWidget::retranslateUi() first, then
     /// retranslate their own widgets.
     virtual void retranslateUi();
+
+    /// Open `symbol` in another screen through the `nav.open_symbol` event
+    /// (navigates, constructing the screen if needed, then hands it the
+    /// symbol via IGroupLinked). Default target is Equity Research; pass
+    /// "crypto_trading" + asset_class "crypto" for crypto pairs.
+    void open_symbol(const QString& symbol, const QString& screen_id = QStringLiteral("equity_research"),
+                     const QString& asset_class = QStringLiteral("equity"), const QString& exchange = {});
+
+    /// Make `w` open `symbol` in Equity Research when double-clicked. Use for
+    /// rows/cells that are plain QWidgets (table widgets should connect to
+    /// cellDoubleClicked instead). Safe to call repeatedly on the same widget
+    /// (e.g. when a recycled row is refilled) — it only refreshes the symbol.
+    void link_symbol(QWidget* w, const QString& symbol);
+
+    /// Make `w` switch to the full `screen_id` screen (nav.switch_screen) when
+    /// double-clicked. For rows that describe an event/dataset rather than a
+    /// ticker (economic calendar, geopolitics, vessels, prediction markets).
+    void link_screen(QWidget* w, const QString& screen_id, const QString& tooltip);
+
+    /// Handles the double-clicks installed by link_symbol() / link_screen().
+    /// Subclasses that override this must chain to BaseWidget::eventFilter().
+    bool eventFilter(QObject* obj, QEvent* event) override;
 
   private:
     void refresh_base_theme();
@@ -107,10 +146,15 @@ class BaseWidget : public QFrame {
     QVBoxLayout* content_layout_ = nullptr;
     QPushButton* refresh_btn_ = nullptr;
     QPushButton* config_btn_ = nullptr;
+    QPushButton* close_btn_ = nullptr;
     LoadingOverlay* loading_overlay_ = nullptr;
     QTimer* loading_watchdog_ = nullptr;
     int last_progress_loaded_ = 0;
     QString accent_color_;
+
+    // Render coalescing — see schedule_render().
+    std::function<void()> pending_render_;
+    bool render_scheduled_ = false;
 };
 
 } // namespace fincept::screens::widgets

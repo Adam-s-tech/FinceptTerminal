@@ -15,6 +15,11 @@ namespace fincept::trading {
 namespace {
 const QString kPoolTag = "ExchangeDaemonPool";
 
+/// Marks a `responses_` slot whose caller timed out and went away. Never
+/// produced by the daemon, so it can't collide with a real reply. See the
+/// timeout path in call() and the consume in drain_buffer().
+constexpr auto kPoolAbandonedMarker = "__abandoned__";
+
 QString pool_resolve_script_path(const QString& relative) {
     const QString dir = fincept::python::PythonRunner::instance().scripts_dir();
     if (dir.isEmpty())
@@ -39,18 +44,25 @@ ExchangeDaemonPool::~ExchangeDaemonPool() {
 }
 
 void ExchangeDaemonPool::start() {
-    if (process_ && process_->state() == QProcess::Running)
+    // Starting counts as "already launched" too: only Running used to be checked,
+    // so a second start() during the spawn window created a second daemon and
+    // orphaned the first (it kept running, unowned, until app exit).
+    if (process_ && process_->state() != QProcess::NotRunning)
         return;
 
     const QString python_path = python::PythonRunner::instance().python_path();
     const QString script_path = pool_resolve_script_path("exchange/exchange_daemon.py");
     if (python_path.isEmpty() || script_path.isEmpty()) {
-        LOG_WARN(kPoolTag,"Cannot start daemon: python or exchange_daemon.py not found");
+        LOG_WARN(kPoolTag, "Cannot start daemon: python or exchange_daemon.py not found");
         return;
     }
 
     process_ = new QProcess(this);
     process_->setProcessChannelMode(QProcess::SeparateChannels);
+    // Identify THIS spawn in its handlers: stop() detaches process_ before the old
+    // daemon has actually exited, so a restart can leave an old process's signals
+    // arriving while process_ already names its replacement.
+    QProcess* const spawned = process_;
 
     connect(process_, &QProcess::readyReadStandardOutput, this, &ExchangeDaemonPool::drain_buffer);
     connect(process_, &QProcess::readyReadStandardError, this, [this]() {
@@ -60,9 +72,27 @@ void ExchangeDaemonPool::start() {
         if (!err.isEmpty())
             LOG_DEBUG(kPoolTag, "Daemon stderr: " + err);
     });
+    // finished() is NOT emitted when the interpreter never started at all (bad
+    // path, blocked by AV, missing runtime DLL) — only errorOccurred(FailedToStart)
+    // fires. Without this, process_ stayed non-null forever, so wait_for_ready()
+    // never re-kicked start() and every call() burned its full ready-wait.
+    connect(process_, &QProcess::errorOccurred, this, [this, spawned](QProcess::ProcessError err) {
+        if (err != QProcess::FailedToStart)
+            return; // Crashed et al. are followed by finished(); the rest are transient I/O
+        LOG_ERROR(kPoolTag, QString("Daemon failed to start: %1").arg(spawned->errorString()));
+        if (process_ == spawned) {
+            ready_ = false;
+            process_ = nullptr; // next call()/wait_for_ready() retries start()
+        }
+        spawned->deleteLater();
+    });
     connect(process_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this](int code, QProcess::ExitStatus status) {
-                LOG_WARN(kPoolTag,QString("Daemon exited (code=%1, status=%2)").arg(code).arg(status));
+            [this, spawned](int code, QProcess::ExitStatus status) {
+                LOG_WARN(kPoolTag, QString("Daemon exited (code=%1, status=%2)").arg(code).arg(status));
+                // A newer daemon has already replaced this one (stop() then start()):
+                // its ready flag, creds and pending replies are not ours to reset.
+                if (process_ && process_ != spawned)
+                    return;
                 ready_ = false;
                 if (process_) {
                     process_->deleteLater();
@@ -72,12 +102,17 @@ void ExchangeDaemonPool::start() {
                 // has forgotten them with the interpreter.
                 QMutexLocker lock(&mutex_);
                 creds_sent_.clear();
+                // Anything still parked here is unclaimable: the ids belong to
+                // the dead interpreter's request stream and no reply is coming.
+                // Waiters aren't stranded — they're on a bounded wait and fall
+                // through to their own timeout.
+                responses_.clear();
             });
 
     QStringList args;
     args << "-u" << "-B" << script_path;
     process_->start(python_path, args);
-    LOG_INFO(kPoolTag,"Exchange daemon starting...");
+    LOG_INFO(kPoolTag, "Exchange daemon starting...");
 }
 
 void ExchangeDaemonPool::stop() {
@@ -118,7 +153,8 @@ bool ExchangeDaemonPool::wait_for_ready(int timeout_ms) {
 }
 
 QString ExchangeDaemonPool::credential_fingerprint(const ExchangeCredentials& creds) {
-    if (creds.api_key.isEmpty() && creds.secret.isEmpty() && creds.password.isEmpty())
+    if (creds.api_key.isEmpty() && creds.secret.isEmpty() && creds.password.isEmpty() &&
+        creds.wallet_address.isEmpty() && creds.private_key.isEmpty())
         return {};
     QCryptographicHash hash(QCryptographicHash::Sha256);
     hash.addData(creds.api_key.toUtf8());
@@ -126,6 +162,10 @@ QString ExchangeDaemonPool::credential_fingerprint(const ExchangeCredentials& cr
     hash.addData(creds.secret.toUtf8());
     hash.addData("|");
     hash.addData(creds.password.toUtf8());
+    hash.addData("|");
+    hash.addData(creds.wallet_address.toUtf8());
+    hash.addData("|");
+    hash.addData(creds.private_key.toUtf8());
     return QString::fromLatin1(hash.result().toHex().left(16));
 }
 
@@ -152,6 +192,10 @@ void ExchangeDaemonPool::send_credentials_if_needed(const QString& exchange, con
     c["secret"] = creds.secret;
     if (!creds.password.isEmpty())
         c["password"] = creds.password;
+    if (!creds.wallet_address.isEmpty())
+        c["wallet_address"] = creds.wallet_address;
+    if (!creds.private_key.isEmpty())
+        c["private_key"] = creds.private_key;
     QJsonObject req;
     req["id"] = "__creds_" + exchange + "_" + fp;
     req["method"] = "set_credentials";
@@ -176,8 +220,8 @@ void ExchangeDaemonPool::drain_buffer() {
 
         if (id == "__init__") {
             ready_ = true;
-            LOG_INFO(kPoolTag,"Exchange daemon ready (pid=" +
-                              obj.value("data").toObject().value("pid").toVariant().toString() + ")");
+            LOG_INFO(kPoolTag, "Exchange daemon ready (pid=" +
+                                   obj.value("data").toObject().value("pid").toVariant().toString() + ")");
             response_ready_.wakeAll();
             emit ready();
             continue;
@@ -189,20 +233,27 @@ void ExchangeDaemonPool::drain_buffer() {
 
         {
             QMutexLocker lock(&mutex_);
+            // A reply whose caller already timed out must be dropped, not
+            // stored: nothing will ever claim it, and these payloads are order
+            // books and OHLC batches (5–50 KB each). call() leaves a tiny
+            // tombstone under the request id when it gives up — see
+            // kPoolAbandonedMarker there — which we consume here.
+            auto existing = responses_.find(id);
+            if (existing != responses_.end() && existing.value().value(kPoolAbandonedMarker).toBool(false)) {
+                responses_.erase(existing);
+                continue;
+            }
             responses_[id] = obj;
         }
         response_ready_.wakeAll();
     }
 }
 
-QJsonObject ExchangeDaemonPool::call(const QString& exchange,
-                                     const QString& method,
-                                     const QJsonObject& args,
-                                     const ExchangeCredentials& credentials,
-                                     int timeout_ms) {
+QJsonObject ExchangeDaemonPool::call(const QString& exchange, const QString& method, const QJsonObject& args,
+                                     const ExchangeCredentials& credentials, int timeout_ms) {
     if (!ready_.load()) {
         if (!wait_for_ready(std::min(timeout_ms, 8000))) {
-            LOG_WARN(kPoolTag,QString("Daemon not ready for %1/%2").arg(exchange, method));
+            LOG_WARN(kPoolTag, QString("Daemon not ready for %1/%2").arg(exchange, method));
             return {{"error", "Daemon not ready"}};
         }
     }
@@ -246,8 +297,19 @@ QJsonObject ExchangeDaemonPool::call(const QString& exchange,
         }
         response_ready_.wait(&mutex_, 50);
     }
+    // Timed out. Two things can leak here and both are handled:
+    //   1. A reply that landed between the last find() and the loop exit —
+    //      overwritten by the tombstone below, so its payload is freed now.
+    //   2. A reply that lands *after* we return — the normal case for a slow
+    //      exchange call. drain_buffer() sees the tombstone and drops the
+    //      payload instead of storing it.
+    // Before this, either case left a full 5–50 KB response object in
+    // responses_ with no caller left to erase it, for the life of the process.
+    // The tombstone itself is a one-key object and is consumed by the late
+    // reply; only a request whose reply never arrives at all leaves one behind.
+    responses_[req_id] = QJsonObject{{kPoolAbandonedMarker, true}};
     lock.unlock();
-    LOG_WARN(kPoolTag,QString("Daemon call timed out: %1/%2").arg(exchange, method));
+    LOG_WARN(kPoolTag, QString("Daemon call timed out: %1/%2").arg(exchange, method));
     return {{"error", QString("Daemon call timed out: %1/%2").arg(exchange, method)}};
 }
 

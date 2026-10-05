@@ -80,14 +80,6 @@ QByteArray SessionManager::load_state(int window_id) const {
     return val;
 }
 
-void SessionManager::save_window_count(int count) {
-    settings_.setValue("window_count", count);
-}
-
-int SessionManager::load_window_count() const {
-    return settings_.value("window_count", 1).toInt();
-}
-
 void SessionManager::save_window_ids(const QList<int>& ids) {
     QVariantList v;
     v.reserve(ids.size());
@@ -258,8 +250,7 @@ void SessionManager::request_snapshot_(bool force) {
 
     auto r = ring->add(payload, "auto", force);
     if (r.is_err()) {
-        LOG_WARN("SessionManager", QString("Snapshot write failed: %1")
-                                       .arg(QString::fromStdString(r.error())));
+        LOG_WARN("SessionManager", QString("Snapshot write failed: %1").arg(QString::fromStdString(r.error())));
     }
 }
 
@@ -277,10 +268,8 @@ QByteArray SessionManager::build_snapshot_payload_() const {
     if (fincept::WindowRegistry::instance().frames().isEmpty())
         return {};
 
-    const layout::Workspace ws =
-        layout::WorkspaceShell::capture(QStringLiteral("autosave"),
-                                        QStringLiteral("auto"),
-                                        /*previous=*/nullptr);
+    const layout::Workspace ws = layout::WorkspaceShell::capture(QStringLiteral("autosave"), QStringLiteral("auto"),
+                                                                 /*previous=*/nullptr);
     if (ws.frames.isEmpty())
         return {};
 

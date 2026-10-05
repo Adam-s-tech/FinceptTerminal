@@ -5,6 +5,7 @@
 
 #include <QHash>
 #include <QObject>
+#include <QSet>
 #include <QString>
 
 class QTimer;
@@ -72,13 +73,17 @@ class WalletBalanceProducer : public QObject, public fincept::datahub::Producer 
     QString pubkey_from_topic(const QString& topic) const;
     QString topic_for_pubkey(const QString& pubkey) const;
 
+    /// Tell the user (once per pubkey per run) that STREAM is not available on
+    /// the configured RPC and the producer is polling instead.
+    void notify_stream_unavailable(const QString& pubkey);
+
     SolanaRpcClient* rpc_ = nullptr;
     BalanceMode mode_ = BalanceMode::Poll;
 
     struct StreamSession {
         WebSocketClient* ws = nullptr;
         QString pubkey;
-        QString fncpt_token_account;  ///< owner's associated FNCPT token account
+        QString fncpt_token_account; ///< owner's associated FNCPT token account
         WalletBalance latest;
         int sol_sub_id = 0;
         int fncpt_sub_id = 0;
@@ -86,7 +91,8 @@ class WalletBalanceProducer : public QObject, public fincept::datahub::Producer 
         bool seeded = false;
         QTimer* fncpt_heartbeat = nullptr; ///< re-polls FNCPT every ~30s
     };
-    QHash<QString, StreamSession*> streams_;  ///< keyed by pubkey
+    QHash<QString, StreamSession*> streams_; ///< keyed by pubkey
+    QSet<QString> stream_unavailable_notified_; ///< pubkeys already told "STREAM unavailable"
 };
 
 } // namespace fincept::wallet

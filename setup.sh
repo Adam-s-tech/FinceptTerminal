@@ -91,11 +91,7 @@ elif [ "$PLATFORM" = "macos" ]; then
         info "Homebrew not found. Installing..."
         /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
-    # portaudio: C dep for pyaudio; without it pyaudio's source build fails
-    # at `#include "portaudio.h"` and the analytical-library setup loops on
-    # every launch (see PythonSetupManager::install_packages — a partial
-    # install leaves venv-numpy2's marker absent → setup screen reappears).
-    brew install cmake ninja python@3.11 openssl@3 yt-dlp expat portaudio
+    brew install cmake ninja python@3.11 openssl@3 yt-dlp expat
 
     # ── Self-heal brewed Python's pyexpat on macOS 26+ ──────────────────────
     # On macOS Tahoe (Darwin 25+), the Homebrew python@3.11 / python@3.14
@@ -212,8 +208,13 @@ echo "[6/7] Configuring (preset: $PRESET)..."
 # Override the preset's default CMAKE_PREFIX_PATH with the one we just set,
 # so the build picks up the aqtinstall location rather than ~/Qt/6.8.3/...
 EXTRA_ARGS=""
-if [ "$PLATFORM" = "macos" ] && [ -d "/opt/homebrew/opt/openssl@3" ]; then
-    EXTRA_ARGS="-DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3"
+if [ "$PLATFORM" = "macos" ]; then
+    # Resolve the openssl@3 prefix from brew itself rather than hardcoding the
+    # Apple Silicon path — Intel Macs use /usr/local, not /opt/homebrew.
+    OPENSSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || true)"
+    if [ -n "$OPENSSL_PREFIX" ] && [ -d "$OPENSSL_PREFIX" ]; then
+        EXTRA_ARGS="-DOPENSSL_ROOT_DIR=$OPENSSL_PREFIX"
+    fi
 fi
 
 cmake --preset "$PRESET" -DCMAKE_PREFIX_PATH="$QT_PREFIX" $EXTRA_ARGS \

@@ -8,6 +8,7 @@
 #include <QBarCategoryAxis>
 #include <QBarSeries>
 #include <QBarSet>
+#include <QCategoryAxis>
 #include <QChart>
 #include <QChartView>
 #include <QLabel>
@@ -22,6 +23,7 @@
 #include <QValueAxis>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace fincept::screens {
@@ -40,14 +42,35 @@ static QValueAxis* make_y_axis(double y_min, double y_max, int tick_count) {
     return ax;
 }
 
-static QValueAxis* make_x_axis(int count) {
-    auto* ax = new QValueAxis();
-    ax->setRange(0, std::max(1, count - 1));
-    ax->setTickCount(std::min(8, std::max(2, count)));
+// X axis for an index-addressed period series.
+//
+// Previously this was a plain QValueAxis with labelFormat "%d", so a macro time
+// series was labelled 0, 12, 24, 36 … — the observation *index*, not the date.
+// QCategoryAxis (a QValueAxis subclass, so the existing resize handling still
+// applies) lets us keep the 0..N-1 point coordinates while printing the real
+// period string at a subset of tick positions.
+static QValueAxis* make_x_axis(const QVector<QString>& periods, int tick_count) {
+    auto* ax = new QCategoryAxis();
+    ax->setLabelsPosition(QCategoryAxis::AxisLabelsPositionOnValue);
+    const int n = periods.size();
+    // Half-step padding keeps the first labelled category from being
+    // zero-width (QCategoryAxis measures each category from the previous end).
+    ax->setRange(-0.5, std::max(0.5, n - 0.5));
+    ax->setStartValue(-0.5);
+
+    const int ticks = std::max(2, std::min(tick_count, n));
+    int last_idx = -1;
+    for (int t = 0; t < ticks; ++t) {
+        const int idx = (ticks == 1 || n == 1) ? 0 : (t * (n - 1)) / (ticks - 1);
+        if (idx == last_idx)
+            continue; // QCategoryAxis rejects duplicate category end values
+        last_idx = idx;
+        ax->append(periods[idx], idx);
+    }
+
     ax->setLabelsColor(QColor(ui::colors::TEXT_TERTIARY()));
     ax->setGridLineColor(QColor(ui::colors::BORDER_DIM()));
     ax->setLinePen(QPen(QColor(ui::colors::BORDER_MED())));
-    ax->setLabelFormat("%d");
     ax->setMinorTickCount(0);
     return ax;
 }
@@ -100,7 +123,7 @@ void DBnomicsChartWidget::build_ui() {
 
     auto* chart = new QChart();
     style_chart(chart, false);
-    chart->setTitle("NO DATA — SELECT A SERIES FROM THE LEFT PANEL");
+    chart->setTitle(tr("NO DATA — SELECT A SERIES FROM THE LEFT PANEL"));
     chart_view_->setChart(chart);
     chart_view_->setBackgroundBrush(QBrush(QColor(ui::colors::BG_BASE())));
     stack_->addWidget(chart_view_); // index 1
@@ -113,9 +136,24 @@ void DBnomicsChartWidget::build_ui() {
     spin_timer_->setInterval(120);
     connect(spin_timer_, &QTimer::timeout, this, [this]() {
         static const QString frames[] = {"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"};
-        spin_label_->setText(QString("%1  FETCHING DATA...").arg(frames[frame_ % 8]));
+        spin_label_->setText(tr("%1  FETCHING DATA...").arg(frames[frame_ % 8]));
         ++frame_;
     });
+}
+
+// ── Live language switch ─────────────────────────────────────────────────────
+
+void DBnomicsChartWidget::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void DBnomicsChartWidget::retranslateUi() {
+    // Only the empty-state title is translatable chrome; rendered series titles
+    // carry data names and are rebuilt by set_data().
+    if (showing_placeholder_ && chart_view_ && chart_view_->chart())
+        chart_view_->chart()->setTitle(tr("NO DATA — SELECT A SERIES FROM THE LEFT PANEL"));
 }
 
 void DBnomicsChartWidget::set_compact(bool compact) {
@@ -128,7 +166,7 @@ void DBnomicsChartWidget::set_compact(bool compact) {
 void DBnomicsChartWidget::set_loading(bool on) {
     if (on) {
         frame_ = 0;
-        spin_label_->setText("⣾  FETCHING DATA...");
+        spin_label_->setText(tr("%1  FETCHING DATA...").arg(QStringLiteral("⣾")));
         stack_->setCurrentIndex(0);
         spin_timer_->start();
     } else {
@@ -141,14 +179,23 @@ void DBnomicsChartWidget::clear() {
     QChart* chart = chart_view_->chart();
     chart->removeAllSeries();
     const auto axes = chart->axes();
-    for (auto* axis : axes)
+    for (auto* axis : axes) {
+        // QChart::removeAxis() hands ownership back to the caller — without a
+        // delete every axis built by set_data() leaked on each re-render.
+        // deleteLater() (P13) keeps us off the current call stack.
         chart->removeAxis(axis);
-    chart->setTitle("NO DATA — SELECT A SERIES FROM THE LEFT PANEL");
+        axis->deleteLater();
+    }
+    chart->setTitle(tr("NO DATA — SELECT A SERIES FROM THE LEFT PANEL"));
+    showing_placeholder_ = true;
 }
 
 void DBnomicsChartWidget::set_data(const QVector<services::DbnDataPoint>& series, services::DbnChartType chart_type) {
     clear();
     chart_view_->chart()->setTitle({});
+    // Past this point the chart shows either real data or a blank title — never
+    // the translatable placeholder — so retranslateUi must not re-apply it.
+    showing_placeholder_ = false;
     if (series.isEmpty())
         return;
 
@@ -225,8 +272,7 @@ void DBnomicsChartWidget::render_line_area(const QVector<services::DbnDataPoint>
         return;
 
     // ── Create axes first, add to chart, then attach series ──────────────────
-    auto* x_axis = make_x_axis(all_periods.size());
-    x_axis->setTickCount(x_tick_count(all_periods.size()));
+    auto* x_axis = make_x_axis(all_periods, x_tick_count(all_periods.size()));
     chart->addAxis(x_axis, Qt::AlignBottom);
 
     // Scan all data to determine y range before creating y_axis
@@ -306,6 +352,28 @@ void DBnomicsChartWidget::render_bar(const QVector<services::DbnDataPoint>& seri
     if (periods.isEmpty())
         return;
 
+    // Explicit Y range computed from the *valid* observations only, so the NaN
+    // gap markers below can never poison the auto-domain.
+    double y_min = 0.0; // bars are measured from zero
+    double y_max = 0.0;
+    bool any = false;
+    for (const auto& dp : series) {
+        for (const auto& obs : dp.observations) {
+            if (!obs.valid || !periods.contains(obs.period))
+                continue;
+            y_min = any ? std::min(y_min, obs.value) : std::min(0.0, obs.value);
+            y_max = any ? std::max(y_max, obs.value) : std::max(0.0, obs.value);
+            any = true;
+        }
+    }
+    if (!any) {
+        y_min = 0.0;
+        y_max = 1.0;
+    }
+    double bar_margin = (y_max - y_min) * 0.1;
+    if (bar_margin == 0.0)
+        bar_margin = std::abs(y_max) * 0.1 + 1.0;
+
     auto* bar_series = new QBarSeries();
     for (const auto& dp : series) {
         auto* bar_set = new QBarSet(dp.series_name);
@@ -314,8 +382,12 @@ void DBnomicsChartWidget::render_bar(const QVector<services::DbnDataPoint>& seri
         for (const auto& obs : dp.observations)
             if (obs.valid)
                 pv[obs.period] = obs.value;
-        for (const auto& p : periods)
-            *bar_set << (pv.contains(p) ? pv[p] : 0.0);
+        for (const auto& p : periods) {
+            // A period this series does not report is a GAP, not a zero.
+            // Zero-filling made every missing observation look like a real
+            // "0" reading — catastrophic for levels series (GDP, debt, CPI).
+            *bar_set << (pv.contains(p) ? pv[p] : std::numeric_limits<double>::quiet_NaN());
+        }
         bar_series->append(bar_set);
     }
     chart->addSeries(bar_series);
@@ -330,12 +402,7 @@ void DBnomicsChartWidget::render_bar(const QVector<services::DbnDataPoint>& seri
     chart->addAxis(x_axis, Qt::AlignBottom);
     bar_series->attachAxis(x_axis);
 
-    auto* y_axis = new QValueAxis();
-    y_axis->setLabelsColor(QColor(ui::colors::TEXT_TERTIARY()));
-    y_axis->setGridLineColor(QColor(ui::colors::BORDER_DIM()));
-    y_axis->setLabelFormat("%.4g");
-    y_axis->setTickCount(y_tick_count());
-    y_axis->setMinorTickCount(0);
+    auto* y_axis = make_y_axis(y_min - (y_min < 0.0 ? bar_margin : 0.0), y_max + bar_margin, y_tick_count());
     chart->addAxis(y_axis, Qt::AlignLeft);
     bar_series->attachAxis(y_axis);
 }
@@ -357,8 +424,7 @@ void DBnomicsChartWidget::render_scatter(const QVector<services::DbnDataPoint>& 
         return;
 
     // ── Create axes first ─────────────────────────────────────────────────────
-    auto* x_axis = make_x_axis(periods.size());
-    x_axis->setTickCount(x_tick_count(periods.size()));
+    auto* x_axis = make_x_axis(periods, x_tick_count(periods.size()));
     chart->addAxis(x_axis, Qt::AlignBottom);
 
     // Scan y range

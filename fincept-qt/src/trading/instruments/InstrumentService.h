@@ -26,8 +26,8 @@ namespace fincept::trading {
 ///   auto sym   = InstrumentService::instance().to_brsymbol("NIFTY28MAR24FUT", "NFO", "zerodha");
 ///
 /// Thread safety: refresh() runs on a QtConcurrent worker thread and posts results
-/// back to the UI thread via QMetaObject::invokeMethod. All cache reads are
-/// guarded by a QReadWriteLock (reads concurrent, writes exclusive on refresh).
+/// back to the UI thread via QMetaObject::invokeMethod. All cache reads and writes
+/// are guarded by a single QMutex (mutex_); reads and writes are mutually exclusive.
 class InstrumentService : public QObject {
     Q_OBJECT
   public:
@@ -50,8 +50,12 @@ class InstrumentService : public QObject {
     /// Load instruments from DB on a worker thread. Non-blocking.
     /// On completion, invokes callback(count) on the UI thread.
     /// If broker already loaded, callback fires immediately with cached count.
-    void load_from_db_async(const QString& broker_id,
-                            std::function<void(int)> callback = nullptr);
+    void load_from_db_async(const QString& broker_id, std::function<void(int)> callback = nullptr);
+
+    /// Synchronous DB load safe to call from a QtConcurrent worker thread.
+    /// Opens a private named QSqlDatabase connection (does NOT touch the shared
+    /// main-thread connection). Blocks until the cache is built. No-op if loaded.
+    void load_from_db_worker(const QString& broker_id);
 
     // ── Lookups (synchronous, in-memory) ─────────────────────────────────────
 
@@ -76,6 +80,14 @@ class InstrumentService : public QObject {
     QVector<Instrument> search(const QString& query, const QString& exchange, const QString& broker_id,
                                int limit = 50) const;
 
+    /// Unified cross-broker search. Returns one row per (broker, instrument)
+    /// across all `broker_ids` (empty = every broker in the catalog), with the
+    /// first broker in the list sorted first. Used by the watchlist when more
+    /// than one broker is connected. Each row carries its own broker_id +
+    /// brsymbol + token, so selection routes to that broker.
+    QVector<Instrument> search_all(const QString& query, const QString& exchange, const QStringList& broker_ids,
+                                   int limit = 50) const;
+
     // ── F&O / Options chain helpers ──────────────────────────────────────────
     //
     // All three read the in-memory cache; they expect refresh()/load_from_db()
@@ -85,8 +97,7 @@ class InstrumentService : public QObject {
     /// All option-bearing underlyings on a given exchange (default NFO).
     /// Distinct `name` field across CE/PE/FUT entries — typically yields
     /// {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", ...stock symbols...}.
-    QStringList list_underlyings(const QString& broker_id,
-                                 const QString& exchange = "NFO") const;
+    QStringList list_underlyings(const QString& broker_id, const QString& exchange = "NFO") const;
 
     /// Distinct expiries (display format "DD-MMM-YY") for a given underlying,
     /// sorted ascending by date.
@@ -96,10 +107,8 @@ class InstrumentService : public QObject {
     /// All CE+PE+FUT instruments matching (underlying, expiry). Strikes
     /// returned in ascending order. FUT entries (strike==0) are included
     /// last; chain assembly callers should filter by `instrument_type`.
-    QVector<Instrument> find_options_for_underlying(const QString& broker_id,
-                                                    const QString& underlying,
-                                                    const QString& expiry,
-                                                    const QString& exchange = "NFO") const;
+    QVector<Instrument> find_options_for_underlying(const QString& broker_id, const QString& underlying,
+                                                    const QString& expiry, const QString& exchange = "NFO") const;
 
     /// How many instruments are cached for this broker.
     int cached_count(const QString& broker_id) const;
@@ -141,6 +150,9 @@ class InstrumentService : public QObject {
     static QByteArray download_zerodha_csv(const BrokerCredentials& creds);
     static QByteArray download_angel_master_json();
     static QByteArray download_groww_csv();
+    static QByteArray download_fyers_json();
+    static QByteArray download_dhan_csv();
+    static QByteArray download_icici_csv();
 };
 
 } // namespace fincept::trading

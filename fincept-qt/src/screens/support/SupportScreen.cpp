@@ -8,6 +8,7 @@
 #include "screens/support/SupportScreen.h"
 
 #include "auth/UserApi.h"
+#include "screens/support/SupportScreen_internal.h"
 #include "ui/theme/Theme.h"
 
 #include <QDateTime>
@@ -23,7 +24,6 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
-#include "screens/support/SupportScreen_internal.h"
 
 namespace fincept::screens {
 
@@ -88,8 +88,6 @@ SupportScreen::SupportScreen(QWidget* parent) : QWidget(parent) {
         bl->setSpacing(10);
 
         // Title (text set in retranslateUi)
-        auto* icon_lbl = lbl("🎟", ui::colors::AMBER(), 14);
-        bl->addWidget(icon_lbl);
         title_lbl_ = lbl(QString(), ui::colors::TEXT_PRIMARY(), 14, true);
         bl->addWidget(title_lbl_);
 
@@ -148,30 +146,55 @@ SupportScreen::SupportScreen(QWidget* parent) : QWidget(parent) {
     connect(&ui::ThemeManager::instance(), &ui::ThemeManager::theme_changed, this,
             [this](const ui::ThemeTokens&) { apply_styles(); });
 
-    // Load categories from API, then load tickets
-    auth::UserApi::instance().get_support_categories([this](auth::ApiResponse r) {
-        if (r.success && category_combo_) {
-            // Try common response shapes: {"categories":[...]} or bare array
-            QJsonArray cats;
-            auto payload = r.data;
-            if (payload.contains("data") && payload["data"].isObject())
-                payload = payload["data"].toObject();
-            if (payload.contains("categories") && payload["categories"].isArray())
-                cats = payload["categories"].toArray();
-            else if (payload.contains("items") && payload["items"].isArray())
-                cats = payload["items"].toArray();
+    // Load categories from API, then load tickets. `this` is passed as the
+    // context so the reply handler is dropped if the screen is destroyed first.
+    auth::UserApi::instance().get_support_categories(
+        [this](auth::ApiResponse r) {
+            if (r.success) {
+                // Try common response shapes: {"categories":[...]} or bare array
+                QJsonArray cats;
+                auto payload = r.data;
+                if (payload.contains("data") && payload["data"].isObject())
+                    payload = payload["data"].toObject();
+                if (payload.contains("categories") && payload["categories"].isArray())
+                    cats = payload["categories"].toArray();
+                else if (payload.contains("items") && payload["items"].isArray())
+                    cats = payload["items"].toArray();
 
-            if (!cats.isEmpty()) {
-                category_combo_->clear();
-                for (const auto& v : cats) {
-                    QString cat = v.isString() ? v.toString() : v.toObject()["name"].toString();
-                    if (!cat.isEmpty())
-                        category_combo_->addItem(cat[0].toUpper() + cat.mid(1).replace('_', ' '), cat);
+                if (!cats.isEmpty()) {
+                    server_categories_.clear();
+                    for (const auto& v : cats) {
+                        QString cat = v.isString() ? v.toString() : v.toObject()["name"].toString();
+                        if (!cat.isEmpty())
+                            server_categories_.append({cat[0].toUpper() + cat.mid(1).replace('_', ' '), cat});
+                    }
+                    populate_category_combo();
                 }
             }
-        }
+            load_tickets();
+        },
+        this);
+}
+
+void SupportScreen::populate_category_combo() {
+    if (!category_combo_ || server_categories_.isEmpty())
+        return;
+    const QString keep = category_combo_->currentData().toString();
+    category_combo_->clear();
+    for (const auto& [display, key] : server_categories_)
+        category_combo_->addItem(display, key);
+    const int idx = category_combo_->findData(keep);
+    if (idx >= 0)
+        category_combo_->setCurrentIndex(idx);
+}
+
+void SupportScreen::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    // The constructor already fetches; this only covers returning to a panel
+    // that has been sitting in the background.
+    constexpr qint64 kStaleAfterMs = 60 * 1000;
+    if (last_load_ms_ > 0 && QDateTime::currentMSecsSinceEpoch() - last_load_ms_ > kStaleAfterMs)
         load_tickets();
-    });
 }
 
 // ── apply_styles ──────────────────────────────────────────────────────────────
@@ -224,40 +247,48 @@ void SupportScreen::changeEvent(QEvent* event) {
 
 void SupportScreen::retranslateUi() {
     // ── Top bar ───────────────────────────────────────────────────────────────
-    if (title_lbl_)      title_lbl_->setText(tr("Support"));
-    if (breadcrumb_lbl_) breadcrumb_lbl_->setText(tr("Tickets"));
-    if (status_lbl_)     status_lbl_->setText(tr("Ready"));
-    if (refresh_btn_)    refresh_btn_->setToolTip(tr("Refresh tickets"));
+    if (title_lbl_)
+        title_lbl_->setText(tr("Support"));
+    if (breadcrumb_lbl_)
+        breadcrumb_lbl_->setText(tr("Tickets"));
+    if (status_lbl_)
+        status_lbl_->setText(tr("Ready"));
+    if (refresh_btn_)
+        refresh_btn_->setToolTip(tr("Refresh tickets"));
 
     // ── Sidebar header ────────────────────────────────────────────────────────
-    if (new_ticket_btn_) new_ticket_btn_->setText(tr("＋  New Ticket"));
-    if (search_input_)   search_input_->setPlaceholderText(tr("🔍  Search tickets…"));
+    if (new_ticket_btn_)
+        new_ticket_btn_->setText(tr("＋  New Ticket"));
+    if (search_input_)
+        search_input_->setPlaceholderText(tr("Search tickets…"));
 
     // Filter combo — preserve current row across the rebuild.
     if (filter_combo_) {
         const int idx = filter_combo_->currentIndex();
         filter_combo_->blockSignals(true);
         filter_combo_->clear();
-        filter_combo_->addItems({tr("All Tickets"), tr("Open"), tr("In Progress"),
-                                 tr("Pending"), tr("Resolved"), tr("Closed")});
+        filter_combo_->addItems(
+            {tr("All Tickets"), tr("Open"), tr("In Progress"), tr("Pending"), tr("Resolved"), tr("Closed")});
         if (idx >= 0 && idx < filter_combo_->count())
             filter_combo_->setCurrentIndex(idx);
         filter_combo_->blockSignals(false);
     }
 
-    if (stat_total_caption_)     stat_total_caption_->setText(tr("Total"));
-    if (stat_open_caption_)      stat_open_caption_->setText(tr("Open"));
-    if (stat_resolved_caption_)  stat_resolved_caption_->setText(tr("Done"));
+    if (stat_total_caption_)
+        stat_total_caption_->setText(tr("Total"));
+    if (stat_open_caption_)
+        stat_open_caption_->setText(tr("Open"));
+    if (stat_resolved_caption_)
+        stat_resolved_caption_->setText(tr("Done"));
 
     // ── Content pages: rebuild from build_*() so every label/button/placeholder
     //     picks up the new language. Snapshot form text first so a language
     //     switch mid-compose doesn't discard user input. ──────────────────────
     if (content_stack_) {
         const QString saved_subject = subject_input_ ? subject_input_->text() : QString();
-        const QString saved_desc    = desc_input_    ? desc_input_->toPlainText() : QString();
-        const QString saved_reply   = msg_input_     ? msg_input_->toPlainText() : QString();
+        const QString saved_desc = desc_input_ ? desc_input_->toPlainText() : QString();
+        const QString saved_reply = msg_input_ ? msg_input_->toPlainText() : QString();
         const int saved_view = content_stack_->currentIndex();
-        const int saved_ticket = selected_ticket_id_;
 
         // Tear down the three existing pages.
         while (content_stack_->count() > 0) {
@@ -292,17 +323,34 @@ void SupportScreen::retranslateUi() {
         content_stack_->addWidget(build_empty_state());
         content_stack_->addWidget(build_create_page());
         content_stack_->addWidget(build_detail_page());
-        content_stack_->setCurrentIndex(saved_view);
+        // The rebuilt detail page is blank (its labels/messages were widgets of the
+        // old page), and keeping it on screen with a live selected_ticket_id_ would
+        // let a reply be typed and sent to a ticket the user can no longer see.
+        // Fall back to the empty state; the sidebar row re-selects on click.
+        if (saved_view == 2) {
+            selected_ticket_id_ = -1;
+            selected_is_demo_ = false;
+            selected_is_closed_ = false;
+            content_stack_->setCurrentIndex(0);
+        } else {
+            content_stack_->setCurrentIndex(saved_view);
+        }
+        populate_category_combo(); // restore the server-provided category list
 
         // Restore form text the user was composing.
-        if (subject_input_ && !saved_subject.isEmpty()) subject_input_->setText(saved_subject);
-        if (desc_input_ && !saved_desc.isEmpty())       desc_input_->setPlainText(saved_desc);
-        if (msg_input_ && !saved_reply.isEmpty())       msg_input_->setPlainText(saved_reply);
+        if (subject_input_ && !saved_subject.isEmpty())
+            subject_input_->setText(saved_subject);
+        if (desc_input_ && !saved_desc.isEmpty())
+            desc_input_->setPlainText(saved_desc);
+        if (msg_input_ && !saved_reply.isEmpty())
+            msg_input_->setPlainText(saved_reply);
 
-        // Reload tickets so sidebar row text + the currently-shown detail
-        // re-render with new translations. selected_ticket_id_ is preserved.
-        selected_ticket_id_ = saved_ticket;
-        load_tickets();
+        // Re-render the sidebar rows from the cached ticket set so their text
+        // picks up the new language — no network round-trip. (The constructor's
+        // first retranslateUi() runs before anything is cached, and the initial
+        // fetch is started once the categories reply arrives.)
+        if (!all_tickets_.isEmpty())
+            rebuild_ticket_rows();
     }
 }
 

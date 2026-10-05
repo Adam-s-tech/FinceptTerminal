@@ -2,7 +2,9 @@
 
 #include "core/logging/Logger.h"
 #include "trading/adapter/BrokerEnumMap.h"
+#include "trading/brokers/BrokerClientOrderId.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
 #include "trading/instruments/InstrumentService.h"
 
 #include <QDateTime>
@@ -41,6 +43,11 @@ static QString instrument_key(const QString& symbol, const QString& exchange, co
     if (!broker_id.isEmpty() && InstrumentService::instance().is_loaded(broker_id)) {
         auto opt = InstrumentService::instance().find(symbol, exchange, broker_id);
         if (opt) {
+            // The master row's native key ("NSE_EQ|INE002A01018", "NSE_FO|45450") lives in
+            // broker_token; instrument_token is only an FNV hash of it (stable_token), and
+            // "NSE_EQ|<hash>" is not an instrument Upstox can resolve.
+            if (!opt->broker_token.isEmpty())
+                return opt->broker_token;
             return seg + "|" + QString::number(static_cast<qlonglong>(opt->instrument_token));
         }
     }
@@ -74,8 +81,8 @@ static QString rev_product(const QString& exchange_or_seg, const QString& produc
     if (product == "I")
         return "Intraday";
     const QString s = exchange_or_seg.toUpper();
-    const bool is_deriv = s == "NSE_FO" || s == "BSE_FO" || s == "MCX_FO" || s == "NSE_CD" ||
-                          s == "NFO" || s == "BFO" || s == "MCX" || s == "CDS";
+    const bool is_deriv = s == "NSE_FO" || s == "BSE_FO" || s == "MCX_FO" || s == "NSE_CD" || s == "NFO" ||
+                          s == "BFO" || s == "MCX" || s == "CDS";
     return is_deriv ? "NRML" : "Delivery";
 }
 
@@ -116,6 +123,8 @@ QString UpstoxBroker::checked_error(const BrokerHttpResponse& resp, const QStrin
 
 // ── History interval mapping ──────────────────────────────────────────────────
 // Returns {unit, interval_str, max_days_per_chunk}
+// Upstox v3 historical-candle caps the window per request: minutes 1..15 → 1 month,
+// minutes >15 and hours → 1 quarter, days → 1 decade (weeks/months uncapped).
 struct UpstoxInterval {
     QString unit;
     QString interval;
@@ -125,8 +134,8 @@ static UpstoxInterval upstox_interval(const QString& resolution) {
     static const QMap<QString, UpstoxInterval> map = {
         {"1", {"minutes", "1", 30}},    {"1m", {"minutes", "1", 30}},   {"2", {"minutes", "2", 30}},
         {"2m", {"minutes", "2", 30}},   {"3", {"minutes", "3", 30}},    {"3m", {"minutes", "3", 30}},
-        {"5", {"minutes", "5", 30}},    {"5m", {"minutes", "5", 30}},   {"10", {"minutes", "10", 90}},
-        {"10m", {"minutes", "10", 90}}, {"15", {"minutes", "15", 90}},  {"15m", {"minutes", "15", 90}},
+        {"5", {"minutes", "5", 30}},    {"5m", {"minutes", "5", 30}},   {"10", {"minutes", "10", 30}},
+        {"10m", {"minutes", "10", 30}}, {"15", {"minutes", "15", 30}},  {"15m", {"minutes", "15", 30}},
         {"30", {"minutes", "30", 90}},  {"30m", {"minutes", "30", 90}}, {"60", {"minutes", "60", 90}},
         {"60m", {"minutes", "60", 90}}, {"1h", {"minutes", "60", 90}},  {"2h", {"hours", "2", 90}},
         {"4h", {"hours", "4", 90}},     {"D", {"days", "1", 3650}},     {"1D", {"days", "1", 3650}},
@@ -162,7 +171,7 @@ TokenExchangeResponse UpstoxBroker::exchange_token(const QString& api_key, const
 
     if (!resp.success) {
         LOG_ERROR("Upstox", "exchange_token HTTP error: " + resp.error);
-        return {false, "", "", "", "", resp.error};
+        return {.success = false, .error = resp.error};
     }
 
     // Success: {"access_token":"...","extended_token":"...","user_id":"..."}
@@ -171,15 +180,18 @@ TokenExchangeResponse UpstoxBroker::exchange_token(const QString& api_key, const
         const QString user = resp.json.value("user_id").toString();
         if (access.isEmpty()) {
             const QString err = checked_error(resp, "Empty access_token in response");
-            return {false, "", "", "", "", err};
+            return {.success = false, .error = err};
         }
+        // Upstox tokens expire daily at 03:30 IST regardless of when issued.
+        // There is no OAuth refresh token, so on expiry the user must re-auth.
+        const QString extra = with_token_expiry({}, next_ist_flush_epoch(3, 30));
         LOG_INFO("Upstox", "Token exchange OK, user=" + user);
-        return {true, access, /*refresh*/ "", user, /*additional*/ "", ""};
+        return {.success = true, .access_token = access, .user_id = user, .additional_data = extra};
     }
 
     const QString err = checked_error(resp, "Token exchange failed");
     LOG_ERROR("Upstox", "exchange_token failed: " + err);
-    return {false, "", "", "", "", err};
+    return {.success = false, .error = err};
 }
 
 // ── Place Order ───────────────────────────────────────────────────────────────
@@ -198,7 +210,9 @@ OrderPlaceResponse UpstoxBroker::place_order(const BrokerCredentials& creds, con
     body["trigger_price"] = order.stop_price;
     body["disclosed_quantity"] = 0;
     body["is_amo"] = order.amo;
-    body["tag"] = "fincept"; // visible in order history for reconciliation
+    // Stable per order intent (UnifiedOrder::client_order_id) so a retry after an 8s
+    // client-side timeout carries the same reference (see BrokerClientOrderId.h).
+    body["tag"] = client_order_ref_for(order, 20); // also visible in order history for reconciliation
 
     auto& http = BrokerHttp::instance();
     // v2 order mutations live on the HFT host; api.upstox.com returns 404 for /order/*
@@ -430,7 +444,16 @@ ApiResponse<QVector<BrokerQuote>> UpstoxBroker::get_quotes(const BrokerCredentia
     const auto data = resp.json.value("data").toObject();
     for (auto it = data.begin(); it != data.end(); ++it) {
         const auto entry = it.value().toObject();
-        const auto ohlc = entry.value("ohlc").toObject();
+        // v2 carries one `ohlc` object; the v3 OHLC endpoint instead returns `live_ohlc`
+        // (today's bar) and `prev_ohlc` (previous session — its close is the reference
+        // for the day change). Reading only `ohlc` left open/high/low/close at 0 on v3,
+        // which turned `change` into the whole last price.
+        auto ohlc = entry.value("ohlc").toObject();
+        QJsonObject prev_ohlc;
+        if (ohlc.isEmpty()) {
+            ohlc = entry.value("live_ohlc").toObject();
+            prev_ohlc = entry.value("prev_ohlc").toObject();
+        }
 
         BrokerQuote q;
         // Key may arrive as "NSE_EQ|12345" or "NSE_EQ:NHPC" depending on
@@ -449,8 +472,8 @@ ApiResponse<QVector<BrokerQuote>> UpstoxBroker::get_quotes(const BrokerCredentia
         q.open = ohlc.value("open").toDouble();
         q.high = ohlc.value("high").toDouble();
         q.low = ohlc.value("low").toDouble();
-        q.close = ohlc.value("close").toDouble();
-        q.volume = entry.value("volume").toDouble();
+        q.close = prev_ohlc.isEmpty() ? ohlc.value("close").toDouble() : prev_ohlc.value("close").toDouble();
+        q.volume = entry.value("volume").toDouble(ohlc.value("volume").toDouble());
         if (q.close > 0)
             q.change_pct = (q.ltp - q.close) / q.close * 100.0;
         q.change = q.ltp - q.close;
@@ -465,7 +488,13 @@ ApiResponse<QVector<BrokerQuote>> UpstoxBroker::get_quotes(const BrokerCredentia
 ApiResponse<QVector<BrokerCandle>> UpstoxBroker::get_history(const BrokerCredentials& creds, const QString& symbol,
                                                              const QString& resolution, const QString& from_date,
                                                              const QString& to_date) {
-    const QString ikey = instrument_key(symbol, "NSE", creds.broker_id);
+    // Support "EXCHANGE:SYMBOL" format (mirrors get_quotes); default exchange NSE
+    QString exch = "NSE", s = symbol;
+    if (symbol.contains(':')) {
+        exch = symbol.section(':', 0, 0);
+        s = symbol.section(':', 1);
+    }
+    const QString ikey = instrument_key(s, exch, creds.broker_id);
     const auto iv = upstox_interval(resolution);
 
     // Chunk the date range if needed (Upstox has per-interval max window limits)
@@ -510,21 +539,24 @@ ApiResponse<QVector<BrokerCandle>> UpstoxBroker::get_history(const BrokerCredent
             BrokerCandle candle;
             // v3 returns ISO8601 string; some endpoints/snapshots return epoch ms.
             // Try string first, fall back to numeric.
+            // BrokerCandle.timestamp contract is MILLISECONDS (seconds → candles in Jan 1970).
             const QString ts_str = c[0].toString();
             if (!ts_str.isEmpty()) {
-                candle.timestamp = QDateTime::fromString(ts_str, Qt::ISODate).toSecsSinceEpoch();
+                candle.timestamp = QDateTime::fromString(ts_str, Qt::ISODate).toMSecsSinceEpoch();
                 if (candle.timestamp == 0)
-                    candle.timestamp = QDateTime::fromString(ts_str, Qt::ISODateWithMs).toSecsSinceEpoch();
+                    candle.timestamp = QDateTime::fromString(ts_str, Qt::ISODateWithMs).toMSecsSinceEpoch();
             }
             if (candle.timestamp == 0) {
-                const qint64 ms = c[0].toVariant().toLongLong();
-                candle.timestamp = ms > 1'000'000'000'000LL ? ms / 1000 : ms;
+                const qint64 v = c[0].toVariant().toLongLong();
+                candle.timestamp = v > 1'000'000'000'000LL ? v : v * 1000; // seconds → ms
             }
             candle.open = c[1].toDouble();
             candle.high = c[2].toDouble();
             candle.low = c[3].toDouble();
             candle.close = c[4].toDouble();
             candle.volume = c[5].toDouble();
+            if (c.size() > 6)
+                candle.oi = c[6].toDouble();
             all_candles.append(candle);
         }
 
@@ -537,6 +569,196 @@ ApiResponse<QVector<BrokerCandle>> UpstoxBroker::get_history(const BrokerCredent
 
     int64_t ts = now_ts();
     return {true, all_candles, "", ts};
+}
+
+// ── Multi-Quote ──────────────────────────────────────────────────────────────
+// GET /v2/market-quote/quotes?instrument_key=NSE_EQ|INE002A01018,BSE_EQ|...
+// Full quote endpoint returns last_price, ohlc, volume, net_change, depth.
+// Batches in chunks of 500 (Upstox limit).
+ApiResponse<QVector<BrokerQuote>> UpstoxBroker::get_multi_quotes(const BrokerCredentials& creds,
+                                                                 const QVector<QPair<QString, QString>>& symbols) {
+
+    QVector<BrokerQuote> all_quotes;
+    constexpr int kBatchSize = 500;
+
+    for (int start = 0; start < symbols.size(); start += kBatchSize) {
+        int end = std::min<int>(start + kBatchSize, static_cast<int>(symbols.size()));
+
+        QStringList keys;
+        keys.reserve(end - start);
+        for (int i = start; i < end; ++i) {
+            const auto& [sym, exch] = symbols[i];
+            keys.append(instrument_key(sym, exch.isEmpty() ? "NSE" : exch, creds.broker_id));
+        }
+
+        const QString url = "https://api.upstox.com/v2/market-quote/quotes?instrument_key=" + keys.join(",");
+        auto& http = BrokerHttp::instance();
+        auto resp = http.get(url, auth_headers(creds));
+        int64_t ts = now_ts();
+
+        if (!resp.success || resp.json.value("status").toString() != "success")
+            return {false, std::nullopt, checked_error(resp, "get_multi_quotes failed"), ts};
+
+        const auto data = resp.json.value("data").toObject();
+        for (auto it = data.constBegin(); it != data.constEnd(); ++it) {
+            const auto entry = it.value().toObject();
+            const auto ohlc = entry.value("ohlc").toObject();
+
+            BrokerQuote q;
+            q.symbol = entry.value("symbol").toString();
+            if (q.symbol.isEmpty()) {
+                const QString key = it.key();
+                if (key.contains('|'))
+                    q.symbol = key.section('|', 1);
+                else
+                    q.symbol = key;
+            }
+            q.ltp = entry.value("last_price").toDouble();
+            q.open = ohlc.value("open").toDouble();
+            q.high = ohlc.value("high").toDouble();
+            q.low = ohlc.value("low").toDouble();
+            q.close = ohlc.value("close").toDouble();
+            q.volume = entry.value("volume").toDouble();
+            q.change = entry.value("net_change").toDouble();
+            q.change_pct = q.close > 0 ? (q.change / q.close) * 100.0 : 0.0;
+
+            // Best bid/ask from depth
+            const auto depth = entry.value("depth").toObject();
+            const auto buy_arr = depth.value("buy").toArray();
+            const auto sell_arr = depth.value("sell").toArray();
+            if (!buy_arr.isEmpty()) {
+                auto b0 = buy_arr.first().toObject();
+                q.bid = b0.value("price").toDouble();
+                q.bid_size = b0.value("quantity").toDouble();
+            }
+            if (!sell_arr.isEmpty()) {
+                auto s0 = sell_arr.first().toObject();
+                q.ask = s0.value("price").toDouble();
+                q.ask_size = s0.value("quantity").toDouble();
+            }
+
+            q.oi = static_cast<qint64>(entry.value("oi").toDouble());
+            q.timestamp = now_ts();
+            all_quotes.append(q);
+        }
+    }
+
+    return {true, all_quotes, "", now_ts()};
+}
+
+// ── Market Depth ─────────────────────────────────────────────────────────────
+// GET /v2/market-quote/quotes?instrument_key=... — parse the depth field
+// Returns 5 levels of bid/ask with price, quantity, orders.
+ApiResponse<MarketDepth> UpstoxBroker::get_market_depth(const BrokerCredentials& creds, const QString& symbol,
+                                                        const QString& exchange) {
+
+    const QString exch = exchange.isEmpty() ? "NSE" : exchange;
+    const QString ikey = instrument_key(symbol, exch, creds.broker_id);
+    const QString url = "https://api.upstox.com/v2/market-quote/quotes?instrument_key=" + ikey;
+
+    auto& http = BrokerHttp::instance();
+    auto resp = http.get(url, auth_headers(creds));
+    int64_t ts = now_ts();
+
+    if (!resp.success || resp.json.value("status").toString() != "success")
+        return {false, std::nullopt, checked_error(resp, "get_market_depth failed"), ts};
+
+    const auto data = resp.json.value("data").toObject();
+    if (data.isEmpty())
+        return {false, std::nullopt, "No data returned for " + ikey, ts};
+
+    // Take the first (and only) entry
+    const auto entry = data.begin()->toObject();
+
+    MarketDepth md;
+    md.symbol = symbol;
+    md.exchange = exch;
+    md.ltp = entry.value("last_price").toDouble();
+    md.volume = entry.value("volume").toDouble();
+    md.oi = entry.value("oi").toDouble();
+
+    const auto depth = entry.value("depth").toObject();
+
+    const auto buy_arr = depth.value("buy").toArray();
+    for (const auto& level : buy_arr) {
+        auto lv = level.toObject();
+        DepthLevel dl;
+        dl.price = lv.value("price").toDouble();
+        dl.quantity = lv.value("quantity").toInt();
+        dl.orders = lv.value("orders").toInt();
+        md.bids.append(dl);
+    }
+
+    const auto sell_arr = depth.value("sell").toArray();
+    for (const auto& level : sell_arr) {
+        auto lv = level.toObject();
+        DepthLevel dl;
+        dl.price = lv.value("price").toDouble();
+        dl.quantity = lv.value("quantity").toInt();
+        dl.orders = lv.value("orders").toInt();
+        md.asks.append(dl);
+    }
+
+    return {true, md, "", ts};
+}
+
+// ============================================================================
+// Pre-trade margin calculator — POST /v2/charges/margin  (native)
+// Mirrors OpenAlgo broker/upstox/api/margin_api.py + mapping/margin_data.py.
+// Payload: {"instruments":[{instrument_key, quantity, transaction_type,
+//                           product, price?}]}
+// Response: {"status":"success","data":{required_margin, final_margin,
+//            margins:[{span_margin, exposure_margin}, ...]}}
+// ============================================================================
+ApiResponse<OrderMargin> UpstoxBroker::get_order_margins(const BrokerCredentials& creds, const UnifiedOrder& order) {
+    int64_t ts = now_ts();
+
+    QJsonObject leg;
+    leg["instrument_key"] = instrument_key(order.symbol, order.exchange, creds.broker_id);
+    leg["quantity"] = static_cast<int>(order.quantity);
+    leg["transaction_type"] = order.side == OrderSide::Buy ? "BUY" : "SELL";
+    leg["product"] = upstox_enum_map().product_or(order.product_type, "I");
+    if (order.price > 0)
+        leg["price"] = order.price;
+
+    QJsonObject payload{{"instruments", QJsonArray{leg}}};
+
+    auto resp =
+        BrokerHttp::instance().post_json("https://api.upstox.com/v2/charges/margin", payload, auth_headers(creds));
+    if (!resp.success)
+        return {false, std::nullopt, checked_error(resp, "Network error"), ts};
+    if (is_token_expired(resp))
+        return {false, std::nullopt, "[TOKEN_EXPIRED]", ts};
+    if (resp.json.value("status").toString() != "success")
+        return {false, std::nullopt, checked_error(resp, "Margin calculation failed"), ts};
+
+    const auto data = resp.json.value("data").toObject();
+
+    OrderMargin m;
+    m.symbol = order.symbol;
+    m.exchange = order.exchange;
+    m.side = order.side == OrderSide::Buy ? "BUY" : "SELL";
+    m.quantity = order.quantity;
+    m.price = order.price;
+    m.total = data.value("required_margin").toDouble();
+
+    // Aggregate SPAN / Exposure across instrument breakdown entries.
+    double span = 0.0, exposure = 0.0;
+    for (const auto& v : data.value("margins").toArray()) {
+        const auto mo = v.toObject();
+        span += mo.value("span_margin").toDouble();
+        exposure += mo.value("exposure_margin").toDouble();
+    }
+    m.var_margin = span; // SPAN (F&O); 0 for cash
+    m.elm = exposure;    // Exposure margin
+    m.cash = m.total - span - exposure;
+    if (m.cash < 0.0)
+        m.cash = 0.0;
+
+    const double notional = order.price * order.quantity;
+    if (m.total > 0.0 && notional > 0.0)
+        m.leverage = notional / m.total;
+    return {true, m, "", ts};
 }
 
 } // namespace fincept::trading

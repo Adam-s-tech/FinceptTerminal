@@ -1,4 +1,4 @@
-// MetaTools.cpp — Self-introspection tools (tool.list, tool.describe, mcp.health).
+// MetaTools.cpp — Self-introspection tools (tool_list, tool_describe, mcp_health).
 
 #include "mcp/tools/MetaTools.h"
 
@@ -27,61 +27,60 @@ static constexpr const char* TAG = "MetaTools";
 //
 // Why file-local statics rather than a singleton service: the MCP system
 // already has too many singletons. These counters are read by exactly one
-// consumer (mcp.health) and written by exactly two writers (tool.list and
-// tool.describe). A class wrapper would be overhead.
+// consumer (mcp_health) and written by exactly two writers (tool_list and
+// tool_describe). A class wrapper would be overhead.
 //
 // Thread safety: tool handlers run on QtConcurrent worker threads. Atomics
 // for scalar counters; mutex+QHash for the per-tool surface map.
 // ─────────────────────────────────────────────────────────────────────────
 namespace telemetry {
-    static std::atomic<qint64> g_tool_list_calls{0};
-    static std::atomic<qint64> g_tool_list_empty_results{0};
-    static std::atomic<qint64> g_tool_describe_calls{0};
-    static std::atomic<qint64> g_tool_describe_misses{0};
+static std::atomic<qint64> g_tool_list_calls{0};
+static std::atomic<qint64> g_tool_list_empty_results{0};
+static std::atomic<qint64> g_tool_describe_calls{0};
+static std::atomic<qint64> g_tool_describe_misses{0};
 
-    static QMutex g_surface_mutex;
-    static QHash<QString, qint64> g_surfaces; // tool name → times surfaced by tool.list
+static QMutex g_surface_mutex;
+static QHash<QString, qint64> g_surfaces; // tool name → times surfaced by tool_list
 
-    static void record_surfaces(const QStringList& names) {
-        if (names.isEmpty())
-            return;
-        QMutexLocker lock(&g_surface_mutex);
-        for (const auto& n : names)
-            g_surfaces[n]++;
-    }
+static void record_surfaces(const QStringList& names) {
+    if (names.isEmpty())
+        return;
+    QMutexLocker lock(&g_surface_mutex);
+    for (const auto& n : names)
+        g_surfaces[n]++;
+}
 
-    static QJsonObject snapshot() {
-        QJsonObject out;
-        out["tool_list_calls"] = g_tool_list_calls.load();
-        out["tool_list_empty_results"] = g_tool_list_empty_results.load();
-        out["tool_describe_calls"] = g_tool_describe_calls.load();
-        out["tool_describe_misses"] = g_tool_describe_misses.load();
+static QJsonObject snapshot() {
+    QJsonObject out;
+    out["tool_list_calls"] = g_tool_list_calls.load();
+    out["tool_list_empty_results"] = g_tool_list_empty_results.load();
+    out["tool_describe_calls"] = g_tool_describe_calls.load();
+    out["tool_describe_misses"] = g_tool_describe_misses.load();
 
-        // Top-20 most-surfaced tools — useful for spotting which tools the
-        // LLM keeps finding (= valuable) vs. which never surface (= dead
-        // descriptions that need rewriting).
-        QMutexLocker lock(&g_surface_mutex);
-        QList<QPair<QString, qint64>> ranked;
-        ranked.reserve(g_surfaces.size());
-        for (auto it = g_surfaces.constBegin(); it != g_surfaces.constEnd(); ++it)
-            ranked.append({it.key(), it.value()});
-        std::sort(ranked.begin(), ranked.end(),
-                  [](const auto& a, const auto& b) { return a.second > b.second; });
+    // Top-20 most-surfaced tools — useful for spotting which tools the
+    // LLM keeps finding (= valuable) vs. which never surface (= dead
+    // descriptions that need rewriting).
+    QMutexLocker lock(&g_surface_mutex);
+    QList<QPair<QString, qint64>> ranked;
+    ranked.reserve(g_surfaces.size());
+    for (auto it = g_surfaces.constBegin(); it != g_surfaces.constEnd(); ++it)
+        ranked.append({it.key(), it.value()});
+    std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 
-        QJsonArray top;
-        const int kCap = 20;
-        for (int i = 0; i < ranked.size() && i < kCap; ++i)
-            top.append(QJsonObject{{"name", ranked[i].first}, {"surfaces", ranked[i].second}});
-        out["top_surfaced"] = top;
-        out["unique_tools_ever_surfaced"] = static_cast<int>(g_surfaces.size());
-        return out;
-    }
+    QJsonArray top;
+    const int kCap = 20;
+    for (int i = 0; i < ranked.size() && i < kCap; ++i)
+        top.append(QJsonObject{{"name", ranked[i].first}, {"surfaces", ranked[i].second}});
+    out["top_surfaced"] = top;
+    out["unique_tools_ever_surfaced"] = static_cast<int>(g_surfaces.size());
+    return out;
+}
 } // namespace telemetry
 
 std::vector<ToolDef> get_meta_tools() {
     std::vector<ToolDef> tools;
 
-    // ── tool.list ───────────────────────────────────────────────────────
+    // ── tool_list ────────────────────────────────────────────────────────
     //
     // Tool RAG entry point. Replaces the old regex-over-everything variant
     // with BM25 semantic ranking — proven by Anthropic's own Tool Search
@@ -91,25 +90,28 @@ std::vector<ToolDef> get_meta_tools() {
     // The LLM is expected to call this with a NATURAL LANGUAGE query
     // describing the action it wants to perform. Multi-intent requests
     // ("get news on AAPL and add to watchlist") should issue MULTIPLE
-    // tool.list calls, one per intent — Anthropic's recommended pattern.
+    // tool_list calls, one per intent — Anthropic's recommended pattern.
     {
         ToolDef t;
-        t.name = "tool.list";
-        t.description =
-            "Search the tool catalog by natural-language query (BM25). Returns the top-K most "
-            "relevant tools as {name, category, description, destructive, score}. "
-            "Use this whenever you need a capability you don't already have a tool for. "
-            "For multi-intent requests, call multiple times — once per intent. "
-            "After picking a tool, call tool.describe(name) for the full input schema.";
+        t.name = "tool_list";
+        t.description = "Search the tool catalog by natural-language query (BM25). Returns the top-K most "
+                        "relevant tools as {name, category, description, destructive, score}. "
+                        "Use this whenever you need a capability you don't already have a tool for. "
+                        "For multi-intent requests, call multiple times — once per intent. "
+                        "After picking a tool, call tool_describe(name) for the full input schema.";
         t.category = "meta";
         t.input_schema = ToolSchemaBuilder()
-            .string("query", "Natural-language description of the capability you need "
-                             "(e.g. 'draft a research report', 'place a paper trade', "
-                             "'fetch latest news for AAPL')").required().length(1, 256)
-            .string("category", "Optional category filter (e.g. 'markets', 'report-builder', "
-                                "'paper-trading'). Leave empty to search all categories.")
-            .integer("top_k", "Maximum tools returned (1-20)").default_int(5).between(1, 20)
-            .build();
+                             .string("query", "Natural-language description of the capability you need "
+                                              "(e.g. 'draft a research report', 'place a paper trade', "
+                                              "'fetch latest news for AAPL')")
+                             .required()
+                             .length(1, 256)
+                             .string("category", "Optional category filter (e.g. 'markets', 'report-builder', "
+                                                 "'paper-trading'). Leave empty to search all categories.")
+                             .integer("top_k", "Maximum tools returned (1-20)")
+                             .default_int(5)
+                             .between(1, 20)
+                             .build();
         t.handler = [](const QJsonObject& args) -> ToolResult {
             const QString query = args["query"].toString().trimmed();
             const QString category = args["category"].toString().trimmed();
@@ -120,8 +122,7 @@ std::vector<ToolDef> get_meta_tools() {
             if (query.isEmpty())
                 return ToolResult::fail("Empty query — pass a natural-language description.");
 
-            const auto matches =
-                ToolRetriever::instance().search(query, top_k, category);
+            const auto matches = ToolRetriever::instance().search(query, top_k, category);
 
             if (matches.empty())
                 telemetry::g_tool_list_empty_results.fetch_add(1);
@@ -154,16 +155,18 @@ std::vector<ToolDef> get_meta_tools() {
         tools.push_back(std::move(t));
     }
 
-    // ── tool.describe ───────────────────────────────────────────────────
+    // ── tool_describe ────────────────────────────────────────────────────
     {
         ToolDef t;
-        t.name = "tool.describe";
+        t.name = "tool_describe";
         t.description = "Return the full description and JSON Schema for one MCP tool. "
-                        "Use after tool.list to fetch the parameter shape before calling.";
+                        "Use after tool_list to fetch the parameter shape before calling.";
         t.category = "meta";
         t.input_schema = ToolSchemaBuilder()
-            .string("name", "Bare tool name (without server_id__ prefix)").required().length(1, 128)
-            .build();
+                             .string("name", "Bare tool name (without server_id__ prefix)")
+                             .required()
+                             .length(1, 128)
+                             .build();
         t.handler = [](const QJsonObject& args) -> ToolResult {
             const QString name = args["name"].toString();
             telemetry::g_tool_describe_calls.fetch_add(1);
@@ -171,13 +174,23 @@ std::vector<ToolDef> get_meta_tools() {
             // O(1) snapshot lookup — previously linear-scanned the full
             // catalog while re-serialising every input_schema (~3 ms p95).
             if (auto tool = McpProvider::instance().find_tool(name)) {
-                return ToolResult::ok_data(QJsonObject{
+                QJsonObject out{
                     {"name", tool->name},
                     {"category", tool->category},
                     {"description", tool->description},
                     {"input_schema", tool->input_schema},
                     {"server_id", tool->server_id},
-                });
+                };
+                // tool_list already flags these; tool_describe is the call a model makes right
+                // before using the tool, and a refused destructive call costs it a whole round.
+                // Tell it up front that this one needs the user's "destructive tools" grant.
+                if (tool->is_destructive) {
+                    out["destructive"] = true;
+                    out["note"] = QStringLiteral("State-changing tool: it only runs when the user has enabled "
+                                                 "destructive AI tools in Settings > Security; otherwise the call is "
+                                                 "refused. Tell the user what you intend to do before calling it.");
+                }
+                return ToolResult::ok_data(out);
             }
             telemetry::g_tool_describe_misses.fetch_add(1);
             return ToolResult::fail("Tool not found: " + name);
@@ -185,10 +198,10 @@ std::vector<ToolDef> get_meta_tools() {
         tools.push_back(std::move(t));
     }
 
-    // ── mcp.health ──────────────────────────────────────────────────────
+    // ── mcp_health ───────────────────────────────────────────────────────
     {
         ToolDef t;
-        t.name = "mcp.health";
+        t.name = "mcp_health";
         t.description = "Snapshot of MCP system health: internal tool counts by category, "
                         "external server statuses + last errors, and DataHub topic activity. "
                         "Useful for agents to self-diagnose ('why is my tool failing?').";
@@ -198,7 +211,8 @@ std::vector<ToolDef> get_meta_tools() {
             const auto enabled_count = McpProvider::instance().tool_count();
 
             QHash<QString, int> by_cat;
-            for (const auto& t : all) by_cat[t.category]++;
+            for (const auto& t : all)
+                by_cat[t.category]++;
             QJsonObject categories;
             for (auto it = by_cat.constBegin(); it != by_cat.constEnd(); ++it)
                 categories[it.key().isEmpty() ? "(uncategorised)" : it.key()] = it.value();

@@ -8,12 +8,41 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QTabBar>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <cmath>
 
 namespace fincept::screens {
+
+namespace {
+
+/// Recursively empties a layout, destroying the widgets it owns.
+///
+/// `delete panel->layout()` alone does NOT destroy child widgets — they stay
+/// parented to the panel, keep their last geometry and keep painting, so every
+/// rebuild stacked another full set of cards + tables on top of the previous
+/// one (a visible artefact and an unbounded leak). Always drain the layout
+/// first.
+void clear_layout(QLayout* layout) {
+    if (!layout)
+        return;
+    QLayoutItem* item = nullptr;
+    while ((item = layout->takeAt(0)) != nullptr) {
+        if (auto* w = item->widget()) {
+            w->hide();
+            w->deleteLater();
+        } else if (auto* child = item->layout()) {
+            clear_layout(child);
+        }
+        // `item` IS the nested layout when item->layout() is non-null, so a
+        // single delete covers both cases — never delete both.
+        delete item;
+    }
+}
+
+} // namespace
 
 ReportsView::ReportsView(QWidget* parent) : QWidget(parent) {
     build_ui();
@@ -24,6 +53,9 @@ void ReportsView::build_ui() {
     layout->setContentsMargins(0, 0, 0, 0);
 
     tabs_ = new QTabWidget;
+    tabs_->tabBar()->setElideMode(Qt::ElideNone);
+    tabs_->tabBar()->setExpanding(false);
+    tabs_->tabBar()->setUsesScrollButtons(false);
     tabs_->setDocumentMode(true);
     tabs_->setStyleSheet(QString("QTabWidget::pane { border:0; background:%1; }"
                                  "QTabBar::tab { background:%2; color:%3; padding:6px 14px; border:0;"
@@ -51,7 +83,8 @@ void ReportsView::build_ui() {
 
     txn_table_ = new QTableWidget;
     txn_table_->setColumnCount(7);
-    txn_table_->setHorizontalHeaderLabels({tr("DATE"), tr("SYMBOL"), tr("TYPE"), tr("QTY"), tr("PRICE"), tr("TOTAL"), tr("NOTES")});
+    txn_table_->setHorizontalHeaderLabels(
+        {tr("DATE"), tr("SYMBOL"), tr("TYPE"), tr("QTY"), tr("PRICE"), tr("TOTAL"), tr("NOTES")});
     txn_table_->setSelectionMode(QAbstractItemView::NoSelection);
     txn_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     txn_table_->setShowGrid(false);
@@ -85,7 +118,8 @@ void ReportsView::build_ui() {
 
     attr_table_ = new QTableWidget;
     attr_table_->setColumnCount(6);
-    attr_table_->setHorizontalHeaderLabels({tr("SYMBOL"), tr("WEIGHT"), tr("RETURN"), tr("CONTRIBUTION"), tr("P&L"), tr("STATUS")});
+    attr_table_->setHorizontalHeaderLabels(
+        {tr("SYMBOL"), tr("WEIGHT"), tr("RETURN"), tr("CONTRIBUTION"), tr("P&L"), tr("STATUS")});
     attr_table_->setSelectionMode(QAbstractItemView::NoSelection);
     attr_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     attr_table_->setShowGrid(false);
@@ -121,12 +155,17 @@ void ReportsView::changeEvent(QEvent* event) {
 
 void ReportsView::retranslateUi() {
     if (tabs_) {
-        if (summary_tab_index_ >= 0) tabs_->setTabText(summary_tab_index_, tr("SUMMARY"));
-        if (txn_tab_index_ >= 0)     tabs_->setTabText(txn_tab_index_, tr("TRANSACTIONS"));
-        if (attr_tab_index_ >= 0)    tabs_->setTabText(attr_tab_index_, tr("ATTRIBUTION"));
+        if (summary_tab_index_ >= 0)
+            tabs_->setTabText(summary_tab_index_, tr("SUMMARY"));
+        if (txn_tab_index_ >= 0)
+            tabs_->setTabText(txn_tab_index_, tr("TRANSACTIONS"));
+        if (attr_tab_index_ >= 0)
+            tabs_->setTabText(attr_tab_index_, tr("ATTRIBUTION"));
     }
-    if (txn_title_)  txn_title_->setText(tr("TRANSACTION HISTORY"));
-    if (attr_title_) attr_title_->setText(tr("PERFORMANCE ATTRIBUTION"));
+    if (txn_title_)
+        txn_title_->setText(tr("TRANSACTION HISTORY"));
+    if (attr_title_)
+        attr_title_->setText(tr("PERFORMANCE ATTRIBUTION"));
 
     if (txn_table_)
         txn_table_->setHorizontalHeaderLabels(
@@ -144,8 +183,10 @@ void ReportsView::retranslateUi() {
 }
 
 void ReportsView::update_summary() {
-    if (summary_panel_->layout())
-        delete summary_panel_->layout();
+    if (auto* old = summary_panel_->layout()) {
+        clear_layout(old);
+        delete old;
+    }
 
     auto* layout = new QVBoxLayout(summary_panel_);
     layout->setContentsMargins(16, 12, 16, 12);
@@ -168,8 +209,8 @@ void ReportsView::update_summary() {
         cl->setSpacing(2);
 
         auto* lbl = new QLabel(label);
-        lbl->setStyleSheet(
-            QString("color:%1; font-size:8px; font-weight:700; letter-spacing:0.5px;").arg(ui::colors::TEXT_TERTIARY()));
+        lbl->setStyleSheet(QString("color:%1; font-size:8px; font-weight:700; letter-spacing:0.5px;")
+                               .arg(ui::colors::TEXT_TERTIARY()));
         cl->addWidget(lbl);
 
         auto* val = new QLabel(value);
@@ -208,7 +249,8 @@ void ReportsView::update_summary() {
 
     auto* breakdown = new QTableWidget;
     breakdown->setColumnCount(6);
-    breakdown->setHorizontalHeaderLabels({tr("SYMBOL"), tr("QTY"), tr("AVG COST"), tr("CURRENT"), tr("P&L"), tr("WEIGHT")});
+    breakdown->setHorizontalHeaderLabels(
+        {tr("SYMBOL"), tr("QTY"), tr("AVG COST"), tr("CURRENT"), tr("P&L"), tr("WEIGHT")});
     breakdown->setSelectionMode(QAbstractItemView::NoSelection);
     breakdown->setEditTriggers(QAbstractItemView::NoEditTriggers);
     breakdown->setShowGrid(false);

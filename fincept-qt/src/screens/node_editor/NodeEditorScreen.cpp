@@ -2,6 +2,8 @@
 
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
+#include "screens/node_editor/NodeEditorCommands.h"
+#include "screens/node_editor/canvas/EdgeItem.h"
 #include "screens/node_editor/canvas/MiniMap.h"
 #include "screens/node_editor/canvas/NodeCanvas.h"
 #include "screens/node_editor/canvas/NodeItem.h"
@@ -11,6 +13,7 @@
 #include "screens/node_editor/properties/NodePropertiesPanel.h"
 #include "screens/node_editor/toolbar/DeployDialog.h"
 #include "screens/node_editor/toolbar/NodeEditorToolbar.h"
+#include "services/cloud/CloudSyncEngine.h"
 #include "services/workflow/NodeRegistry.h"
 #include "services/workflow/WorkflowService.h"
 #include "ui/theme/Theme.h"
@@ -27,6 +30,7 @@
 #include <QSet>
 #include <QSettings>
 #include <QSplitter>
+#include <QTime>
 #include <QUuid>
 #include <QVBoxLayout>
 
@@ -53,6 +57,8 @@ void NodeEditorScreen::showEvent(QShowEvent* event) {
     QApplication::style()->polish(this);
 
     auto_save_timer_->start();
+    // Rate-gated pull of cloud workflows on screen entry (no-op when sync is off).
+    fincept::services::cloud::CloudSyncEngine::instance().request_pull(QStringLiteral("workflow"));
     if (minimap_)
         minimap_->start_tracking();
     // Resume edge animations if execution is in progress
@@ -73,7 +79,10 @@ void NodeEditorScreen::showEvent(QShowEvent* event) {
     }
     if (settings.contains("last_workflow_id")) {
         QString last_id = settings.value("last_workflow_id").toString();
-        if (!last_id.isEmpty() && current_workflow_id_.isEmpty())
+        // Only restore into a blank editor. A template just loaded (id cleared, canvas
+        // full) or an import must not be silently replaced by the last saved workflow
+        // the moment the user switches tabs and comes back.
+        if (!last_id.isEmpty() && current_workflow_id_.isEmpty() && scene_->is_empty())
             WorkflowService::instance().load_workflow(last_id);
     }
     settings.endGroup();
@@ -111,15 +120,49 @@ void NodeEditorScreen::keyPressEvent(QKeyEvent* event) {
         undo_stack_->redo();
         event->accept();
     } else if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
-        // Delete selected nodes
+        // Delete selected nodes. Now undoable (RemoveNodesCommand restores the
+        // nodes AND every edge that touched them), so no confirmation prompt —
+        // Ctrl+Z is the recovery path.
         QStringList ids;
         for (auto* item : scene_->selectedItems()) {
             if (auto* node = dynamic_cast<NodeItem*>(item))
                 ids.append(node->node_def().id);
         }
-        for (const auto& id : ids)
-            scene_->remove_node(id);
-        properties_->clear();
+        if (!ids.isEmpty()) {
+            push_remove_nodes(ids, ids.size() > 1 ? tr("Delete %1 nodes").arg(ids.size()) : tr("Delete node"));
+            event->accept();
+            return;
+        }
+        // Nothing but edges selected → delete those instead.
+        QStringList edge_ids;
+        for (auto* item : scene_->selectedItems()) {
+            if (auto* edge = dynamic_cast<EdgeItem*>(item))
+                edge_ids.append(edge->edge_id());
+        }
+        for (const auto& eid : edge_ids) {
+            const EdgeDef ed = scene_->edge_def(eid);
+            if (!ed.id.isEmpty())
+                undo_stack_->push(new commands::RemoveEdgeCommand(scene_, ed));
+        }
+        event->accept();
+    } else if (event->matches(QKeySequence::Save)) {
+        on_save_workflow();
+        event->accept();
+    } else if (event->key() == Qt::Key_D && (event->modifiers() & Qt::ControlModifier)) {
+        // Ctrl+D — duplicate the selection (same offset/rename as the context menu).
+        QVector<NodeDef> copies;
+        for (auto* item : scene_->selectedItems()) {
+            auto* node = dynamic_cast<NodeItem*>(item);
+            if (!node)
+                continue;
+            NodeDef copy = node->node_def();
+            copy.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            copy.x += 40;
+            copy.y += 40;
+            copy.name += " (copy)";
+            copies.append(copy);
+        }
+        push_add_nodes(copies, {}, tr("Duplicate %1 node(s)").arg(copies.size()));
         event->accept();
     } else if (event->matches(QKeySequence::SelectAll)) {
         // Ctrl+A — select all nodes
@@ -153,6 +196,8 @@ void NodeEditorScreen::keyPressEvent(QKeyEvent* event) {
         }
 
         QMap<QString, QString> id_remap;
+        QVector<NodeDef> pasted_nodes;
+        QVector<EdgeDef> pasted_edges;
         for (const auto& nd : clipboard_nodes_) {
             NodeDef copy = nd;
             QString new_id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -161,11 +206,7 @@ void NodeEditorScreen::keyPressEvent(QKeyEvent* event) {
             copy.x += 40;
             copy.y += 40;
             copy.name = nd.name + " (copy)";
-
-            auto& reg = NodeRegistry::instance();
-            const auto* td = reg.find(copy.type);
-            if (td)
-                scene_->add_node(copy, *td);
+            pasted_nodes.append(copy);
         }
         for (const auto& ed : clipboard_edges_) {
             EdgeDef copy = ed;
@@ -173,9 +214,11 @@ void NodeEditorScreen::keyPressEvent(QKeyEvent* event) {
             copy.source_node = id_remap.value(ed.source_node);
             copy.target_node = id_remap.value(ed.target_node);
             if (!copy.source_node.isEmpty() && !copy.target_node.isEmpty())
-                scene_->add_edge(copy);
+                pasted_edges.append(copy);
         }
-        LOG_INFO("NodeEditor", QString("Pasted %1 nodes").arg(clipboard_nodes_.size()));
+        // Single undoable step for the whole paste, wiring included.
+        push_add_nodes(pasted_nodes, pasted_edges, tr("Paste %1 node(s)").arg(pasted_nodes.size()));
+        LOG_INFO("NodeEditor", QString("Pasted %1 nodes").arg(pasted_nodes.size()));
         event->accept();
     } else {
         QWidget::keyPressEvent(event);
@@ -251,16 +294,70 @@ void NodeEditorScreen::wire_signals() {
         copy.x += 40;
         copy.y += 40;
         copy.name += " (copy)";
-        auto& reg = NodeRegistry::instance();
-        const auto* td = reg.find(copy.type);
-        if (td)
-            scene_->add_node(copy, *td);
+        push_add_nodes({copy}, {}, tr("Duplicate %1").arg(item->node_def().name));
     });
+
+    // ── Undoable-intent signals from the canvas ────────────────────────────
+    // NodeScene announces user-initiated deletes/connects instead of applying
+    // them, so every structural mutation lands on the QUndoStack.
+    connect(scene_, &NodeScene::node_delete_requested, this, &NodeEditorScreen::on_delete_node);
+    connect(scene_, &NodeScene::edge_delete_requested, this, [this](const QString& edge_id) {
+        const EdgeDef ed = scene_->edge_def(edge_id);
+        if (ed.id.isEmpty()) {
+            scene_->remove_edge(edge_id); // dangling edge — drop it without history
+            return;
+        }
+        undo_stack_->push(new commands::RemoveEdgeCommand(scene_, ed));
+    });
+    connect(scene_, &NodeScene::edge_create_requested, this,
+            [this](const EdgeDef& ed) { undo_stack_->push(new commands::AddEdgeCommand(scene_, ed)); });
+    connect(scene_, &NodeScene::node_move_started, this, &NodeEditorScreen::begin_move_snapshot);
+    connect(scene_, &NodeScene::node_move_finished, this, &NodeEditorScreen::commit_move_snapshot);
+
+    // ── Node execution flags (SETTINGS block in the properties panel) ──────
+    connect(properties_, &NodePropertiesPanel::node_flag_changed, this,
+            [this](const QString& node_id, const QString& flag, bool value) {
+                auto* item = scene_->find_node(node_id);
+                if (!item)
+                    return;
+                if (flag == QLatin1String("disabled"))
+                    item->set_disabled(value);
+                else if (flag == QLatin1String("continue_on_fail"))
+                    item->set_continue_on_fail(value);
+            });
     connect(scene_, &NodeScene::node_execute_from_requested, this, [this](const QString& node_id) {
+        if (WorkflowService::instance().is_executing())
+            return; // a run is already in progress — Stop it first
         WorkflowDef wf = scene_->serialize();
         if (wf.nodes.isEmpty())
             return;
         wf.name = toolbar_->workflow_name();
+        if (current_workflow_id_.isEmpty())
+            current_workflow_id_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        wf.id = current_workflow_id_;
+
+        // "Execute from here" runs the start node and everything downstream of it —
+        // including any order nodes there. It used to skip the live-order
+        // confirmation that EXECUTE applies, so a live order was one right-click away.
+        QSet<QString> downstream{node_id};
+        QStringList frontier{node_id};
+        while (!frontier.isEmpty()) {
+            const QString cur = frontier.takeFirst();
+            for (const auto& ed : wf.edges) {
+                if (ed.source_node == cur && !downstream.contains(ed.target_node)) {
+                    downstream.insert(ed.target_node);
+                    frontier.append(ed.target_node);
+                }
+            }
+        }
+        WorkflowDef will_run = wf;
+        will_run.nodes.clear();
+        for (const auto& nd : wf.nodes) {
+            if (downstream.contains(nd.id))
+                will_run.nodes.append(nd);
+        }
+        if (!confirm_live_order_nodes(will_run, tr("Execute From Here")))
+            return;
 
         // Reset all node states
         for (auto* item : scene_->node_items())
@@ -309,10 +406,28 @@ void NodeEditorScreen::wire_signals() {
         toolbar_->set_workflow_name(wf.name);
         current_workflow_id_ = wf.id;
         properties_->clear();
+        // The stack's commands reference nodes from the previous graph — undoing
+        // into them after a load would resurrect foreign nodes / drop live ones.
+        reset_undo_history();
+        toolbar_->set_status_text(tr("SAVED"));
+        if (static_cast<int>(scene_->node_items().size()) < wf.nodes.size()) {
+            // deserialize() drops nodes whose type is not registered; saving this
+            // canvas would silently delete them from the stored workflow.
+            LOG_WARN("NodeEditor", QString("Workflow '%1': %2 node(s) of unknown type were not loaded")
+                                       .arg(wf.name)
+                                       .arg(wf.nodes.size() - static_cast<int>(scene_->node_items().size())));
+            toolbar_->set_status_text(tr("PARTIAL LOAD"));
+        }
         LOG_INFO("NodeEditor", QString("Workflow loaded: %1").arg(wf.name));
     });
     connect(&svc, &WorkflowService::workflow_load_failed, this,
             [](const QString& err) { LOG_ERROR("NodeEditor", QString("Load failed: %1").arg(err)); });
+
+    // Save-state badge: UNSAVED as soon as the graph changes, SAVED hh:mm once persisted.
+    connect(undo_stack_, &QUndoStack::cleanChanged, this, [this](bool clean) {
+        if (!clean)
+            toolbar_->set_status_text(tr("UNSAVED"));
+    });
 
     // ── Execution signals ────────────────────────────────────────────
     connect(&svc, &WorkflowService::execution_started, this, [this](const QString& wf_id) {
@@ -331,7 +446,7 @@ void NodeEditorScreen::wire_signals() {
                 if (item)
                     item->set_execution_state(result.success ? "completed" : "error");
                 scene_->set_edges_animated(node_id, false);
-                results_panel_->add_node_result(result);
+                results_panel_->add_node_result(result, item ? item->node_def().name : QString());
             });
     connect(&svc, &WorkflowService::execution_finished, this, [this](const WorkflowExecutionResult& result) {
         scene_->stop_all_edge_animations();
@@ -341,6 +456,72 @@ void NodeEditorScreen::wire_signals() {
                                      : QString("Execution failed: %1").arg(result.error);
         LOG_INFO("NodeEditor", msg);
     });
+}
+
+// ── Undo plumbing ──────────────────────────────────────────────────────
+
+void NodeEditorScreen::push_add_nodes(const QVector<NodeDef>& nodes, const QVector<EdgeDef>& edges,
+                                      const QString& label) {
+    if (nodes.isEmpty())
+        return;
+    undo_stack_->push(new commands::AddNodesCommand(scene_, nodes, edges, label));
+}
+
+void NodeEditorScreen::push_remove_nodes(const QStringList& ids, const QString& label) {
+    if (ids.isEmpty())
+        return;
+    QVector<NodeDef> defs;
+    QSet<QString> id_set;
+    defs.reserve(ids.size());
+    for (const auto& id : ids) {
+        if (auto* item = scene_->find_node(id)) {
+            defs.append(item->node_def()); // carries the live x/y (itemChange keeps it current)
+            id_set.insert(id);
+        }
+    }
+    if (defs.isEmpty())
+        return;
+    const QVector<EdgeDef> edges = commands::edges_touching(scene_, id_set);
+    undo_stack_->push(new commands::RemoveNodesCommand(scene_, defs, edges, label));
+    properties_->clear();
+}
+
+void NodeEditorScreen::begin_move_snapshot() {
+    // A QGraphicsScene delivers the press to exactly one item, so a press always
+    // starts a fresh gesture — no nesting to reconcile. Snapshotting every node
+    // (not just the pressed one) is what makes a multi-select drag undoable as a
+    // single step.
+    move_snapshot_.clear();
+    for (auto* item : scene_->node_items())
+        move_snapshot_.insert(item->node_def().id, item->pos());
+}
+
+void NodeEditorScreen::commit_move_snapshot() {
+    if (move_snapshot_.isEmpty())
+        return;
+
+    QHash<QString, QPointF> before;
+    QHash<QString, QPointF> after;
+    for (auto* item : scene_->node_items()) {
+        const QString id = item->node_def().id;
+        auto it = move_snapshot_.constFind(id);
+        if (it == move_snapshot_.constEnd())
+            continue;
+        if (it.value() != item->pos()) {
+            before.insert(id, it.value());
+            after.insert(id, item->pos());
+        }
+    }
+    move_snapshot_.clear();
+    if (after.isEmpty())
+        return; // a click, not a drag
+    undo_stack_->push(new commands::MoveNodesCommand(scene_, before, after));
+}
+
+void NodeEditorScreen::reset_undo_history() {
+    if (undo_stack_)
+        undo_stack_->clear();
+    move_snapshot_.clear();
 }
 
 // ── Action handlers ────────────────────────────────────────────────────
@@ -367,7 +548,7 @@ void NodeEditorScreen::on_node_drop(const QString& type_id, const QPointF& scene
             def.parameters[param.key] = param.default_value;
     }
 
-    scene_->add_node(def, *type_def);
+    push_add_nodes({def}, {}, tr("Add %1").arg(type_def->display_name));
 }
 
 void NodeEditorScreen::on_node_selected(const QString& node_id) {
@@ -398,124 +579,97 @@ void NodeEditorScreen::on_name_changed(const QString& node_id, const QString& ne
 }
 
 void NodeEditorScreen::on_delete_node(const QString& node_id) {
-    scene_->remove_node(node_id);
-    properties_->clear();
+    auto* item = scene_->find_node(node_id);
+    push_remove_nodes({node_id}, item ? tr("Delete %1").arg(item->node_def().name) : tr("Delete node"));
 }
 
 void NodeEditorScreen::on_clear_workflow() {
-    auto result = QMessageBox::question(this, "Clear Workflow", "Are you sure you want to clear all nodes and edges?",
-                                        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (scene_->is_empty())
+        return;
+    auto result = QMessageBox::question(
+        this, tr("Clear Workflow"),
+        tr("Clear all %1 node(s) and their connections?\n\nThis can be undone with Ctrl+Z.")
+            .arg(scene_->node_items().size()),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
 
     if (result == QMessageBox::Yes) {
-        scene_->clear_all();
+        undo_stack_->push(
+            new commands::ReplaceGraphCommand(scene_, scene_->serialize(), WorkflowDef{}, tr("Clear workflow")));
         properties_->clear();
         LOG_INFO("NodeEditor", "Workflow cleared");
     }
 }
 
 void NodeEditorScreen::on_import_workflow() {
-    QString path = QFileDialog::getOpenFileName(this, "Import Workflow", {}, "JSON Files (*.json);;All Files (*)");
+    // Importing replaces the whole canvas — guard the work already on it.
+    if (!scene_->is_empty()) {
+        const auto ans = QMessageBox::question(
+            this, tr("Import Workflow"),
+            tr("Importing replaces the %1 node(s) currently on the canvas.\n\nContinue?")
+                .arg(scene_->node_items().size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (ans != QMessageBox::Yes)
+            return;
+    }
+
+    QString path =
+        QFileDialog::getOpenFileName(this, tr("Import Workflow"), {}, tr("JSON Files (*.json);;All Files (*)"));
     if (path.isEmpty())
         return;
 
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        LOG_ERROR("NodeEditor", QString("Failed to open file: %1").arg(path));
+    // The parsing lives in WorkflowService (it also repairs missing/duplicate ids).
+    auto imported = WorkflowService::instance().import_from_json(path);
+    if (imported.is_err()) {
+        const QString err = QString::fromStdString(imported.error());
+        LOG_ERROR("NodeEditor", QString("Import failed: %1").arg(err));
+        QMessageBox::warning(this, tr("Import Workflow"), tr("Could not import the workflow:\n\n%1").arg(err));
         return;
     }
 
-    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-    if (doc.isNull() || !doc.isObject()) {
-        LOG_ERROR("NodeEditor", "Invalid JSON workflow file");
-        return;
-    }
-
-    // Parse workflow from JSON
-    QJsonObject obj = doc.object();
-    WorkflowDef wf;
-    wf.id = obj.value("id").toString(QUuid::createUuid().toString(QUuid::WithoutBraces));
-    wf.name = obj.value("name").toString("Imported Workflow");
-    wf.description = obj.value("description").toString();
-
-    for (const auto& nv : obj.value("nodes").toArray()) {
-        QJsonObject no = nv.toObject();
-        NodeDef nd;
-        nd.id = no.value("id").toString();
-        nd.type = no.value("type").toString();
-        nd.name = no.value("name").toString();
-        nd.type_version = no.value("typeVersion").toInt(1);
-        nd.x = no.value("position").toObject().value("x").toDouble();
-        nd.y = no.value("position").toObject().value("y").toDouble();
-        nd.parameters = no.value("parameters").toObject();
-        nd.disabled = no.value("disabled").toBool();
-        nd.continue_on_fail = no.value("continueOnFail").toBool();
-        wf.nodes.append(nd);
-    }
-
-    for (const auto& ev : obj.value("edges").toArray()) {
-        QJsonObject eo = ev.toObject();
-        EdgeDef ed;
-        ed.id = eo.value("id").toString();
-        ed.source_node = eo.value("source").toString();
-        ed.target_node = eo.value("target").toString();
-        ed.source_port = eo.value("sourceHandle").toString();
-        ed.target_port = eo.value("targetHandle").toString();
-        wf.edges.append(ed);
-    }
+    WorkflowDef wf = imported.value();
+    if (wf.name.isEmpty())
+        wf.name = tr("Imported Workflow");
 
     scene_->deserialize(wf);
     toolbar_->set_workflow_name(wf.name);
+    properties_->clear();
+    reset_undo_history(); // the previous graph's commands no longer apply
+    // The import is a NEW, unsaved workflow. Keeping the previous workflow's id would
+    // make the next Save — or the 30 s auto-save — overwrite that workflow with the
+    // imported graph.
+    current_workflow_id_.clear();
+    toolbar_->set_status_text(tr("DRAFT"));
+
+    const int loaded_nodes = static_cast<int>(scene_->node_items().size());
+    if (loaded_nodes < wf.nodes.size()) {
+        QMessageBox::warning(this, tr("Import Workflow"),
+                             tr("%1 of %2 node(s) use a node type this version does not know and were skipped "
+                                "(together with their connections).")
+                                 .arg(wf.nodes.size() - loaded_nodes)
+                                 .arg(wf.nodes.size()));
+    }
     LOG_INFO("NodeEditor", QString("Imported workflow: %1").arg(wf.name));
 }
 
 void NodeEditorScreen::on_export_workflow() {
-    QString path =
-        QFileDialog::getSaveFileName(this, "Export Workflow", "workflow.json", "JSON Files (*.json);;All Files (*)");
+    QString path = QFileDialog::getSaveFileName(this, tr("Export Workflow"), "workflow.json",
+                                                tr("JSON Files (*.json);;All Files (*)"));
     if (path.isEmpty())
         return;
 
     WorkflowDef wf = scene_->serialize();
+    wf.id = current_workflow_id_;
     wf.name = toolbar_->workflow_name();
 
-    QJsonObject obj;
-    obj["id"] = wf.id;
-    obj["name"] = wf.name;
-    obj["description"] = wf.description;
-
-    QJsonArray nodes_arr;
-    for (const auto& nd : wf.nodes) {
-        QJsonObject no;
-        no["id"] = nd.id;
-        no["type"] = nd.type;
-        no["name"] = nd.name;
-        no["typeVersion"] = nd.type_version;
-        no["position"] = QJsonObject{{"x", nd.x}, {"y", nd.y}};
-        no["parameters"] = nd.parameters;
-        no["disabled"] = nd.disabled;
-        no["continueOnFail"] = nd.continue_on_fail;
-        nodes_arr.append(no);
-    }
-    obj["nodes"] = nodes_arr;
-
-    QJsonArray edges_arr;
-    for (const auto& ed : wf.edges) {
-        QJsonObject eo;
-        eo["id"] = ed.id;
-        eo["source"] = ed.source_node;
-        eo["target"] = ed.target_node;
-        eo["sourceHandle"] = ed.source_port;
-        eo["targetHandle"] = ed.target_port;
-        edges_arr.append(eo);
-    }
-    obj["edges"] = edges_arr;
-
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly)) {
-        LOG_ERROR("NodeEditor", QString("Failed to write file: %1").arg(path));
+    // Same serializer the import uses, so every node setting (continue-on-fail,
+    // retry, version…) survives an export → import round trip.
+    auto res = WorkflowService::instance().export_to_json(wf, path);
+    if (res.is_err()) {
+        const QString err = QString::fromStdString(res.error());
+        LOG_ERROR("NodeEditor", QString("Export failed: %1").arg(err));
+        QMessageBox::warning(this, tr("Export Workflow"), tr("Could not export the workflow:\n\n%1").arg(err));
         return;
     }
-
-    file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
     LOG_INFO("NodeEditor", QString("Exported workflow to: %1").arg(path));
 }
 
@@ -525,7 +679,22 @@ void NodeEditorScreen::on_save_workflow() {
         current_workflow_id_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
     wf.id = current_workflow_id_;
     wf.name = toolbar_->workflow_name();
-    WorkflowService::instance().save_workflow(wf);
+
+    // save_workflow() is synchronous and reports a failure only through save_failed —
+    // which nothing listened to, so a failed Save looked exactly like a successful one.
+    auto& svc = WorkflowService::instance();
+    QString save_error;
+    const auto failed_conn =
+        connect(&svc, &WorkflowService::save_failed, this, [&save_error](const QString& e) { save_error = e; });
+    svc.save_workflow(wf);
+    disconnect(failed_conn);
+
+    if (!save_error.isEmpty()) {
+        QMessageBox::warning(this, tr("Save Workflow"), tr("The workflow could not be saved:\n\n%1").arg(save_error));
+        return;
+    }
+    undo_stack_->setClean();
+    toolbar_->set_status_text(tr("SAVED %1").arg(QTime::currentTime().toString("HH:mm")));
     ScreenStateManager::instance().notify_changed(this);
 }
 
@@ -541,7 +710,7 @@ void NodeEditorScreen::on_load_workflow() {
             delete conn;
 
             if (workflows.isEmpty()) {
-                QMessageBox::information(this, "Load Workflow", "No saved workflows found.");
+                QMessageBox::information(this, tr("Load Workflow"), tr("No saved workflows found."));
                 return;
             }
 
@@ -551,13 +720,25 @@ void NodeEditorScreen::on_load_workflow() {
                 items << QString("%1  (%2)").arg(wf.name, wf.updated_at);
 
             bool ok = false;
-            QString chosen = QInputDialog::getItem(this, "Load Workflow", "Select a workflow:", items, 0, false, &ok);
+            QString chosen =
+                QInputDialog::getItem(this, tr("Load Workflow"), tr("Select a workflow:"), items, 0, false, &ok);
             if (!ok)
                 return;
 
             int idx = items.indexOf(chosen);
-            if (idx >= 0 && idx < workflows.size())
-                WorkflowService::instance().load_workflow(workflows[idx].id);
+            if (idx >= 0 && idx < workflows.size()) {
+                // load_workflow() is synchronous; a failure is only signalled, so catch it here
+                // and tell the user instead of leaving the canvas unchanged without a word.
+                auto& load_svc = WorkflowService::instance();
+                QString load_error;
+                const auto failed_conn = connect(&load_svc, &WorkflowService::workflow_load_failed, this,
+                                                 [&load_error](const QString& e) { load_error = e; });
+                load_svc.load_workflow(workflows[idx].id);
+                disconnect(failed_conn);
+                if (!load_error.isEmpty())
+                    QMessageBox::warning(this, tr("Load Workflow"),
+                                         tr("The workflow could not be loaded:\n\n%1").arg(load_error));
+            }
         });
 
     svc.list_workflows();
@@ -572,7 +753,21 @@ void NodeEditorScreen::on_auto_save() {
         current_workflow_id_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
     wf.id = current_workflow_id_;
     wf.name = toolbar_->workflow_name();
-    WorkflowService::instance().save_workflow(wf);
+
+    auto& svc = WorkflowService::instance();
+    bool save_failed = false;
+    const auto failed_conn =
+        connect(&svc, &WorkflowService::save_failed, this, [&save_failed](const QString&) { save_failed = true; });
+    svc.save_workflow(wf);
+    disconnect(failed_conn);
+
+    if (save_failed) {
+        // Don't pop a modal every 30 s — flag it on the badge (the service already logged why).
+        toolbar_->set_status_text(tr("SAVE FAILED"));
+        return;
+    }
+    undo_stack_->setClean();
+    toolbar_->set_status_text(tr("SAVED %1").arg(QTime::currentTime().toString("HH:mm")));
     LOG_DEBUG("NodeEditor", "Auto-saved workflow");
 }
 
@@ -590,6 +785,21 @@ void NodeEditorScreen::on_execute() {
     }
 
     wf.name = toolbar_->workflow_name();
+    // Audit-log rows (workflow / node / order events) are keyed by workflow id; serialize()
+    // returns none, so every row of an unsaved run used to be written with an empty id.
+    if (current_workflow_id_.isEmpty())
+        current_workflow_id_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    wf.id = current_workflow_id_;
+
+    // A workflow is not just a computation — trading.* nodes place, modify and
+    // cancel REAL orders. The algo tab gates live deployment behind an explicit
+    // confirmation; this path had none, so pressing EXECUTE on a graph
+    // containing a live order node sent it straight to the broker. Several
+    // shipped templates (Price Alert Trading, Mean Reversion, Portfolio
+    // Rebalancer, Pre-Trade Compliance) contain order nodes, so this is
+    // reachable by loading a template and pressing one button.
+    if (!confirm_live_order_nodes(wf, tr("Execute Workflow")))
+        return;
 
     // Reset all node states to idle before execution
     for (auto* item : scene_->node_items())
@@ -598,35 +808,80 @@ void NodeEditorScreen::on_execute() {
     WorkflowService::instance().execute_workflow(wf);
 }
 
+bool NodeEditorScreen::confirm_live_order_nodes(const WorkflowDef& wf, const QString& action) {
+    // The detection itself lives in WorkflowService so it can see through
+    // control.execute_workflow sub-workflows and destructive MCP tool nodes, and so
+    // it applies the same "only the exact string 'paper' is paper" rule the order
+    // executors use. Read-only nodes (get_quote, get_positions, …) are deliberately
+    // not reported — warning on those would make the prompt noise people click
+    // through.
+    const QStringList live_rows = WorkflowService::live_order_rows(wf);
+    if (live_rows.isEmpty())
+        return true; // nothing live — proceed silently
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(action);
+    box.setText(tr("This workflow contains %n LIVE order node(s).", "", live_rows.size()));
+    box.setInformativeText(tr("Running it will place REAL orders with REAL money at your broker:\n\n%1\n\n"
+                              "Set each node's Mode to \"paper\" if you only meant to simulate.")
+                               .arg(live_rows.join(QLatin1Char('\n'))));
+    auto* proceed = box.addButton(tr("Run with LIVE orders"), QMessageBox::AcceptRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Cancel); // Enter must not fire live orders
+    box.exec();
+
+    const bool go = (box.clickedButton() == proceed);
+    LOG_WARN("NodeEditor", QString("%1: %2 live order node(s) — user %3")
+                               .arg(action)
+                               .arg(live_rows.size())
+                               .arg(go ? "CONFIRMED" : "cancelled"));
+    return go;
+}
+
 void NodeEditorScreen::on_show_templates() {
     QStringList templates = {
         // Beginner
-        "1. Hello World — Trigger → Set Variable → Display",
-        "2. Stock Quote Lookup — Fetch quote for multiple tickers",
+        tr("1. Hello World — Trigger → Set Variable → Display"),
+        tr("2. Stock Quote Lookup — Fetch quote for multiple tickers"),
         // Market Analysis
-        "3. Multi-Indicator Scanner — RSI + MACD + Bollinger on a stock",
-        "4. Sector Correlation — Compare correlations across sector ETFs",
-        "5. Economic Dashboard — Fetch GDP, CPI, unemployment data",
+        tr("3. Multi-Indicator Scanner — RSI + MACD + Bollinger on a stock"),
+        tr("4. Sector Correlation — Compare correlations across sector ETFs"),
+        tr("5. Economic Dashboard — Fetch GDP, CPI, unemployment data"),
         // Trading
-        "6. Price Alert Trading — Auto-trade when price crosses threshold",
-        "7. Mean Reversion Strategy — Buy oversold / sell overbought with risk checks",
-        "8. Portfolio Rebalancer — Check drift → optimize → place orders",
+        tr("6. Price Alert Trading — Auto-trade when price crosses threshold"),
+        tr("7. Mean Reversion Strategy — Buy oversold / sell overbought with risk checks"),
+        tr("8. Portfolio Rebalancer — Check drift → optimize → place orders"),
         // Risk & Safety
-        "9. Daily Risk Monitor — Positions → VaR → loss limit → alert",
-        "10. Pre-Trade Compliance — Full validation before order execution",
+        tr("9. Daily Risk Monitor — Positions → VaR → loss limit → alert"),
+        tr("10. Pre-Trade Compliance — Full validation before order execution"),
         // Data & AI
-        "11. News Sentiment Pipeline — Fetch news → NLP → filter → alert",
-        "12. AI Research Agent — Multi-agent analysis with mediator",
+        tr("11. News Sentiment Pipeline — Fetch news → NLP → filter → alert"),
+        tr("12. AI Research Agent — Multi-agent analysis with mediator"),
         // Operations
-        "13. Scheduled Report — Daily P&L report to email",
-        "14. Data Export Pipeline — Fetch → transform → CSV export",
-        "15. Webhook Automation — External trigger → process → notify",
+        tr("13. Scheduled Report — Daily P&L report to email"),
+        tr("14. Data Export Pipeline — Fetch → transform → CSV export"),
+        tr("15. Webhook Automation — External trigger → process → notify"),
     };
 
     bool ok = false;
-    QString chosen = QInputDialog::getItem(this, "Workflow Templates", "Select a template:", templates, 0, false, &ok);
+    QString chosen =
+        QInputDialog::getItem(this, tr("Workflow Templates"), tr("Select a template:"), templates, 0, false, &ok);
     if (!ok)
         return;
+
+    // Loading a template wipes the canvas. Confirm, and capture the current graph
+    // so the whole swap is a single Ctrl+Z.
+    const WorkflowDef before = scene_->serialize();
+    if (!before.nodes.isEmpty()) {
+        const auto ans = QMessageBox::question(
+            this, tr("Workflow Templates"),
+            tr("Loading a template replaces the %1 node(s) on the canvas.\n\nThis can be undone with Ctrl+Z. Continue?")
+                .arg(before.nodes.size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (ans != QMessageBox::Yes)
+            return;
+    }
 
     int idx = templates.indexOf(chosen);
     scene_->clear_all();
@@ -754,11 +1009,11 @@ void NodeEditorScreen::on_show_templates() {
         // ── 5. Economic Dashboard ──────────────────────────────────
         auto n1 = make_node("trigger.manual", "Start", 100, 250);
         auto n2 = make_node("market.get_economics", "GDP", 400, 100);
-        set_param(n2, "indicator", "GDP");
+        set_param(n2, "series_id", "GDPC1");
         auto n3 = make_node("market.get_economics", "CPI", 400, 250);
-        set_param(n3, "indicator", "CPI");
+        set_param(n3, "series_id", "CPIAUCSL");
         auto n4 = make_node("market.get_economics", "Unemployment", 400, 400);
-        set_param(n4, "indicator", "UNEMPLOYMENT");
+        set_param(n4, "series_id", "UNRATE");
         auto n5 = make_node("control.merge", "Merge Indicators", 700, 250);
         auto n6 = make_node("output.results_display", "Econ Dashboard", 1000, 250);
         make_edge(n1.id, "output_main", n2.id, "input_0");
@@ -782,7 +1037,6 @@ void NodeEditorScreen::on_show_templates() {
         set_param(n4, "symbol", "AAPL");
         set_param(n4, "side", "buy");
         set_param(n4, "quantity", 10);
-        set_param(n4, "broker", "paper");
         auto n5 = make_node("notify.telegram", "Alert: Blocked", 1000, 350);
         auto n6 = make_node("output.results_display", "Order Result", 1300, 100);
         auto n7 = make_node("output.results_display", "Risk Alert", 1300, 350);
@@ -808,7 +1062,6 @@ void NodeEditorScreen::on_show_templates() {
         set_param(n6, "symbol", "TSLA");
         set_param(n6, "side", "buy");
         set_param(n6, "quantity", 5);
-        set_param(n6, "broker", "paper");
         auto n7 = make_node("core.set", "Skip: Not Oversold", 1300, 400);
         set_param(n7, "key", "action");
         set_param(n7, "value", "no_trade");
@@ -833,7 +1086,6 @@ void NodeEditorScreen::on_show_templates() {
         set_param(n4, "method", "parametric_var");
         auto n5 = make_node("safety.loss_limit", "Loss Limit", 1300, 200);
         auto n6 = make_node("trading.place_order", "Rebalance Order", 1600, 100);
-        set_param(n6, "broker", "paper");
         auto n7 = make_node("notify.email", "Limit Breached", 1600, 350);
         auto n8 = make_node("output.results_display", "Order Confirmation", 1900, 100);
         auto n9 = make_node("output.results_display", "Alert", 1900, 350);
@@ -875,7 +1127,6 @@ void NodeEditorScreen::on_show_templates() {
         auto n4 = make_node("safety.position_size_limit", "Size Limits", 1000, 150);
         auto n5 = make_node("safety.loss_limit", "PnL Limits", 1300, 150);
         auto n6 = make_node("trading.place_order", "Execute Order", 1600, 150);
-        set_param(n6, "broker", "paper");
         auto n7 = make_node("core.set", "Market Closed", 700, 400);
         set_param(n7, "key", "reason");
         set_param(n7, "value", "Market is closed");
@@ -901,10 +1152,12 @@ void NodeEditorScreen::on_show_templates() {
         set_param(n3, "field", "relevance");
         set_param(n3, "operator", "greater_than");
         set_param(n3, "value", "0.7");
-        auto n4 = make_node("agent.single", "Sentiment Agent", 1000, 200);
-        set_param(n4, "agent_type", "economic");
-        set_param(n4, "prompt", "Analyze sentiment of these news articles. Rate bullish/bearish 1-10.");
+        auto n4 = make_node("agent.run", "Sentiment Agent", 1000, 200);
+        set_param(n4, "extra_instructions",
+                  "Analyze the sentiment of the news articles in the context. "
+                  "Answer with one word, BULLISH or BEARISH, followed by a one-sentence reason.");
         auto n5 = make_node("control.if_else", "Bullish?", 1300, 200);
+        set_param(n5, "condition", "response contains BULLISH");
         auto n6 = make_node("notify.telegram", "Buy Signal", 1600, 100);
         auto n7 = make_node("core.set", "Hold", 1600, 350);
         set_param(n7, "key", "action");
@@ -931,15 +1184,14 @@ void NodeEditorScreen::on_show_templates() {
         auto n4 = make_node("market.get_news", "Recent News", 400, 500);
         set_param(n4, "symbol", "NVDA");
         auto n5 = make_node("control.merge", "Combine Data", 700, 250);
-        auto n6 = make_node("agent.single", "Bull Case Agent", 1000, 100);
-        set_param(n6, "agent_type", "investor");
-        set_param(n6, "prompt", "Make the bull case for this stock based on the data.");
-        auto n7 = make_node("agent.single", "Bear Case Agent", 1000, 400);
-        set_param(n7, "agent_type", "hedge_fund");
-        set_param(n7, "prompt", "Make the bear case for this stock. Identify risks.");
-        auto n8 = make_node("agent.mediator", "Synthesize", 1300, 250);
-        set_param(n8, "mode", "debate");
-        set_param(n8, "mediator_prompt", "Synthesize bull and bear cases into a balanced investment thesis.");
+        auto n6 = make_node("agent.run", "Bull Case Agent", 1000, 100);
+        set_param(n6, "extra_instructions", "Make the bull case for this stock based on the data in the context.");
+        auto n7 = make_node("agent.run", "Bear Case Agent", 1000, 400);
+        set_param(n7, "extra_instructions", "Make the bear case for this stock. Identify the key risks.");
+        auto n8 = make_node("agent.run", "Synthesize", 1300, 250);
+        set_param(n8, "extra_instructions",
+                  "The context holds a bull case and a bear case for the same stock. "
+                  "Synthesize them into a balanced investment thesis.");
         auto n9 = make_node("output.results_display", "Research Report", 1600, 250);
         make_edge(n1.id, "output_main", n2.id, "input_0");
         make_edge(n1.id, "output_main", n3.id, "input_0");
@@ -950,7 +1202,7 @@ void NodeEditorScreen::on_show_templates() {
         make_edge(n5.id, "output_main", n6.id, "input_0");
         make_edge(n5.id, "output_main", n7.id, "input_0");
         make_edge(n6.id, "output_main", n8.id, "input_0");
-        make_edge(n7.id, "output_main", n8.id, "input_1");
+        make_edge(n7.id, "output_main", n8.id, "input_0"); // the agent node has one Context port
         make_edge(n8.id, "output_main", n9.id, "input_0");
         toolbar_->set_workflow_name("AI Research Agent");
     } else if (idx == 12) {
@@ -988,8 +1240,7 @@ void NodeEditorScreen::on_show_templates() {
         set_param(n4, "direction", "desc");
         auto n5 = make_node("transform.deduplicate", "Remove Dupes", 1300, 200);
         set_param(n5, "field", "id");
-        auto n6 = make_node("file.spreadsheet", "Export CSV", 1600, 200);
-        set_param(n6, "operation", "write");
+        auto n6 = make_node("file.convert", "Export CSV", 1600, 200);
         set_param(n6, "format", "csv");
         set_param(n6, "path", "output/export.csv");
         auto n7 = make_node("output.results_display", "Export Done", 1900, 200);
@@ -1010,7 +1261,6 @@ void NodeEditorScreen::on_show_templates() {
         auto n3 = make_node("control.if_else", "Valid Signal?", 700, 200);
         auto n4 = make_node("safety.risk_check", "Risk Check", 1000, 100);
         auto n5 = make_node("trading.place_order", "Execute Trade", 1300, 100);
-        set_param(n5, "broker", "paper");
         auto n6 = make_node("notify.discord", "Invalid Signal", 1000, 350);
         auto n7 = make_node("output.results_display", "Trade Executed", 1600, 100);
         auto n8 = make_node("output.results_display", "Rejected", 1300, 350);
@@ -1025,6 +1275,10 @@ void NodeEditorScreen::on_show_templates() {
     }
 
     current_workflow_id_.clear();
+    // The scene already holds the template; record the swap so Ctrl+Z restores
+    // whatever was on the canvas before. (push() re-applies `after`, which
+    // rebuilds an identical graph.)
+    undo_stack_->push(new commands::ReplaceGraphCommand(scene_, before, scene_->serialize(), tr("Load template")));
     LOG_INFO("NodeEditor", QString("Loaded template: %1").arg(chosen));
 }
 
@@ -1039,14 +1293,18 @@ void NodeEditorScreen::on_deploy() {
     wf.id = current_workflow_id_;
     wf.name = dlg.workflow_name();
     wf.description = dlg.workflow_description();
-    wf.status = dlg.is_deploy() ? WorkflowStatus::Idle : WorkflowStatus::Draft;
+    // There is no scheduler or webhook runtime, so a saved workflow is never a
+    // live deployment. Persist it as a Draft rather than an "idle" (active,
+    // waiting-for-trigger) deployment so listings don't imply it will run again.
+    wf.status = WorkflowStatus::Draft;
 
     toolbar_->set_workflow_name(wf.name);
     WorkflowService::instance().save_workflow(wf);
 
     if (dlg.is_deploy()) {
-        LOG_INFO("NodeEditor", QString("Deployed workflow: %1").arg(wf.name));
-        // Auto-execute after deploy
+        LOG_INFO("NodeEditor", QString("Saved and ran workflow once: %1").arg(wf.name));
+        // "Deploy" is save + run once. There is no scheduler/webhook listener to
+        // fire trigger.* / schedule nodes again, so the workflow does not stay active.
         on_execute();
     } else {
         LOG_INFO("NodeEditor", QString("Saved draft: %1").arg(wf.name));

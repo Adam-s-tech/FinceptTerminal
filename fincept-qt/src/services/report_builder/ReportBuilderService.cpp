@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
+#include <QSaveFile>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QUndoCommand>
@@ -49,8 +50,7 @@ class AddCmd : public QUndoCommand {
 
 class RemoveCmd : public QUndoCommand {
   public:
-    RemoveCmd(ReportBuilderService* svc, int index)
-        : QUndoCommand("Remove component"), svc_(svc), index_(index) {}
+    RemoveCmd(ReportBuilderService* svc, int index) : QUndoCommand("Remove component"), svc_(svc), index_(index) {}
     void redo() override;
     void undo() override;
     void set_saved(rep::ReportComponent c) { saved_ = std::move(c); }
@@ -100,10 +100,7 @@ class MoveCmd : public QUndoCommand {
 class MetadataCmd : public QUndoCommand {
   public:
     MetadataCmd(ReportBuilderService* svc, rep::ReportMetadata old_m, rep::ReportMetadata new_m)
-        : QUndoCommand("Edit metadata"),
-          svc_(svc),
-          old_(std::move(old_m)),
-          new_(std::move(new_m)) {}
+        : QUndoCommand("Edit metadata"), svc_(svc), old_(std::move(old_m)), new_(std::move(new_m)) {}
     void redo() override;
     void undo() override;
 
@@ -115,10 +112,7 @@ class MetadataCmd : public QUndoCommand {
 class ThemeCmd : public QUndoCommand {
   public:
     ThemeCmd(ReportBuilderService* svc, rep::ReportTheme old_t, rep::ReportTheme new_t)
-        : QUndoCommand("Change theme"),
-          svc_(svc),
-          old_(std::move(old_t)),
-          new_(std::move(new_t)) {}
+        : QUndoCommand("Change theme"), svc_(svc), old_(std::move(old_t)), new_(std::move(new_t)) {}
     void redo() override;
     void undo() override;
 
@@ -259,7 +253,9 @@ rep::ReportComponent ServiceFriend::locked_get_at(ReportBuilderService* svc, int
 
 // ── Undo command bodies ──────────────────────────────────────────────────────
 
-void AddCmd::redo() { detail::ServiceFriend::direct_insert(svc_, comp_, at_); }
+void AddCmd::redo() {
+    detail::ServiceFriend::direct_insert(svc_, comp_, at_);
+}
 void AddCmd::undo() {
     // Find by id rather than index — concurrent mutations may have shifted
     // positions since the original add. (Within a macro this is unlikely
@@ -298,14 +294,26 @@ bool UpdateCmd::mergeWith(const QUndoCommand* other) {
     return true;
 }
 
-void MoveCmd::redo() { detail::ServiceFriend::direct_move_by_id(svc_, id_, to_); }
-void MoveCmd::undo() { detail::ServiceFriend::direct_move_by_id(svc_, id_, from_); }
+void MoveCmd::redo() {
+    detail::ServiceFriend::direct_move_by_id(svc_, id_, to_);
+}
+void MoveCmd::undo() {
+    detail::ServiceFriend::direct_move_by_id(svc_, id_, from_);
+}
 
-void MetadataCmd::redo() { detail::ServiceFriend::direct_set_metadata(svc_, new_); }
-void MetadataCmd::undo() { detail::ServiceFriend::direct_set_metadata(svc_, old_); }
+void MetadataCmd::redo() {
+    detail::ServiceFriend::direct_set_metadata(svc_, new_);
+}
+void MetadataCmd::undo() {
+    detail::ServiceFriend::direct_set_metadata(svc_, old_);
+}
 
-void ThemeCmd::redo() { detail::ServiceFriend::direct_set_theme(svc_, new_); }
-void ThemeCmd::undo() { detail::ServiceFriend::direct_set_theme(svc_, old_); }
+void ThemeCmd::redo() {
+    detail::ServiceFriend::direct_set_theme(svc_, new_);
+}
+void ThemeCmd::undo() {
+    detail::ServiceFriend::direct_set_theme(svc_, old_);
+}
 
 // ── Service ──────────────────────────────────────────────────────────────────
 
@@ -428,7 +436,7 @@ bool ReportBuilderService::update_component(int id, const QString& content, cons
 }
 
 bool ReportBuilderService::patch_component(int id, const QString* content_or_null,
-                                            const QMap<QString, QString>& partial_config) {
+                                           const QMap<QString, QString>& partial_config) {
     QString old_content, new_content;
     QMap<QString, QString> old_config, new_config;
     {
@@ -508,6 +516,14 @@ void ReportBuilderService::clear_document() {
         current_file_.clear();
     }
     persist_current_file();
+    // trigger_autosave() deliberately never writes an EMPTY document (so a stray timer tick
+    // can't clobber a good recovery copy) — which meant "New Report" left the previous
+    // report's autosave behind, and the next launch brought it back from the dead.
+    QFile::remove(autosave_path_);
+    autosave_hash_ = 0;
+    // The date was stamped after set_metadata() had already announced the blank metadata;
+    // say so again or the fresh report's cover shows no date until the next edit.
+    emit metadata_changed();
     emit document_cleared();
     emit current_file_changed({});
 }
@@ -519,11 +535,20 @@ void ReportBuilderService::replace_document(const rep::ReportDocument& doc) {
     }
     undo_stack_->clear();
     emit document_changed();
+    // document_changed() only tells a view to refresh its structure list — the canvas is
+    // redrawn by the per-component signals, which a wholesale replacement never emits.
+    // After a template was applied the canvas therefore kept showing the OLD report, and
+    // the properties panel stayed bound to an index/id of the old document (ids restart
+    // at 1, so editing it wrote into whichever component now sat there). Views already
+    // know how to rebuild everything on "document_loaded"; an empty path = not from a file.
+    emit document_loaded(QString());
 }
 
 // ── Undo helpers ────────────────────────────────────────────────────────────
 
-QUndoStack* ReportBuilderService::undo_stack() { return undo_stack_; }
+QUndoStack* ReportBuilderService::undo_stack() {
+    return undo_stack_;
+}
 
 void ReportBuilderService::begin_macro(const QString& description) {
     if (macro_depth_++ == 0)
@@ -547,7 +572,9 @@ void ReportBuilderService::note_llm_mutation() {
     llm_window_timer_->start();
 }
 
-void ReportBuilderService::push_undo(QUndoCommand* cmd) { undo_stack_->push(cmd); }
+void ReportBuilderService::push_undo(QUndoCommand* cmd) {
+    undo_stack_->push(cmd);
+}
 
 // ── File ops ────────────────────────────────────────────────────────────────
 
@@ -557,11 +584,22 @@ Result<void> ReportBuilderService::save_to(const QString& path) {
         QMutexLocker lock(&mutex_);
         json = doc_.to_json();
     }
-    QFile f(path);
+    // QSaveFile writes to a sibling temp file and renames it over the target on commit(), so a
+    // full disk, a crash or a permissions error mid-write leaves the user's existing report
+    // untouched. The previous QFile truncated the file on open and ignored write()/close()
+    // failures — a failed save could destroy the only copy AND still report success.
+    QSaveFile f(path);
+    f.setDirectWriteFallback(true); // read-only directory but writable file: still allow the save
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
         return Result<void>::err("Could not open file for writing: " + f.errorString().toStdString());
-    f.write(json.toUtf8());
-    f.close();
+    const QByteArray bytes = json.toUtf8();
+    if (f.write(bytes) != bytes.size()) {
+        const std::string why = f.errorString().toStdString();
+        f.cancelWriting();
+        return Result<void>::err("Could not write the report: " + why);
+    }
+    if (!f.commit())
+        return Result<void>::err("Could not finish writing the file: " + f.errorString().toStdString());
     set_current_file(path);
     return Result<void>::ok();
 }
@@ -609,7 +647,9 @@ void ReportBuilderService::persist_current_file() {
     s.setValue(kCurrentFileKey, current_file_);
 }
 
-QString ReportBuilderService::autosave_path() const { return autosave_path_; }
+QString ReportBuilderService::autosave_path() const {
+    return autosave_path_;
+}
 
 void ReportBuilderService::trigger_autosave() {
     QString json;
@@ -621,9 +661,19 @@ void ReportBuilderService::trigger_autosave() {
             return;
         json = doc_.to_json();
     }
-    QFile f(autosave_path_);
-    if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+    // The timer fires every minute whether or not anything changed, and a big report is
+    // hundreds of KB written on the UI thread — skip when it is byte-identical to what is
+    // already on disk. Written via QSaveFile so a crash mid-write can't leave a truncated
+    // autosave that fails to parse and silently loses the whole report on next launch.
+    const std::size_t digest = qHash(json);
+    if (digest == autosave_hash_)
+        return;
+    QSaveFile f(autosave_path_);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
         f.write(json.toUtf8());
+        if (f.commit())
+            autosave_hash_ = digest;
+    }
 }
 
 void ReportBuilderService::load_recent() const {

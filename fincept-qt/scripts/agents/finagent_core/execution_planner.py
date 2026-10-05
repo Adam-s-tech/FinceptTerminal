@@ -8,10 +8,62 @@ Similar to ValueCell's task planning capabilities.
 from typing import Dict, Any, Optional, List, Callable, Union
 from dataclasses import dataclass, field
 from enum import Enum
+import ast
 import logging
 import json
 
 logger = logging.getLogger(__name__)
+
+
+# ── Condition sandbox ────────────────────────────────────────────────────────
+# Branch conditions come from a plan built by an LLM, and the plan context is
+# interpolated into them before evaluation. eval() with {"__builtins__": {}}
+# does not contain that: `().__class__.__mro__[1].__subclasses__()` reaches the
+# whole class hierarchy and from there os/subprocess, so a poisoned plan (or
+# poisoned tool output interpolated into one) is arbitrary code execution.
+#
+# Conditions only ever need comparisons, boolean logic and arithmetic over
+# context values, so the grammar is restricted to exactly that. Attribute
+# access and calls are not in the allowlist, which removes the escape entirely
+# rather than trying to blocklist its spellings.
+_CONDITION_ALLOWED_NODES = (
+    ast.Expression, ast.BoolOp, ast.UnaryOp, ast.Compare, ast.BinOp,
+    ast.Name, ast.Load, ast.Constant, ast.List, ast.Tuple,
+    ast.And, ast.Or, ast.Not, ast.USub, ast.UAdd,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+    ast.In, ast.NotIn, ast.Is, ast.IsNot,
+)
+
+
+def _safe_eval_condition(condition: str, context: Dict[str, Any]) -> bool:
+    """Evaluate a branch condition under a restricted grammar.
+
+    Returns False for anything that fails to parse, uses disallowed syntax, or
+    raises — the same failure behaviour the previous bare eval() had.
+    """
+    if not condition or not condition.strip():
+        return False
+    try:
+        tree = ast.parse(condition, mode="eval")
+    except SyntaxError:
+        logger.warning("Condition rejected (syntax): %r", condition)
+        return False
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _CONDITION_ALLOWED_NODES):
+            logger.warning("Condition rejected (%s not allowed): %r",
+                           type(node).__name__, condition)
+            return False
+        if isinstance(node, ast.Name) and node.id.startswith("_"):
+            logger.warning("Condition rejected (name %r): %r", node.id, condition)
+            return False
+
+    try:
+        return bool(eval(compile(tree, "<condition>", "eval"),  # noqa: S307
+                         {"__builtins__": {}}, context))
+    except Exception:
+        return False
 
 
 class StepStatus(Enum):
@@ -257,8 +309,16 @@ class ExecutionPlanner:
     - Error handling and recovery
     """
 
-    def __init__(self, api_keys: Optional[Dict[str, str]] = None):
+    def __init__(
+        self,
+        api_keys: Optional[Dict[str, str]] = None,
+        model_config: Optional[Dict[str, Any]] = None,
+    ):
         self.api_keys = api_keys or {}
+        # Resolved LLM (provider/model/key) applied to agent steps that do not
+        # name their own model. None keeps the old behaviour (provider guessed
+        # from api_keys inside CoreAgent).
+        self.model_config = model_config or None
         self.plans: Dict[str, ExecutionPlan] = {}
         self.checkpoints: Dict[str, Dict[str, Any]] = {}
 
@@ -379,9 +439,16 @@ class ExecutionPlanner:
 
         query = step.config.get("query", "")
         agent_config = step.config.get("agent_config", {})
+        if self.model_config and not agent_config.get("model"):
+            # Copy — never mutate the plan's own step config.
+            agent_config = {**agent_config, "model": self.model_config}
 
         # Interpolate context into query
         query = self._interpolate(query, plan.context)
+        if not str(query).strip():
+            # A blank query would burn an LLM call on nothing; fail the step with
+            # a message the planner UI shows next to it.
+            raise ValueError("agent step has no query")
 
         agent = CoreAgent(api_keys=self.api_keys)
         response = agent.run(query, agent_config)
@@ -415,10 +482,7 @@ class ExecutionPlanner:
         # Simple condition evaluation using context
         condition = self._interpolate(condition, plan.context)
 
-        try:
-            result = eval(condition, {"__builtins__": {}}, plan.context)
-        except Exception:
-            result = False
+        result = _safe_eval_condition(condition, plan.context)
 
         next_step_id = if_true if result else if_false
 
@@ -727,8 +791,16 @@ def create_stock_analysis_plan(symbol: str) -> Dict[str, Any]:
     return plan.to_dict()
 
 
-def execute_plan(plan_dict: Dict[str, Any], api_keys: Dict[str, str] = None) -> Dict[str, Any]:
-    """Execute a plan from dict"""
+def execute_plan(
+    plan_dict: Dict[str, Any],
+    api_keys: Dict[str, str] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Execute a plan from dict.
+
+    `config` is the optional caller config; its `model` block (the user's
+    resolved LLM) is applied to every agent step that does not carry its own.
+    """
     # Reconstruct plan from dict
     plan = ExecutionPlan(
         id=plan_dict["id"],
@@ -738,17 +810,30 @@ def execute_plan(plan_dict: Dict[str, Any], api_keys: Dict[str, str] = None) -> 
     )
 
     for step_dict in plan_dict.get("steps", []):
+        try:
+            step_type = StepType(step_dict["step_type"])
+        except (KeyError, ValueError):
+            # An unknown/missing type used to escape as a bare ValueError
+            # ("'run' is not a valid StepType"). Return a clean failure the
+            # caller can show instead.
+            valid = ", ".join(t.value for t in StepType)
+            return {
+                "success": False,
+                "error": (f"Step '{step_dict.get('name', step_dict.get('id', '?'))}' has an invalid type "
+                          f"{step_dict.get('step_type')!r} (valid: {valid})"),
+            }
         step = PlanStep(
             id=step_dict["id"],
             name=step_dict["name"],
-            step_type=StepType(step_dict["step_type"]),
+            step_type=step_type,
             config=step_dict.get("config", {}),
             dependencies=step_dict.get("dependencies", []),
             status=StepStatus(step_dict.get("status", "pending"))
         )
         plan.add_step(step)
 
-    planner = ExecutionPlanner(api_keys=api_keys)
+    model_config = (config or {}).get("model") if isinstance(config, dict) else None
+    planner = ExecutionPlanner(api_keys=api_keys, model_config=model_config)
     return planner.execute_plan(plan)
 
 

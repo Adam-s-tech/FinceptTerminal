@@ -8,6 +8,7 @@
 #include "ui/theme/Theme.h"
 
 #include <QButtonGroup>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QHBoxLayout>
@@ -26,30 +27,49 @@ namespace fincept::screens {
 namespace {
 
 QString font_stack() {
-    return QStringLiteral(
-        "'Consolas','Cascadia Mono','JetBrains Mono','SF Mono',monospace");
+    return QStringLiteral("'Consolas','Cascadia Mono','JetBrains Mono','SF Mono',monospace");
 }
 
 QString format_time(qint64 ts_ms) {
-    if (ts_ms <= 0) return QStringLiteral("—");
-    return QDateTime::fromMSecsSinceEpoch(ts_ms)
-        .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    if (ts_ms <= 0)
+        return QStringLiteral("—");
+    return QDateTime::fromMSecsSinceEpoch(ts_ms).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
 }
 
 QString kind_label(fincept::wallet::ParsedActivity::Kind k) {
     using K = fincept::wallet::ParsedActivity::Kind;
     switch (k) {
-        case K::Swap:    return QStringLiteral("SWAP");
-        case K::Receive: return QStringLiteral("RECEIVE");
-        case K::Send:    return QStringLiteral("SEND");
-        case K::Other:   return QStringLiteral("OTHER");
+        case K::Swap:
+            return QCoreApplication::translate("ActivityTab", "SWAP");
+        case K::Receive:
+            return QCoreApplication::translate("ActivityTab", "RECEIVE");
+        case K::Send:
+            return QCoreApplication::translate("ActivityTab", "SEND");
+        case K::Other:
+            return QCoreApplication::translate("ActivityTab", "OTHER");
     }
-    return QStringLiteral("OTHER");
+    return QCoreApplication::translate("ActivityTab", "OTHER");
 }
 
 QString shorten_sig(const QString& sig) {
-    if (sig.size() < 14) return sig;
+    if (sig.size() < 14)
+        return sig;
     return sig.left(8) + QStringLiteral("…") + sig.right(4);
+}
+
+/// Solscan needs `?cluster=` for non-mainnet transactions; without it a devnet
+/// / testnet signature opens a "transaction not found" page. Derived from the
+/// same `solana.rpc_url` override the rest of the Crypto Center reads.
+QString activity_explorer_cluster_suffix() {
+    auto r = SecureStorage::instance().retrieve(QStringLiteral("solana.rpc_url"));
+    if (!r.is_ok())
+        return {};
+    const QString url = r.value().toLower();
+    if (url.contains(QStringLiteral("devnet")))
+        return QStringLiteral("?cluster=devnet");
+    if (url.contains(QStringLiteral("testnet")))
+        return QStringLiteral("?cluster=testnet");
+    return {};
 }
 
 } // namespace
@@ -60,14 +80,11 @@ ActivityTab::ActivityTab(QWidget* parent) : QWidget(parent) {
     apply_theme();
 
     auto& svc = fincept::wallet::WalletService::instance();
-    connect(&svc, &fincept::wallet::WalletService::wallet_connected, this,
-            &ActivityTab::on_wallet_connected);
-    connect(&svc, &fincept::wallet::WalletService::wallet_disconnected, this,
-            &ActivityTab::on_wallet_disconnected);
+    connect(&svc, &fincept::wallet::WalletService::wallet_connected, this, &ActivityTab::on_wallet_connected);
+    connect(&svc, &fincept::wallet::WalletService::wallet_disconnected, this, &ActivityTab::on_wallet_disconnected);
 
     auto& hub = fincept::datahub::DataHub::instance();
-    connect(&hub, &fincept::datahub::DataHub::topic_error, this,
-            &ActivityTab::on_topic_error);
+    connect(&hub, &fincept::datahub::DataHub::topic_error, this, &ActivityTab::on_topic_error);
 
     if (svc.is_connected()) {
         on_wallet_connected(svc.current_pubkey(), svc.state().label);
@@ -120,9 +137,7 @@ void ActivityTab::build_ui() {
     table_->setObjectName(QStringLiteral("activityTabTable"));
     table_->setColumnCount(6);
     table_->setHorizontalHeaderLabels(
-        {QStringLiteral("TIMESTAMP"), QStringLiteral("EVENT"),
-         QStringLiteral("ASSET"), QStringLiteral("AMOUNT"),
-         QStringLiteral("STATUS"), QStringLiteral("SIGNATURE")});
+        {tr("TIMESTAMP"), tr("EVENT"), tr("ASSET"), tr("AMOUNT"), tr("STATUS"), tr("SIGNATURE")});
     table_->verticalHeader()->setVisible(false);
     table_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
@@ -153,49 +168,48 @@ void ActivityTab::apply_theme() {
     using namespace ui::colors;
     const QString font = font_stack();
 
-    const QString ss = QStringLiteral(
-        "QWidget#activityTab { background:%1; }"
+    const QString ss =
+        QStringLiteral("QWidget#activityTab { background:%1; }"
 
-        "QPushButton#activityTabChip { background:transparent; color:%2; border:1px solid %3;"
-        "  font-family:%4; font-size:10px; font-weight:700; letter-spacing:1.2px;"
-        "  padding:0 12px; }"
-        "QPushButton#activityTabChip:hover { color:%5; border-color:%6; }"
-        "QPushButton#activityTabChip:checked { background:rgba(217,119,6,0.12); color:%7;"
-        "  border-color:%7; }"
+                       "QPushButton#activityTabChip { background:transparent; color:%2; border:1px solid %3;"
+                       "  font-family:%4; font-size:10px; font-weight:700; letter-spacing:1.2px;"
+                       "  padding:0 12px; }"
+                       "QPushButton#activityTabChip:hover { color:%5; border-color:%6; }"
+                       "QPushButton#activityTabChip:checked { background:rgba(217,119,6,0.12); color:%7;"
+                       "  border-color:%7; }"
 
-        "QTableWidget#activityTabTable { background:%1; color:%5; gridline-color:%3;"
-        "  border:1px solid %3; selection-background-color:%8; selection-color:%5;"
-        "  font-family:%4; font-size:11px; }"
-        "QTableWidget#activityTabTable::item { padding:6px 10px; border-bottom:1px solid %3; }"
-        "QHeaderView::section { background:%9; color:%2; padding:6px 10px;"
-        "  border:none; border-bottom:1px solid %3; font-family:%4;"
-        "  font-size:9px; font-weight:700; letter-spacing:1.4px; }"
+                       "QTableWidget#activityTabTable { background:%1; color:%5; gridline-color:%3;"
+                       "  border:1px solid %3; selection-background-color:%8; selection-color:%5;"
+                       "  font-family:%4; font-size:11px; }"
+                       "QTableWidget#activityTabTable::item { padding:6px 10px; border-bottom:1px solid %3; }"
+                       "QHeaderView::section { background:%9; color:%2; padding:6px 10px;"
+                       "  border:none; border-bottom:1px solid %3; font-family:%4;"
+                       "  font-size:9px; font-weight:700; letter-spacing:1.4px; }"
 
-        "QLabel#activityTabFooter { color:%2; font-family:%4; font-size:10px;"
-        "  background:transparent; }"
-    )
-        .arg(BG_BASE(),         // %1
-             TEXT_TERTIARY(),   // %2
-             BORDER_DIM(),      // %3
-             font,              // %4
-             TEXT_PRIMARY(),    // %5
-             BORDER_BRIGHT(),   // %6
-             AMBER(),           // %7
-             BG_HOVER(),        // %8
-             BG_RAISED());      // %9
+                       "QLabel#activityTabFooter { color:%2; font-family:%4; font-size:10px;"
+                       "  background:transparent; }")
+            .arg(BG_BASE(),       // %1
+                 TEXT_TERTIARY(), // %2
+                 BORDER_DIM(),    // %3
+                 font,            // %4
+                 TEXT_PRIMARY(),  // %5
+                 BORDER_BRIGHT(), // %6
+                 AMBER(),         // %7
+                 BG_HOVER(),      // %8
+                 BG_RAISED());    // %9
 
     setStyleSheet(ss);
 }
 
 bool ActivityTab::helius_key_present() const {
-    auto r = SecureStorage::instance().retrieve(
-        QStringLiteral("solana.helius_api_key"));
+    auto r = SecureStorage::instance().retrieve(QStringLiteral("solana.helius_api_key"));
     return r.is_ok() && !r.value().isEmpty();
 }
 
 void ActivityTab::on_wallet_connected(const QString& pubkey, const QString& /*label*/) {
     current_pubkey_ = pubkey;
-    if (isVisible()) refresh_subscription();
+    if (isVisible())
+        refresh_subscription();
 }
 
 void ActivityTab::on_wallet_disconnected() {
@@ -213,10 +227,10 @@ void ActivityTab::refresh_subscription() {
         hub.unsubscribe(this, current_topic_);
         current_topic_.clear();
     }
-    if (current_pubkey_.isEmpty()) return;
+    if (current_pubkey_.isEmpty())
+        return;
     current_topic_ = QStringLiteral("wallet:activity:%1").arg(current_pubkey_);
-    hub.subscribe(this, current_topic_,
-                  [this](const QVariant& v) { on_activity_update(v); });
+    hub.subscribe(this, current_topic_, [this](const QVariant& v) { on_activity_update(v); });
     hub.request(current_topic_, /*force=*/true);
 }
 
@@ -239,28 +253,36 @@ void ActivityTab::on_filter_changed() {
 
 void ActivityTab::on_row_clicked(int row, int /*column*/) {
     auto* it = table_->item(row, 0);
-    if (!it) return;
+    if (!it)
+        return;
     const auto sig = it->data(Qt::UserRole).toString();
-    if (sig.isEmpty()) return;
-    QDesktopServices::openUrl(QUrl(
-        QStringLiteral("https://solscan.io/tx/%1").arg(sig)));
+    if (sig.isEmpty())
+        return;
+    QDesktopServices::openUrl(
+        QUrl(QStringLiteral("https://solscan.io/tx/%1%2").arg(sig, activity_explorer_cluster_suffix())));
 }
 
 void ActivityTab::rebuild_table() {
     // Determine the active filter from which chip is checked.
     auto filter_ok = [this](Kind k) {
-        if (filter_all_ && filter_all_->isChecked()) return true;
-        if (k == Kind::Swap && filter_swap_->isChecked()) return true;
-        if (k == Kind::Send && filter_send_->isChecked()) return true;
-        if (k == Kind::Receive && filter_receive_->isChecked()) return true;
-        if (k == Kind::Other && filter_other_->isChecked()) return true;
+        if (filter_all_ && filter_all_->isChecked())
+            return true;
+        if (k == Kind::Swap && filter_swap_->isChecked())
+            return true;
+        if (k == Kind::Send && filter_send_->isChecked())
+            return true;
+        if (k == Kind::Receive && filter_receive_->isChecked())
+            return true;
+        if (k == Kind::Other && filter_other_->isChecked())
+            return true;
         return false;
     };
 
     QVector<Activity> filtered;
     filtered.reserve(latest_.size());
     for (const auto& a : latest_) {
-        if (filter_ok(a.kind)) filtered.append(a);
+        if (filter_ok(a.kind))
+            filtered.append(a);
     }
 
     table_->setRowCount(filtered.size());
@@ -270,13 +292,17 @@ void ActivityTab::rebuild_table() {
         ts->setData(Qt::UserRole, a.signature);
         table_->setItem(i, 0, ts);
 
-        table_->setItem(i, 1, new QTableWidgetItem(kind_label(a.kind)));
-        table_->setItem(i, 2, new QTableWidgetItem(
-            a.asset.isEmpty() ? QStringLiteral("—") : a.asset));
-        table_->setItem(i, 3, new QTableWidgetItem(
-            a.amount_ui.isEmpty() ? QStringLiteral("—") : a.amount_ui));
-        auto* status = new QTableWidgetItem(
-            a.status.isEmpty() ? QStringLiteral("—") : a.status);
+        auto* event_item = new QTableWidgetItem(kind_label(a.kind));
+        // The parsed counterparty was collected by the producer but never shown.
+        // Full address in the tooltip so a transfer can be checked against the
+        // wallet / explorer without leaving the row.
+        if (!a.counterparty.isEmpty()) {
+            event_item->setToolTip((a.kind == Kind::Send ? tr("To: %1") : tr("From: %1")).arg(a.counterparty));
+        }
+        table_->setItem(i, 1, event_item);
+        table_->setItem(i, 2, new QTableWidgetItem(a.asset.isEmpty() ? QStringLiteral("—") : a.asset));
+        table_->setItem(i, 3, new QTableWidgetItem(a.amount_ui.isEmpty() ? QStringLiteral("—") : a.amount_ui));
+        auto* status = new QTableWidgetItem(a.status.isEmpty() ? QStringLiteral("—") : a.status);
         table_->setItem(i, 4, status);
         auto* sig = new QTableWidgetItem(shorten_sig(a.signature));
         sig->setToolTip(a.signature);
@@ -300,13 +326,39 @@ void ActivityTab::rebuild_table() {
 
 void ActivityTab::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
-    if (!current_pubkey_.isEmpty()) refresh_subscription();
+    if (!current_pubkey_.isEmpty())
+        refresh_subscription();
 }
 
 void ActivityTab::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
     fincept::datahub::DataHub::instance().unsubscribe(this);
     current_topic_.clear();
+}
+
+void ActivityTab::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void ActivityTab::retranslateUi() {
+    if (filter_all_)
+        filter_all_->setText(tr("ALL"));
+    if (filter_swap_)
+        filter_swap_->setText(tr("SWAP"));
+    if (filter_send_)
+        filter_send_->setText(tr("SEND"));
+    if (filter_receive_)
+        filter_receive_->setText(tr("RECEIVE"));
+    if (filter_other_)
+        filter_other_->setText(tr("OTHER"));
+    if (table_) {
+        table_->setHorizontalHeaderLabels(
+            {tr("TIMESTAMP"), tr("EVENT"), tr("ASSET"), tr("AMOUNT"), tr("STATUS"), tr("SIGNATURE")});
+    }
+    // Re-render rows (kind labels) + footer in the new locale.
+    rebuild_table();
 }
 
 } // namespace fincept::screens

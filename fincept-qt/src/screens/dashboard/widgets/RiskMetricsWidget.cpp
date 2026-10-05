@@ -1,9 +1,8 @@
 #include "screens/dashboard/widgets/RiskMetricsWidget.h"
 
+#include "datahub/DataHub.h"
+#include "datahub/DataHubMetaTypes.h"
 #include "ui/theme/Theme.h"
-
-#    include "datahub/DataHub.h"
-#    include "datahub/DataHubMetaTypes.h"
 
 #include <QFrame>
 #include <QHBoxLayout>
@@ -122,7 +121,6 @@ RiskMetricsWidget::RiskMetricsWidget(QWidget* parent) : BaseWidget(tr("RISK METR
 
     apply_styles();
     set_loading(true);
-
 }
 
 void RiskMetricsWidget::apply_styles() {
@@ -138,16 +136,12 @@ void RiskMetricsWidget::apply_styles() {
 
     // VIX gradient bar: green → yellow-green → amber → orange → red (theme-aware)
     if (vix_bar_segments_.size() == 5) {
-        vix_bar_segments_[0]->setStyleSheet(
-            QString("background: %1; border-radius: 0;").arg(ui::colors::POSITIVE()));
+        vix_bar_segments_[0]->setStyleSheet(QString("background: %1; border-radius: 0;").arg(ui::colors::POSITIVE()));
         vix_bar_segments_[1]->setStyleSheet(
             QString("background: %1; border-radius: 0;").arg(ui::colors::POSITIVE_DIM()));
-        vix_bar_segments_[2]->setStyleSheet(
-            QString("background: %1; border-radius: 0;").arg(ui::colors::WARNING()));
-        vix_bar_segments_[3]->setStyleSheet(
-            QString("background: %1; border-radius: 0;").arg(ui::colors::AMBER()));
-        vix_bar_segments_[4]->setStyleSheet(
-            QString("background: %1; border-radius: 0;").arg(ui::colors::NEGATIVE()));
+        vix_bar_segments_[2]->setStyleSheet(QString("background: %1; border-radius: 0;").arg(ui::colors::WARNING()));
+        vix_bar_segments_[3]->setStyleSheet(QString("background: %1; border-radius: 0;").arg(ui::colors::AMBER()));
+        vix_bar_segments_[4]->setStyleSheet(QString("background: %1; border-radius: 0;").arg(ui::colors::NEGATIVE()));
     }
 
     sep1_->setStyleSheet(QString("background: %1;").arg(ui::colors::BORDER_DIM()));
@@ -201,9 +195,8 @@ void RiskMetricsWidget::refresh_data() {
     topics.reserve(kRiskSymbols.size());
     for (const auto& sym : kRiskSymbols)
         topics.append(QStringLiteral("market:quote:") + sym);
-    hub.request(topics, /*force=*/true);  // user-triggered: bypass min_interval
+    hub.request(topics, /*force=*/true); // user-triggered: bypass min_interval
 }
-
 
 void RiskMetricsWidget::hub_subscribe_all() {
     auto& hub = datahub::DataHub::instance();
@@ -215,7 +208,8 @@ void RiskMetricsWidget::hub_subscribe_all() {
                 return;
             row_cache_.insert(sym, v.value<services::QuoteData>());
             set_loading_progress(row_cache_.size(), kRiskSymbols.size());
-            rebuild_from_cache();
+            // One redraw per delivery burst, not one per symbol.
+            schedule_render([this]() { rebuild_from_cache(); });
         });
     }
     hub_active_ = true;
@@ -237,7 +231,6 @@ void RiskMetricsWidget::rebuild_from_cache() {
     if (!quotes.isEmpty())
         populate(quotes);
 }
-
 
 void RiskMetricsWidget::populate(const QVector<services::QuoteData>& quotes) {
     QMap<QString, const services::QuoteData*> map;
@@ -313,12 +306,10 @@ void RiskMetricsWidget::populate(const QVector<services::QuoteData>& quotes) {
     };
 
     if (map.contains("SPY") && map.contains("QQQ")) {
-        double d = map["SPY"]->change_pct - map["QQQ"]->change_pct;
         spy_qqq_spread_->setText(spread_str(map["SPY"]->change_pct, map["QQQ"]->change_pct));
         spy_qqq_spread_->setStyleSheet(
             QString("color: %1; font-size: 10px; font-weight: bold; background: transparent;")
                 .arg(spread_color(map["SPY"]->change_pct, map["QQQ"]->change_pct)));
-        (void)d;
     }
     if (map.contains("SPY") && map.contains("IWM")) {
         spy_iwm_spread_->setText(spread_str(map["SPY"]->change_pct, map["IWM"]->change_pct));
@@ -332,6 +323,12 @@ void RiskMetricsWidget::populate(const QVector<services::QuoteData>& quotes) {
             QString("color: %1; font-size: 10px; font-weight: bold; background: transparent;")
                 .arg(spread_color(map["SPY"]->change_pct, map["TLT"]->change_pct)));
     }
+}
+
+void RiskMetricsWidget::retranslateUi() {
+    BaseWidget::retranslateUi();
+    set_title(tr("RISK METRICS"));
+    rebuild_from_cache(); // re-renders header/regime/section labels in the new language
 }
 
 } // namespace fincept::screens::widgets

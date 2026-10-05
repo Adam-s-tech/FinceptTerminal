@@ -18,6 +18,8 @@ class EquityPeersTab : public QWidget {
   public:
     explicit EquityPeersTab(QWidget* parent = nullptr);
     void set_symbol(const QString& symbol);
+    QString peers_text() const;
+    void set_peers_text(const QString& text);
 
   protected:
     void changeEvent(QEvent* event) override;
@@ -33,12 +35,15 @@ class EquityPeersTab : public QWidget {
     QStringList default_peers(const QString& symbol) const;
 
     QString current_symbol_;
+    /// Anchor + peers of the request in flight — peers_loaded() carries no symbol, so a
+    /// response is matched against this to drop one that belongs to an older request.
+    QStringList requested_symbols_;
     QLineEdit* peers_edit_ = nullptr;
-    QLabel* peers_caption_ = nullptr;     ///< "PEERS (comma-separated):"
+    QLabel* peers_caption_ = nullptr; ///< "PEERS (comma-separated):"
     QLabel* status_label_ = nullptr;
     QTableWidget* peer_table_ = nullptr;
     QPushButton* load_btn_ = nullptr;
-    QList<QLabel*> legend_text_lbls_;     ///< Legend captions for retranslate
+    QList<QLabel*> legend_text_lbls_; ///< Legend captions for retranslate
     QVector<services::equity::PeerData> cached_peers_;
     bool peers_loaded_ = false;
 

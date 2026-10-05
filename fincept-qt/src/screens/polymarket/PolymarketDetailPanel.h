@@ -5,10 +5,13 @@
 #include "services/prediction/PredictionTypes.h"
 
 #include <QComboBox>
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QList>
 #include <QPushButton>
 #include <QStackedWidget>
+#include <QStringList>
 #include <QTableWidget>
 #include <QWidget>
 
@@ -50,6 +53,9 @@ class PolymarketDetailPanel : public QWidget {
     /// Called when credentials state changes so ticket can show/hide the
     /// "connect account" placeholder vs the actual ticket form.
     void set_trading_enabled(bool enabled);
+    /// Restrict the ticket's ORDER TYPE box to the codes the active exchange can place
+    /// (from ExchangeCapabilities). The box was a fixed GTC/FOK/FAK list for every venue.
+    void set_order_types(const QStringList& types);
 
     // Polymarket-only enrichment setters — guarded by active_id at the caller.
     void set_price_summary(const fincept::services::polymarket::PriceSummary& summary);
@@ -70,6 +76,9 @@ class PolymarketDetailPanel : public QWidget {
 
     void clear();
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   signals:
     void tab_changed(int index);
     void interval_changed(const QString& interval);
@@ -87,13 +96,32 @@ class PolymarketDetailPanel : public QWidget {
 
     void set_active_tab(int tab);
     void apply_accent_to_tabs();
-    void apply_presentation_to_stats();  // show/hide OPEN INT cell, re-label
+    void apply_presentation_to_stats(); // show/hide OPEN INT cell, re-label
     void render_status_badge(const fincept::services::prediction::PredictionMarket& market);
     void refresh_ticket_side_style();
     void on_submit_clicked();
+    void retranslateUi();
+
+    /// Recompute the "≈ COST" readout under the ticket from the current
+    /// price × size. Shows "—" when either field is blank/invalid.
+    void refresh_ticket_cost();
+    /// Fill the ticket price from an order-book level click and surface the
+    /// TRADE tab so the effect is visible. No-op when trading is disabled.
+    void on_book_price_clicked(double price);
+    /// Repopulate the ticket outcome combo for `market`, preserving the
+    /// user's current choice by outcome name when the market is unchanged.
+    void sync_ticket_outcomes(const fincept::services::prediction::PredictionMarket& market, bool same_market);
 
     QList<QPushButton*> tab_btns_;
     QStackedWidget* stack_ = nullptr;
+
+    // Fixed-text captions cached for retranslateUi.
+    QLabel* outcomes_header_ = nullptr;
+    QList<QLabel*> stat_caption_lbls_;  // VOLUME / LIQUIDITY / OPEN INT / END DATE / MIDPOINT / SPREAD / LAST TRADE
+    QLabel* no_acct_msg_lbl_ = nullptr; // "Connect an account…"
+    QLabel* bal_caption_lbl_ = nullptr; // "AVAILABLE"
+    QLabel* pos_caption_lbl_ = nullptr; // "POSITION"
+    QList<QLabel*> trade_form_caption_lbls_; // OUTCOME / PRICE (0–1) / SIZE / ORDER TYPE
 
     // Overview
     QLabel* question_label_ = nullptr;
@@ -114,18 +142,31 @@ class PolymarketDetailPanel : public QWidget {
     PolymarketActivityFeed* activity_feed_ = nullptr;
 
     // Trade ticket
-    QStackedWidget* ticket_stack_       = nullptr;  // 0=no-account, 1=ticket
-    QLabel*         ticket_balance_lbl_ = nullptr;
-    QLabel*         ticket_position_lbl_= nullptr;
-    QComboBox*      ticket_outcome_cb_  = nullptr;
-    QPushButton*    ticket_buy_btn_     = nullptr;
-    QPushButton*    ticket_sell_btn_    = nullptr;
-    QLineEdit*      ticket_price_edit_  = nullptr;
-    QLineEdit*      ticket_size_edit_   = nullptr;
-    QComboBox*      ticket_type_cb_     = nullptr;
-    QPushButton*    ticket_submit_btn_  = nullptr;
-    QLabel*         ticket_status_lbl_  = nullptr;
-    QString         ticket_side_        = "BUY";
+    QStackedWidget* ticket_stack_ = nullptr; // 0=no-account, 1=ticket
+    QLabel* ticket_balance_lbl_ = nullptr;
+    QLabel* ticket_position_lbl_ = nullptr;
+    QComboBox* ticket_outcome_cb_ = nullptr;
+    QPushButton* ticket_buy_btn_ = nullptr;
+    QPushButton* ticket_sell_btn_ = nullptr;
+    QLineEdit* ticket_price_edit_ = nullptr;
+    QLineEdit* ticket_size_edit_ = nullptr;
+    QComboBox* ticket_type_cb_ = nullptr;
+    QPushButton* ticket_submit_btn_ = nullptr;
+    QLabel* ticket_status_lbl_ = nullptr;
+    QLabel* ticket_cost_lbl_ = nullptr; // "≈ $12.50 max cost" readout
+    QString ticket_side_ = "BUY";
+    /// Outcome names currently loaded into ticket_outcome_cb_. Lets a
+    /// same-market refresh skip the rebuild (and so keep the selection).
+    QStringList ticket_outcome_names_;
+    /// True between emit place_order() and the matching on_order_result().
+    /// Guards against double-submit and stops an incoming price refresh from
+    /// re-enabling the submit button mid-flight.
+    bool submit_in_flight_ = false;
+    /// Exchange constraints captured from the last order book for the
+    /// selected market. Used to validate/round the ticket price and size so
+    /// the exchange doesn't silently reject the order.
+    double book_tick_size_ = 0.0;
+    double book_min_size_ = 0.0;
 
     // Holders
     QTableWidget* holders_table_ = nullptr;
@@ -151,11 +192,11 @@ class PolymarketDetailPanel : public QWidget {
     bool has_last_market_ = false;
 
     // Tab indices.
-    static constexpr int kTabTrade    = 3;
-    static constexpr int kTabTrades   = 4;
-    static constexpr int kTabHolders  = 5;
+    static constexpr int kTabTrade = 3;
+    static constexpr int kTabTrades = 4;
+    static constexpr int kTabHolders = 5;
     static constexpr int kTabComments = 6;
-    static constexpr int kTabRelated  = 7;
+    static constexpr int kTabRelated = 7;
 };
 
 } // namespace fincept::screens::polymarket

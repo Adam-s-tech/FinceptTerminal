@@ -1,9 +1,8 @@
 #include "screens/dashboard/widgets/QuickTradeWidget.h"
 
+#include "datahub/DataHub.h"
+#include "datahub/DataHubMetaTypes.h"
 #include "ui/theme/Theme.h"
-
-#    include "datahub/DataHub.h"
-#    include "datahub/DataHubMetaTypes.h"
 
 #include <QFrame>
 #include <QHBoxLayout>
@@ -131,6 +130,21 @@ QuickTradeWidget::QuickTradeWidget(QWidget* parent) : BaseWidget(tr("QUICK TRADE
     submit_btn_->setFixedHeight(32);
     vl->addWidget(submit_btn_);
 
+    // ── Accessibility ──
+    symbol_input_->setAccessibleName(tr("Symbol"));
+    lookup_btn_->setAccessibleName(tr("Look up symbol"));
+    side_combo_->setAccessibleName(tr("Order side"));
+    order_type_->setAccessibleName(tr("Order type"));
+    qty_input_->setAccessibleName(tr("Quantity"));
+    price_input_->setAccessibleName(tr("Limit / stop price"));
+    submit_btn_->setAccessibleName(tr("Place order"));
+    setTabOrder(symbol_input_, lookup_btn_);
+    setTabOrder(lookup_btn_, side_combo_);
+    setTabOrder(side_combo_, order_type_);
+    setTabOrder(order_type_, qty_input_);
+    setTabOrder(qty_input_, price_input_);
+    setTabOrder(price_input_, submit_btn_);
+
     // ── Connections ──
     connect(lookup_btn_, &QPushButton::clicked, this, &QuickTradeWidget::lookup_symbol);
     connect(symbol_input_, &QLineEdit::returnPressed, this, &QuickTradeWidget::lookup_symbol);
@@ -238,7 +252,6 @@ void QuickTradeWidget::lookup_symbol() {
     set_loading(true);
 }
 
-
 void QuickTradeWidget::apply_quote(const services::QuoteData& q) {
     current_price_ = q.price;
     current_symbol_ = q.symbol.isEmpty() ? current_symbol_ : q.symbol;
@@ -272,11 +285,12 @@ void QuickTradeWidget::hub_unsubscribe_all() {
     hub_active_ = false;
 }
 
-
 void QuickTradeWidget::on_side_changed(int idx) {
     // BUY = green, SELL/SHORT = red
     QString color = (idx == 0) ? ui::colors::POSITIVE() : ui::colors::NEGATIVE();
-    submit_btn_->setText(idx == 0 ? tr("PLACE BUY ORDER") : idx == 1 ? tr("PLACE SELL ORDER") : tr("PLACE SHORT ORDER"));
+    submit_btn_->setText(idx == 0   ? tr("PLACE BUY ORDER")
+                         : idx == 1 ? tr("PLACE SELL ORDER")
+                                    : tr("PLACE SHORT ORDER"));
     submit_btn_->setStyleSheet(QString("QPushButton { background: %1; color: %3; border: none; "
                                        "font-size: 11px; font-weight: bold; }"
                                        "QPushButton:hover { background: %2; }")
@@ -287,19 +301,85 @@ void QuickTradeWidget::submit_order() {
     QString sym = current_symbol_.isEmpty() ? symbol_input_->text().trimmed().toUpper() : current_symbol_;
     double qty = qty_input_->text().toDouble();
     QString side = side_combo_->currentText();
-    QString type = order_type_->currentText();
 
     if (sym.isEmpty() || qty <= 0) {
         QMessageBox::warning(this, tr("Quick Trade"), tr("Please enter a valid symbol and quantity."));
         return;
     }
 
-    QString price_str = type == "MARKET" ? tr("market price ($%1)").arg(current_price_, 0, 'f', 2)
-                                         : QString("$%1").arg(price_input_->text());
+    // NOTE: the removed `price_str` local compared `order_type_->currentText()`
+    // against the literal "MARKET" — a translated string, so the branch was
+    // wrong in every non-English locale. It was also immediately Q_UNUSED'd.
+    //
+    // This dashboard widget has no broker/account binding, so it cannot place a
+    // real or paper order. Previously it popped an "Order sent to trading
+    // engine" success box while sending nothing — a dangerous false confirmation
+    // on a trading terminal. Be honest and point the user at the real order
+    // entry (Equity/Crypto Trading), which has account selection, paper/live
+    // routing and an explicit confirmation. (Wiring Quick Trade to an account is
+    // tracked as a follow-up.)
+    // The dialog now offers a one-click hand-off: "Open Equity Trading" selects
+    // this symbol there via nav.open_symbol. That is navigation only - it never
+    // creates or sends an order; the order is still entered and confirmed on
+    // the trading screen.
+    QMessageBox box(QMessageBox::Information, tr("Quick Trade"),
+                    tr("Quick Trade is a preview widget and is not connected to a trading account — no order was "
+                       "placed.\n\n"
+                       "To place %1 %2 %3, use the Equity Trading or Crypto Trading screen, which routes the order to "
+                       "your selected broker/paper account with confirmation.")
+                        .arg(side)
+                        .arg(qty, 0, 'f', 0)
+                        .arg(sym),
+                    QMessageBox::NoButton, this);
+    QPushButton* open_btn = box.addButton(tr("Open Equity Trading"), QMessageBox::AcceptRole);
+    box.addButton(QMessageBox::Close);
+    box.setDefaultButton(QMessageBox::Close);
+    box.exec();
+    if (box.clickedButton() == open_btn)
+        open_symbol(sym, QStringLiteral("equity_trading"));
+}
 
-    QMessageBox::information(
-        this, tr("Order Submitted"),
-        tr("%1 %2 %3 @ %4\nOrder sent to trading engine.").arg(side).arg(qty, 0, 'f', 0).arg(sym).arg(price_str));
+void QuickTradeWidget::retranslateUi() {
+    BaseWidget::retranslateUi();
+    set_title(tr("QUICK TRADE"));
+    if (lookup_btn_)
+        lookup_btn_->setText(tr("LOOKUP"));
+    if (qty_lbl_)
+        qty_lbl_->setText(tr("QTY"));
+    if (price_lbl_)
+        price_lbl_->setText(tr("PRICE"));
+    if (symbol_input_)
+        symbol_input_->setPlaceholderText(tr("Symbol (e.g. AAPL)"));
+    // Combo items and the bid/ask/total labels were previously left in the old
+    // language after a live switch.
+    if (order_type_) {
+        const int cur = order_type_->currentIndex();
+        const QStringList items = {tr("MARKET"), tr("LIMIT"), tr("STOP")};
+        for (int i = 0; i < order_type_->count() && i < items.size(); ++i)
+            order_type_->setItemText(i, items[i]);
+        order_type_->setCurrentIndex(cur);
+        if (price_input_)
+            price_input_->setPlaceholderText(cur == 0 ? tr("market") : QStringLiteral("0.00"));
+    }
+    if (side_combo_) {
+        const int cur = side_combo_->currentIndex();
+        const QStringList items = {tr("BUY"), tr("SELL"), tr("SHORT")};
+        for (int i = 0; i < side_combo_->count() && i < items.size(); ++i)
+            side_combo_->setItemText(i, items[i]);
+        side_combo_->setCurrentIndex(cur);
+    }
+    if (bid_label_)
+        bid_label_->setText(current_price_ > 0 ? tr("BID  —") : tr("BID --"));
+    if (ask_label_)
+        ask_label_->setText(current_price_ > 0 ? tr("ASK  —") : tr("ASK --"));
+    if (est_total_) {
+        const double qty = qty_input_ ? qty_input_->text().toDouble() : 0.0;
+        est_total_->setText(current_price_ > 0 && qty > 0 ? tr("EST. TOTAL  $%1").arg(qty * current_price_, 0, 'f', 2)
+                                                          : tr("EST. TOTAL  --"));
+    }
+    // submit_btn_ text is side-aware ("PLACE BUY ORDER" etc.) — let on_side_changed re-derive it.
+    if (side_combo_)
+        on_side_changed(side_combo_->currentIndex());
 }
 
 } // namespace fincept::screens::widgets

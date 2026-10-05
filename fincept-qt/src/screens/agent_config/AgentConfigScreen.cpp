@@ -1,9 +1,9 @@
 // src/screens/agent_config/AgentConfigScreen.cpp
 #include "screens/agent_config/AgentConfigScreen.h"
 
+#include "core/events/EventBus.h"
 #include "core/logging/Logger.h"
 #include "core/session/ScreenStateManager.h"
-#include "core/events/EventBus.h"
 #include "screens/agent_config/AgentChatPanel.h"
 #include "screens/agent_config/AgenticTasksPanel.h"
 #include "screens/agent_config/AgentsViewPanel.h"
@@ -14,6 +14,7 @@
 #include "screens/agent_config/ToolsViewPanel.h"
 #include "screens/agent_config/WorkflowsViewPanel.h"
 #include "services/agents/AgentService.h"
+#include "services/cloud/CloudSyncEngine.h"
 #include "storage/repositories/SettingsRepository.h"
 #include "ui/theme/Theme.h"
 #include "ui/theme/ThemeManager.h"
@@ -36,15 +37,15 @@ struct ViewMeta {
 // initialization time — actual lookup happens in make_nav_btn() / status-view
 // update via tr(), so the active translator is consulted on every render.
 static constexpr ViewMeta kViews[] = {
-    {services::AgentViewMode::Agents,    QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "AGENTS")},
-    {services::AgentViewMode::Create,    QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "CREATE")},
-    {services::AgentViewMode::Teams,     QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "TEAMS")},
+    {services::AgentViewMode::Agents, QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "AGENTS")},
+    {services::AgentViewMode::Create, QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "CREATE")},
+    {services::AgentViewMode::Teams, QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "TEAMS")},
     {services::AgentViewMode::Workflows, QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "WORKFLOWS")},
-    {services::AgentViewMode::Planner,   QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "PLANNER")},
-    {services::AgentViewMode::Tools,     QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "TOOLS")},
-    {services::AgentViewMode::Chat,      QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "CHAT")},
-    {services::AgentViewMode::System,    QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "SYSTEM")},
-    {services::AgentViewMode::Agentic,   QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "AGENTIC")},
+    {services::AgentViewMode::Planner, QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "PLANNER")},
+    {services::AgentViewMode::Tools, QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "TOOLS")},
+    {services::AgentViewMode::Chat, QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "CHAT")},
+    {services::AgentViewMode::System, QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "SYSTEM")},
+    {services::AgentViewMode::Agentic, QT_TRANSLATE_NOOP("fincept::screens::AgentConfigScreen", "AGENTIC")},
 };
 
 // ── Constructor ──────────────────────────────────────────────────────────────
@@ -60,8 +61,8 @@ AgentConfigScreen::AgentConfigScreen(QWidget* parent) : QWidget(parent) {
     // (DeveloperSection) publishes settings.agentic_mode_changed via EventBus
     // on user change; we react in-place without restart.
     {
-        auto r = fincept::SettingsRepository::instance().get(
-            QStringLiteral("agentic_mode_enabled"), QStringLiteral("false"));
+        auto r = fincept::SettingsRepository::instance().get(QStringLiteral("agentic_mode_enabled"),
+                                                             QStringLiteral("false"));
         agentic_mode_enabled_ = r.is_ok() && r.value() == QStringLiteral("true");
     }
     connect(&fincept::EventBus::instance(), &fincept::EventBus::eventPublished, this,
@@ -105,8 +106,9 @@ void AgentConfigScreen::build_nav_bar(QVBoxLayout* root) {
     hl->setSpacing(0);
 
     title_label_ = new QLabel(tr("AGENT STUDIO"));
-    title_label_->setStyleSheet(QString("color:%1;font-size:13px;font-weight:700;letter-spacing:2px;padding-right:16px;")
-                                    .arg(ui::colors::AMBER()));
+    title_label_->setStyleSheet(
+        QString("color:%1;font-size:13px;font-weight:700;letter-spacing:2px;padding-right:16px;")
+            .arg(ui::colors::AMBER()));
     hl->addWidget(title_label_);
 
     auto* sep = new QFrame;
@@ -172,7 +174,8 @@ void AgentConfigScreen::changeEvent(QEvent* event) {
 }
 
 void AgentConfigScreen::retranslateUi() {
-    if (title_label_) title_label_->setText(tr("AGENT STUDIO"));
+    if (title_label_)
+        title_label_->setText(tr("AGENT STUDIO"));
     // Nav buttons — apply the QT_TR_NOOP-marked label through tr() in order
     // so the table-driven mode mapping survives the language switch.
     for (int i = 0; i < nav_buttons_.size() && i < static_cast<int>(std::size(kViews)); ++i)
@@ -262,8 +265,28 @@ void AgentConfigScreen::ensure_panel_built(services::AgentViewMode mode) {
 
     // Wire cross-panel signals now that relevant panels may be available
     wire_cross_panel_signals();
+    apply_pending_draft(mode);
 
     LOG_INFO("AgentConfigScreen", QString("Built panel: %1").arg(kViews[idx].label));
+}
+
+void AgentConfigScreen::apply_pending_draft(services::AgentViewMode mode) {
+    switch (mode) {
+        case services::AgentViewMode::Create:
+            if (create_panel_ && pending_state_.contains("create_draft"))
+                create_panel_->restore_draft(pending_state_.take("create_draft").toMap());
+            break;
+        case services::AgentViewMode::Agents:
+            if (agents_panel_ && pending_state_.contains("agents_draft"))
+                agents_panel_->restore_draft(pending_state_.take("agents_draft").toMap());
+            break;
+        case services::AgentViewMode::Workflows:
+            if (workflows_panel_ && pending_state_.contains("workflows_draft"))
+                workflows_panel_->restore_draft(pending_state_.take("workflows_draft").toMap());
+            break;
+        default:
+            break;
+    }
 }
 
 QWidget* AgentConfigScreen::panel_widget(services::AgentViewMode mode) const {
@@ -420,6 +443,8 @@ void AgentConfigScreen::showEvent(QShowEvent* event) {
         ensure_panel_built(services::AgentViewMode::Agents);
         services::AgentService::instance().discover_agents();
     }
+    // Rate-gated pull of cloud agent configs on screen entry (no-op when sync is off).
+    fincept::services::cloud::CloudSyncEngine::instance().request_pull(QStringLiteral("agent_config"));
 }
 
 void AgentConfigScreen::hideEvent(QHideEvent* event) {
@@ -429,14 +454,41 @@ void AgentConfigScreen::hideEvent(QHideEvent* event) {
 // ── IStatefulScreen ──────────────────────────────────────────────────────────
 
 QVariantMap AgentConfigScreen::save_state() const {
-    return {{"view", static_cast<int>(current_view_)}};
+    QVariantMap state{{"view", static_cast<int>(current_view_)}};
+    // A panel that was never opened this session still owns the draft restored for
+    // it — carry that forward instead of silently dropping it.
+    if (create_panel_)
+        state["create_draft"] = create_panel_->save_draft();
+    else if (pending_state_.contains("create_draft"))
+        state["create_draft"] = pending_state_.value("create_draft");
+    if (agents_panel_)
+        state["agents_draft"] = agents_panel_->save_draft();
+    else if (pending_state_.contains("agents_draft"))
+        state["agents_draft"] = pending_state_.value("agents_draft");
+    if (workflows_panel_)
+        state["workflows_draft"] = workflows_panel_->save_draft();
+    else if (pending_state_.contains("workflows_draft"))
+        state["workflows_draft"] = pending_state_.value("workflows_draft");
+    return state;
 }
 
 void AgentConfigScreen::restore_state(const QVariantMap& state) {
     const int v = state.value("view", -1).toInt();
-    if (v < 0)
+    if (v < 0 || v >= static_cast<int>(std::size(kViews)))
         return;
-    set_view(static_cast<services::AgentViewMode>(v));
+    // Only the restored view's panel (plus any already built) exists at this point —
+    // the CREATE / AGENTS / WORKFLOWS drafts used to be applied only if their panel
+    // happened to be built, so the others were lost. Stash them; ensure_panel_built()
+    // applies each when its tab is first opened.
+    pending_state_ = state;
+    auto mode = static_cast<services::AgentViewMode>(v);
+    // The AGENTIC tab is hidden unless Agentic Mode is on — don't restore onto it.
+    if (mode == services::AgentViewMode::Agentic && !agentic_mode_enabled_)
+        mode = services::AgentViewMode::Agents;
+    set_view(mode);
+    apply_pending_draft(services::AgentViewMode::Create);
+    apply_pending_draft(services::AgentViewMode::Agents);
+    apply_pending_draft(services::AgentViewMode::Workflows);
 }
 
 } // namespace fincept::screens

@@ -12,8 +12,14 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 
 namespace fincept::screens {
+namespace {
+/// Most-recent periods rendered in the observation table. The chart still
+/// plots the whole series; only this preview grid is capped.
+constexpr int kMaxRows = 50;
+} // namespace
 
 DBnomicsDataTable::DBnomicsDataTable(QWidget* parent) : QWidget(parent) {
     build_ui();
@@ -25,15 +31,15 @@ void DBnomicsDataTable::build_ui() {
     root->setSpacing(0);
 
     // ── Section header (always visible) ──────────────────────────────────────
-    auto* header_label = new QLabel("OBSERVATION DATA", this);
-    header_label->setStyleSheet(QString("color: %1; font-size: 11px; font-weight: 700; "
-                                        "font-family: 'Consolas','Courier New',monospace; "
-                                        "padding: 6px 12px; background: %2; "
-                                        "border-bottom: 1px solid %3;")
-                                    .arg(ui::colors::AMBER())
-                                    .arg(ui::colors::BG_RAISED())
-                                    .arg(ui::colors::BORDER_DIM()));
-    root->addWidget(header_label);
+    header_label_ = new QLabel(tr("OBSERVATION DATA"), this);
+    header_label_->setStyleSheet(QString("color: %1; font-size: 11px; font-weight: 700; "
+                                         "font-family: 'Consolas','Courier New',monospace; "
+                                         "padding: 6px 12px; background: %2; "
+                                         "border-bottom: 1px solid %3;")
+                                     .arg(ui::colors::AMBER())
+                                     .arg(ui::colors::BG_RAISED())
+                                     .arg(ui::colors::BORDER_DIM()));
+    root->addWidget(header_label_);
 
     stack_ = new QStackedWidget(this);
 
@@ -83,7 +89,7 @@ void DBnomicsDataTable::build_ui() {
                               .arg(ui::colors::BG_RAISED())      // %5
                               .arg(ui::colors::TEXT_SECONDARY()) // %6
                               .arg(ui::colors::BG_SURFACE()));   // %7 alternate row
-    stack_->addWidget(table_);                                 // index 1
+    stack_->addWidget(table_);                                   // index 1
 
     stack_->setCurrentIndex(1);
     root->addWidget(stack_);
@@ -93,15 +99,32 @@ void DBnomicsDataTable::build_ui() {
     spin_timer_->setInterval(120);
     connect(spin_timer_, &QTimer::timeout, this, [this]() {
         static const QString frames[] = {"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"};
-        spin_label_->setText(QString("%1  LOADING OBSERVATIONS...").arg(frames[frame_ % 8]));
+        spin_label_->setText(tr("%1  LOADING OBSERVATIONS...").arg(frames[frame_ % 8]));
         ++frame_;
     });
+}
+
+// ── Live language switch ─────────────────────────────────────────────────────
+
+void DBnomicsDataTable::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void DBnomicsDataTable::retranslateUi() {
+    if (header_label_)
+        header_label_->setText(tr("OBSERVATION DATA"));
+    // The table headers / cells are rebuilt by set_data(); only the empty-state
+    // placeholder needs an explicit re-apply here.
+    if (showing_placeholder_)
+        clear();
 }
 
 void DBnomicsDataTable::set_loading(bool on) {
     if (on) {
         frame_ = 0;
-        spin_label_->setText("⣾  LOADING OBSERVATIONS...");
+        spin_label_->setText(tr("%1  LOADING OBSERVATIONS...").arg(QStringLiteral("⣾")));
         stack_->setCurrentIndex(0);
         spin_timer_->start();
     } else {
@@ -111,15 +134,18 @@ void DBnomicsDataTable::set_loading(bool on) {
 }
 
 void DBnomicsDataTable::clear() {
+    if (header_label_)
+        header_label_->setText(tr("OBSERVATION DATA"));
     table_->clear();
     table_->setRowCount(1);
     table_->setColumnCount(1);
-    table_->setHorizontalHeaderLabels({"STATUS"});
-    auto* item = new QTableWidgetItem("No data — select a series");
+    table_->setHorizontalHeaderLabels({tr("STATUS")});
+    auto* item = new QTableWidgetItem(tr("No data — select a series"));
     item->setForeground(QColor(ui::colors::TEXT_TERTIARY()));
     item->setTextAlignment(Qt::AlignCenter);
     table_->setItem(0, 0, item);
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    showing_placeholder_ = true;
 }
 
 void DBnomicsDataTable::set_data(const QVector<services::DbnDataPoint>& series) {
@@ -128,6 +154,7 @@ void DBnomicsDataTable::set_data(const QVector<services::DbnDataPoint>& series) 
         clear();
         return;
     }
+    showing_placeholder_ = false;
 
     // Collect all unique periods across all series, sorted descending
     QSet<QString> period_set;
@@ -138,14 +165,25 @@ void DBnomicsDataTable::set_data(const QVector<services::DbnDataPoint>& series) 
     }
     QVector<QString> periods(period_set.begin(), period_set.end());
     std::sort(periods.begin(), periods.end(), std::greater<QString>());
-    if (periods.size() > 50)
-        periods.resize(50);
+    const int total_periods = static_cast<int>(periods.size());
+    if (total_periods > kMaxRows)
+        periods.resize(kMaxRows);
+    const int shown_periods = static_cast<int>(periods.size());
+    // Be explicit that the table is truncated — it silently showed only the
+    // 50 most recent periods with no indication the series went further back.
+    if (header_label_) {
+        header_label_->setText(total_periods > shown_periods
+                                   ? tr("OBSERVATION DATA — LATEST %1 OF %2 PERIODS")
+                                         .arg(shown_periods)
+                                         .arg(total_periods)
+                                   : tr("OBSERVATION DATA — %1 PERIODS").arg(total_periods));
+    }
 
     // Columns: Period + one per series
     const int col_count = 1 + series.size();
     table_->setColumnCount(col_count);
     QStringList headers;
-    headers << "PERIOD";
+    headers << tr("PERIOD");
     for (const auto& dp : series) {
         QString short_name = dp.series_name;
         if (short_name.length() > 20)
@@ -182,8 +220,21 @@ void DBnomicsDataTable::set_data(const QVector<services::DbnDataPoint>& series) 
         for (int s = 0; s < series.size(); ++s) {
             QTableWidgetItem* cell;
             if (lookups[s].contains(period) && lookups[s][period].valid) {
-                cell = new QTableWidgetItem(QString::number(lookups[s][period].value, 'f', 4));
-                cell->setForeground(QColor("#00E5FF")); // cyan for valid data
+                const double v = lookups[s][period].value;
+                // Fixed 4-decimals mangled both ends of the range: a levels
+                // series (GDP) got 4 pointless zeros, and anything below 1e-4
+                // (rates in decimal form, small indices) collapsed to "0.0000".
+                QString txt;
+                if (v == std::floor(v) && std::abs(v) < 1e15)
+                    txt = QString::number(static_cast<qint64>(v));
+                else if (std::abs(v) >= 1e-4)
+                    txt = QString::number(v, 'f', 4);
+                else
+                    txt = QString::number(v, 'g', 6);
+                cell = new QTableWidgetItem(txt);
+                // Theme token, not a hard-coded hex — the old #00E5FF was
+                // invisible against a light theme background.
+                cell->setForeground(QColor(ui::colors::CYAN()));
             } else {
                 cell = new QTableWidgetItem("—");
                 cell->setForeground(QColor(ui::colors::TEXT_TERTIARY()));

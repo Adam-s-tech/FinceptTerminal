@@ -22,6 +22,7 @@
 #include <QScrollArea>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -56,20 +57,20 @@ void LoggingSection::build_ui() {
     vl->setContentsMargins(24, 24, 24, 24);
     vl->setSpacing(16);
 
-    auto* t = new QLabel(tr("LOGGING"));
-    t->setStyleSheet(section_title_ss());
-    vl->addWidget(t);
+    section_title_ = new QLabel(tr("LOGGING"));
+    section_title_->setStyleSheet(section_title_ss());
+    vl->addWidget(section_title_);
     vl->addWidget(make_sep());
 
     // ── Global level ────────────────────────────────────────────────────────
-    auto* global_lbl = new QLabel(tr("Global Log Level"));
-    global_lbl->setStyleSheet(sub_title_ss());
-    vl->addWidget(global_lbl);
+    global_lbl_ = new QLabel(tr("Global Log Level"));
+    global_lbl_->setStyleSheet(sub_title_ss());
+    vl->addWidget(global_lbl_);
 
-    auto* global_desc = new QLabel(tr("Minimum level for all tags unless overridden."));
-    global_desc->setStyleSheet(label_ss());
-    global_desc->setWordWrap(true);
-    vl->addWidget(global_desc);
+    global_desc_ = new QLabel(tr("Minimum level for all tags unless overridden."));
+    global_desc_->setStyleSheet(label_ss());
+    global_desc_->setWordWrap(true);
+    vl->addWidget(global_desc_);
 
     log_global_level_ = new QComboBox;
     log_global_level_->addItems(LEVEL_NAMES);
@@ -83,25 +84,26 @@ void LoggingSection::build_ui() {
     vl->addWidget(make_sep());
 
     // ── Output format ───────────────────────────────────────────────────────
-    auto* fmt_title = new QLabel(tr("Output Format"));
-    fmt_title->setStyleSheet(sub_title_ss());
-    vl->addWidget(fmt_title);
+    fmt_title_ = new QLabel(tr("Output Format"));
+    fmt_title_->setStyleSheet(sub_title_ss());
+    vl->addWidget(fmt_title_);
 
-    auto* fmt_desc = new QLabel(
+    fmt_desc_ = new QLabel(
         tr("Plain text is human-readable; JSON emits one structured object per line (easier to parse with tooling)."));
-    fmt_desc->setStyleSheet(label_ss());
-    fmt_desc->setWordWrap(true);
-    vl->addWidget(fmt_desc);
+    fmt_desc_->setStyleSheet(label_ss());
+    fmt_desc_->setWordWrap(true);
+    vl->addWidget(fmt_desc_);
 
     log_json_mode_ = new QCheckBox(tr("Emit structured JSON lines"));
+    log_json_mode_->setStyleSheet(check_ss()); // was the only unstyled control on this page
     log_json_mode_->setChecked(AppConfig::instance().get("log/json_mode", false).toBool());
     vl->addWidget(log_json_mode_);
     vl->addWidget(make_sep());
 
     // ── Log file location ───────────────────────────────────────────────────
-    auto* path_title = new QLabel(tr("Log File"));
-    path_title->setStyleSheet(sub_title_ss());
-    vl->addWidget(path_title);
+    path_title_ = new QLabel(tr("Log File"));
+    path_title_->setStyleSheet(sub_title_ss());
+    vl->addWidget(path_title_);
 
     const QString log_path = AppPaths::logs() + "/fincept.log";
     log_path_label_ = new QLabel(QDir::toNativeSeparators(log_path));
@@ -115,46 +117,51 @@ void LoggingSection::build_ui() {
     path_rl->setContentsMargins(0, 0, 0, 0);
     path_rl->setSpacing(8);
 
-    auto* open_folder_btn = new QPushButton(tr("Open Log Folder"));
-    open_folder_btn->setStyleSheet(btn_secondary_ss());
-    open_folder_btn->setFixedHeight(30);
-    open_folder_btn->setFixedWidth(160);
-    connect(open_folder_btn, &QPushButton::clicked, this,
+    open_folder_btn_ = new QPushButton(tr("Open Log Folder"));
+    open_folder_btn_->setStyleSheet(btn_secondary_ss());
+    open_folder_btn_->setFixedHeight(30);
+    open_folder_btn_->setFixedWidth(160);
+    connect(open_folder_btn_, &QPushButton::clicked, this,
             []() { QDesktopServices::openUrl(QUrl::fromLocalFile(AppPaths::logs())); });
 
-    auto* copy_path_btn = new QPushButton(tr("Copy Path"));
-    copy_path_btn->setStyleSheet(btn_secondary_ss());
-    copy_path_btn->setFixedHeight(30);
-    copy_path_btn->setFixedWidth(120);
-    connect(copy_path_btn, &QPushButton::clicked, this, [this]() {
+    copy_path_btn_ = new QPushButton(tr("Copy Path"));
+    copy_path_btn_->setStyleSheet(btn_secondary_ss());
+    copy_path_btn_->setFixedHeight(30);
+    copy_path_btn_->setFixedWidth(120);
+    connect(copy_path_btn_, &QPushButton::clicked, this, [this]() {
         if (log_path_label_)
             QApplication::clipboard()->setText(log_path_label_->text());
     });
 
-    path_rl->addWidget(open_folder_btn);
-    path_rl->addWidget(copy_path_btn);
+    path_rl->addWidget(open_folder_btn_);
+    path_rl->addWidget(copy_path_btn_);
     path_rl->addStretch();
     vl->addWidget(path_row);
     vl->addWidget(make_sep());
 
     // ── Per-tag overrides ───────────────────────────────────────────────────
-    auto* tag_title = new QLabel(tr("Per-Tag Overrides"));
-    tag_title->setStyleSheet(sub_title_ss());
-    vl->addWidget(tag_title);
+    tag_title_ = new QLabel(tr("Per-Tag Overrides"));
+    tag_title_->setStyleSheet(sub_title_ss());
+    vl->addWidget(tag_title_);
 
-    auto* tag_desc = new QLabel(tr("Override the log level for a specific tag (e.g. ExchangeService, AgentService)."));
-    tag_desc->setStyleSheet(label_ss());
-    tag_desc->setWordWrap(true);
-    vl->addWidget(tag_desc);
+    tag_desc_ = new QLabel(tr("Override the log level for a specific tag (e.g. ExchangeService, AgentService)."));
+    tag_desc_->setStyleSheet(label_ss());
+    tag_desc_->setWordWrap(true);
+    vl->addWidget(tag_desc_);
 
-    log_tag_list_   = new QWidget(this);
+    log_tag_list_ = new QWidget(this);
     log_tag_layout_ = new QVBoxLayout(log_tag_list_);
     log_tag_layout_->setContentsMargins(0, 0, 0, 0);
     log_tag_layout_->setSpacing(6);
 
     auto& cfg = AppConfig::instance();
     const int count = cfg.get("log/tag_count", 0).toInt();
-    auto add_tag_row = [this, &level_to_idx](const QString& tag, const QString& level) {
+    // level_to_idx is captured BY VALUE: add_tag_row is copied into the
+    // "+ Add Tag Override" click handler, which runs long after build_ui() has
+    // returned. Capturing by reference left that copy holding a dangling
+    // reference to a destroyed stack lambda — undefined behaviour on every
+    // click of the Add button.
+    auto add_tag_row = [this, level_to_idx](const QString& tag, const QString& level) {
         using namespace settings_styles;
         auto* row = new QWidget(this);
         auto* rl = new QHBoxLayout(row);
@@ -185,35 +192,36 @@ void LoggingSection::build_ui() {
     };
 
     for (int i = 0; i < count; ++i) {
-        const QString tag   = cfg.get(QString("log/tag_%1_name").arg(i)).toString();
+        const QString tag = cfg.get(QString("log/tag_%1_name").arg(i)).toString();
         const QString level = cfg.get(QString("log/tag_%1_level").arg(i)).toString();
-        if (!tag.isEmpty()) add_tag_row(tag, level);
+        if (!tag.isEmpty())
+            add_tag_row(tag, level);
     }
 
     vl->addWidget(log_tag_list_);
 
-    auto* add_btn = new QPushButton(tr("+ Add Tag Override"));
-    add_btn->setStyleSheet(btn_secondary_ss());
-    add_btn->setFixedHeight(30);
-    add_btn->setFixedWidth(180);
-    connect(add_btn, &QPushButton::clicked, this, [add_tag_row]() mutable { add_tag_row({}, "Info"); });
-    vl->addWidget(add_btn);
+    add_btn_ = new QPushButton(tr("+ Add Tag Override"));
+    add_btn_->setStyleSheet(btn_secondary_ss());
+    add_btn_->setFixedHeight(30);
+    add_btn_->setFixedWidth(180);
+    connect(add_btn_, &QPushButton::clicked, this, [add_tag_row]() mutable { add_tag_row({}, "Info"); });
+    vl->addWidget(add_btn_);
     vl->addWidget(make_sep());
 
     // ── Save ────────────────────────────────────────────────────────────────
-    auto* save_btn = new QPushButton(tr("Apply & Save"));
-    save_btn->setStyleSheet(btn_primary_ss());
-    save_btn->setFixedHeight(34);
-    save_btn->setFixedWidth(140);
+    save_btn_ = new QPushButton(tr("Apply & Save"));
+    save_btn_->setStyleSheet(btn_primary_ss());
+    save_btn_->setFixedHeight(34);
+    save_btn_->setFixedWidth(140);
 
-    connect(save_btn, &QPushButton::clicked, this, [this]() {
+    connect(save_btn_, &QPushButton::clicked, this, [this]() {
         auto& cfg = AppConfig::instance();
         auto& log = Logger::instance();
 
         const QString gl = log_global_level_->currentText();
         cfg.set("log/global_level", gl);
         const QHash<QString, LogLevel> lvl_map = {{"Trace", LogLevel::Trace}, {"Debug", LogLevel::Debug},
-                                                  {"Info",  LogLevel::Info},  {"Warn",  LogLevel::Warn},
+                                                  {"Info", LogLevel::Info},   {"Warn", LogLevel::Warn},
                                                   {"Error", LogLevel::Error}, {"Fatal", LogLevel::Fatal}};
         log.set_level(lvl_map.value(gl, LogLevel::Info));
 
@@ -225,12 +233,14 @@ void LoggingSection::build_ui() {
         const auto rows = log_tag_list_->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
         int saved = 0;
         for (auto* row : rows) {
-            auto* tag_edit  = row->findChild<QLineEdit*>();
+            auto* tag_edit = row->findChild<QLineEdit*>();
             auto* lvl_combo = row->findChild<QComboBox*>();
-            if (!tag_edit || !lvl_combo) continue;
-            const QString tag   = tag_edit->text().trimmed();
+            if (!tag_edit || !lvl_combo)
+                continue;
+            const QString tag = tag_edit->text().trimmed();
             const QString level = lvl_combo->currentText();
-            if (tag.isEmpty()) continue;
+            if (tag.isEmpty())
+                continue;
             cfg.set(QString("log/tag_%1_name").arg(saved), tag);
             cfg.set(QString("log/tag_%1_level").arg(saved), level);
             log.set_tag_level(tag, lvl_map.value(level, LogLevel::Info));
@@ -238,13 +248,68 @@ void LoggingSection::build_ui() {
         }
         cfg.set("log/tag_count", saved);
 
+        // Saving previously produced no on-screen acknowledgement at all.
+        save_btn_->setText(tr("Saved ✓"));
+        QTimer::singleShot(2000, save_btn_, [this]() {
+            if (save_btn_)
+                save_btn_->setText(tr("Apply & Save"));
+        });
+
         LOG_INFO("Settings", QString("Logging config saved: global=%1, tags=%2").arg(gl).arg(saved));
     });
 
-    vl->addWidget(save_btn);
+    vl->addWidget(save_btn_);
     vl->addStretch();
     scroll->setWidget(page);
     root->addWidget(scroll);
+}
+
+void LoggingSection::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void LoggingSection::retranslateUi() {
+    if (section_title_)
+        section_title_->setText(tr("LOGGING"));
+    if (global_lbl_)
+        global_lbl_->setText(tr("Global Log Level"));
+    if (global_desc_)
+        global_desc_->setText(tr("Minimum level for all tags unless overridden."));
+    if (fmt_title_)
+        fmt_title_->setText(tr("Output Format"));
+    if (fmt_desc_)
+        fmt_desc_->setText(tr(
+            "Plain text is human-readable; JSON emits one structured object per line (easier to parse with tooling)."));
+    if (log_json_mode_)
+        log_json_mode_->setText(tr("Emit structured JSON lines"));
+    if (path_title_)
+        path_title_->setText(tr("Log File"));
+    if (open_folder_btn_)
+        open_folder_btn_->setText(tr("Open Log Folder"));
+    if (copy_path_btn_)
+        copy_path_btn_->setText(tr("Copy Path"));
+    if (tag_title_)
+        tag_title_->setText(tr("Per-Tag Overrides"));
+    if (tag_desc_)
+        tag_desc_->setText(tr("Override the log level for a specific tag (e.g. ExchangeService, AgentService)."));
+    if (add_btn_)
+        add_btn_->setText(tr("+ Add Tag Override"));
+    if (save_btn_)
+        save_btn_->setText(tr("Apply & Save"));
+
+    // Re-apply text on dynamically-created per-tag rows: the "Tag name"
+    // placeholder and the "Remove" button. The tag text and level are user data.
+    if (log_tag_list_) {
+        const auto rows = log_tag_list_->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+        for (auto* row : rows) {
+            if (auto* tag_edit = row->findChild<QLineEdit*>())
+                tag_edit->setPlaceholderText(tr("Tag name"));
+            if (auto* del_btn = row->findChild<QPushButton*>())
+                del_btn->setText(tr("Remove"));
+        }
+    }
 }
 
 } // namespace fincept::screens

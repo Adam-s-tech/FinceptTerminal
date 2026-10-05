@@ -15,6 +15,9 @@ class RecentFilesWidget : public BaseWidget {
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
     void on_theme_changed() override;
+    void retranslateUi() override;
+    /// Click a file row to jump to the File Manager screen.
+    bool eventFilter(QObject* obj, QEvent* event) override;
 
   private:
     void apply_styles();

@@ -219,6 +219,28 @@ int NewsArticleRepository::count() const {
 // ── prune_older_than ─────────────────────────────────────────────────────────
 
 Result<void> NewsArticleRepository::prune_older_than(int64_t cutoff_ts) {
+    // Bookmarked ("saved") articles are the user's own collection — retention must
+    // not delete them. The `saved` column is added at runtime by ensure_saved_column()
+    // (there is no migration), so prune can run before it exists: ask the schema
+    // rather than assuming, and fall back to the plain delete (no column = nothing
+    // can have been bookmarked yet).
+    bool has_saved_column = false;
+    { // scoped: the PRAGMA statement must be finished before the DELETE runs
+        auto info = db().execute("PRAGMA table_info(news_articles)", {});
+        if (info.is_ok()) {
+            auto& q = info.value();
+            while (q.next()) {
+                if (q.value(1).toString() == QLatin1String("saved")) {
+                    has_saved_column = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (has_saved_column) {
+        return exec_write("DELETE FROM news_articles WHERE sort_ts < ? AND COALESCE(saved, 0) = 0",
+                          {static_cast<qint64>(cutoff_ts)});
+    }
     return exec_write("DELETE FROM news_articles WHERE sort_ts < ?", {static_cast<qint64>(cutoff_ts)});
 }
 
@@ -287,12 +309,30 @@ Result<bool> NewsArticleRepository::toggle_saved(const QString& id) {
 
 // ── load_saved ────────────────────────────────────────────────────────────────
 
-Result<QVector<fincept::services::NewsArticle>> NewsArticleRepository::load_saved() const {
+Result<QVector<fincept::services::NewsArticle>> NewsArticleRepository::load_saved(int limit) const {
     return query_list("SELECT id, headline, summary, source, region, category, link, sort_ts, "
                       "       priority, sentiment, impact, tickers, tier, lang, "
                       "       threat_level, threat_cat, threat_conf, source_flag "
-                      "FROM news_articles WHERE saved = 1 ORDER BY sort_ts DESC",
-                      {}, map_row);
+                      "FROM news_articles WHERE saved = 1 ORDER BY sort_ts DESC LIMIT ?",
+                      {limit}, map_row);
+}
+
+// ── save_analysis / load_analysis ─────────────────────────────────────────────
+
+Result<void> NewsArticleRepository::save_analysis(const QString& url, const QString& analysis_json) const {
+    return exec_write("INSERT OR REPLACE INTO news_analysis (url, analysis_json, created_at) "
+                      "VALUES (?, ?, strftime('%s','now'))",
+                      {url, analysis_json});
+}
+
+Result<QString> NewsArticleRepository::load_analysis(const QString& url) const {
+    auto r = db().execute("SELECT analysis_json FROM news_analysis WHERE url = ?", {url});
+    if (r.is_err())
+        return Result<QString>::err(r.error());
+    auto& q = r.value();
+    if (!q.next())
+        return Result<QString>::ok({}); // none stored — not an error
+    return Result<QString>::ok(q.value(0).toString());
 }
 
 // ── search_fts ────────────────────────────────────────────────────────────────
@@ -363,10 +403,14 @@ Result<QVector<fincept::services::NewsArticle>> NewsArticleRepository::search_ft
 
 // ── load_seen_ids ─────────────────────────────────────────────────────────────
 
-Result<QSet<QString>> NewsArticleRepository::load_seen_ids(int64_t since_ts) const {
-    auto r = db().execute(since_ts > 0 ? "SELECT id FROM news_articles WHERE seen_at IS NOT NULL AND sort_ts >= ?"
-                                       : "SELECT id FROM news_articles WHERE seen_at IS NOT NULL",
-                          since_ts > 0 ? QVariantList{static_cast<qint64>(since_ts)} : QVariantList{});
+Result<QSet<QString>> NewsArticleRepository::load_seen_ids(int64_t since_ts, int limit) const {
+    // ORDER BY before LIMIT so the cap keeps the *newest* seen IDs — those are
+    // the ones the feed model can still be showing.
+    auto r = db().execute(since_ts > 0 ? "SELECT id FROM news_articles WHERE seen_at IS NOT NULL AND sort_ts >= ? "
+                                         "ORDER BY sort_ts DESC LIMIT ?"
+                                       : "SELECT id FROM news_articles WHERE seen_at IS NOT NULL "
+                                         "ORDER BY sort_ts DESC LIMIT ?",
+                          since_ts > 0 ? QVariantList{static_cast<qint64>(since_ts), limit} : QVariantList{limit});
     if (r.is_err())
         return Result<QSet<QString>>::err(r.error());
     QSet<QString> ids;

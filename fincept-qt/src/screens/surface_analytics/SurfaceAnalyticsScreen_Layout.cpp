@@ -8,9 +8,8 @@
 //
 // Part of the partial-class split of SurfaceAnalyticsScreen.cpp.
 
-#include "SurfaceAnalyticsScreen.h"
-
 #include "Surface3DWidget.h"
+#include "SurfaceAnalyticsScreen.h"
 #include "SurfaceCapabilities.h"
 #include "SurfaceControlPanel.h"
 #include "SurfaceCsvImporter.h"
@@ -34,8 +33,8 @@
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStringList>
-#include <QVariant>
 #include <QVBoxLayout>
+#include <QVariant>
 
 namespace fincept::surface {
 
@@ -132,6 +131,18 @@ void SurfaceAnalyticsScreen::setup_ui() {
     rvl->setContentsMargins(0, 0, 0, 0);
     rvl->setSpacing(0);
 
+    demo_banner_ = new QLabel(tr("SAMPLE DATA — synthetic values, not a live market surface. "
+                                 "Do not trade or quote from this."),
+                              right);
+    demo_banner_->setWordWrap(true);
+    demo_banner_->setAlignment(Qt::AlignCenter);
+    demo_banner_->setAccessibleName(tr("Synthetic data warning"));
+    demo_banner_->setStyleSheet(QString("background:rgba(217,119,6,0.18); color:%1; border-bottom:1px solid %2;"
+                                        " font-size:10px; font-weight:bold; letter-spacing:0.4px; padding:5px 8px;")
+                                    .arg(colors::AMBER())
+                                    .arg(colors::AMBER_DIM()));
+    rvl->addWidget(demo_banner_);
+
     view_stack_ = new QStackedWidget(right);
     surface_3d_ = new Surface3DWidget(view_stack_);
     surface_table_ = new SurfaceTableWidget(view_stack_);
@@ -155,12 +166,10 @@ void SurfaceAnalyticsScreen::setup_ui() {
     root->addWidget(outer, 1);
 
     // Wire control panel signals
-    connect(control_panel_, &SurfaceControlPanel::controls_changed, this,
-            &SurfaceAnalyticsScreen::on_controls_changed);
+    connect(control_panel_, &SurfaceControlPanel::controls_changed, this, &SurfaceAnalyticsScreen::on_controls_changed);
     connect(control_panel_, &SurfaceControlPanel::symbol_changed, this,
             &SurfaceAnalyticsScreen::on_control_symbol_changed);
-    connect(control_panel_, &SurfaceControlPanel::fetch_requested, this,
-            &SurfaceAnalyticsScreen::on_fetch_requested);
+    connect(control_panel_, &SurfaceControlPanel::fetch_requested, this, &SurfaceAnalyticsScreen::on_fetch_requested);
 
     // Default visibility / capability for active surface
     control_panel_->set_capability(active_chart_);
@@ -212,19 +221,19 @@ QWidget* SurfaceAnalyticsScreen::build_category_bar() {
     hl->addStretch();
 
     // Right controls — flat Obsidian buttons
-    auto* import_btn = new QPushButton("IMPORT CSV", bar);
-    import_btn->setFixedHeight(20);
-    import_btn->setStyleSheet(btn_inactive());
-    connect(import_btn, &QPushButton::clicked, this, &SurfaceAnalyticsScreen::on_import_csv);
-    hl->addWidget(import_btn);
+    import_btn_ = new QPushButton(tr("IMPORT CSV"), bar);
+    import_btn_->setFixedHeight(20);
+    import_btn_->setStyleSheet(btn_inactive());
+    connect(import_btn_, &QPushButton::clicked, this, &SurfaceAnalyticsScreen::on_import_csv);
+    hl->addWidget(import_btn_);
 
     hl->addSpacing(4);
     hl->addWidget(make_sep(bar));
     hl->addSpacing(4);
 
-    btn_3d_ = new QPushButton("3D", bar);
-    btn_table_ = new QPushButton("TABLE", bar);
-    btn_line_ = new QPushButton("LINE", bar);
+    btn_3d_ = new QPushButton(tr("3D"), bar);
+    btn_table_ = new QPushButton(tr("TABLE"), bar);
+    btn_line_ = new QPushButton(tr("LINE"), bar);
     btn_3d_->setFixedHeight(20);
     btn_table_->setFixedHeight(20);
     btn_line_->setFixedHeight(20);
@@ -248,11 +257,11 @@ QWidget* SurfaceAnalyticsScreen::build_category_bar() {
     hl->addWidget(make_sep(bar));
     hl->addSpacing(4);
 
-    auto* ref_btn = new QPushButton("REFRESH", bar);
-    ref_btn->setFixedHeight(20);
-    ref_btn->setStyleSheet(btn_inactive());
-    connect(ref_btn, &QPushButton::clicked, this, &SurfaceAnalyticsScreen::on_refresh);
-    hl->addWidget(ref_btn);
+    refresh_btn_ = new QPushButton(tr("REFRESH"), bar);
+    refresh_btn_->setFixedHeight(20);
+    refresh_btn_->setStyleSheet(btn_inactive());
+    connect(refresh_btn_, &QPushButton::clicked, this, &SurfaceAnalyticsScreen::on_refresh);
+    hl->addWidget(refresh_btn_);
 
     return bar;
 }
@@ -317,7 +326,6 @@ QWidget* SurfaceAnalyticsScreen::build_surface_bar() {
     hl->addStretch();
     return bar;
 }
-
 
 void SurfaceAnalyticsScreen::apply_view_mode_buttons() {
     auto active = [&]() {

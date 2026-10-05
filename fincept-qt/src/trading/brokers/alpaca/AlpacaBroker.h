@@ -42,6 +42,9 @@ class AlpacaBroker : public IBroker {
     static QString trading_url(const BrokerCredentials& creds);
     static QString data_url() { return "https://data.alpaca.markets"; }
 
+    // PK* paper keys (or credentials that authenticated against paper-api) — never live.
+    bool is_paper_environment(const BrokerCredentials& creds) const override;
+
     TokenExchangeResponse exchange_token(const QString& api_key, const QString& api_secret,
                                          const QString& auth_code) override;
     OrderPlaceResponse place_order(const BrokerCredentials& creds, const UnifiedOrder& order) override;
@@ -95,6 +98,15 @@ class AlpacaBroker : public IBroker {
     ApiResponse<QVector<BrokerAuction>> get_historical_auctions_single(const BrokerCredentials& creds,
                                                                        const QString& symbol, const QString& start,
                                                                        const QString& end) override;
+
+    // --- Bulk Operations (native Alpaca endpoints) ---
+    ApiResponse<CancelAllResult> cancel_all_orders(const BrokerCredentials& creds) override;
+    ApiResponse<CloseAllResult> close_all_positions(const BrokerCredentials& creds) override;
+    ApiResponse<QVector<BrokerQuote>> get_multi_quotes(const BrokerCredentials& creds,
+                                                       const QVector<QPair<QString, QString>>& symbols) override;
+
+    // --- Margin Calculator --- Alpaca has no per-order margin API → fallback estimator.
+    ApiResponse<OrderMargin> get_order_margins(const BrokerCredentials& creds, const UnifiedOrder& order) override;
 
   protected:
     QMap<QString, QString> auth_headers(const BrokerCredentials& creds) const override;

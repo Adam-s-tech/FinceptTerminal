@@ -46,8 +46,8 @@ EcbPanel::EcbPanel(QWidget* parent) : EconPanelBase(kEcbSourceId, kEcbColor, par
 }
 
 void EcbPanel::activate() {
-    show_empty("Select a series and click FETCH\n"
-               "Source: European Central Bank SDMX 2.1 API");
+    show_empty(tr("Select a series and click FETCH\n"
+                  "Source: European Central Bank SDMX 2.1 API"));
 }
 
 void EcbPanel::build_controls(QHBoxLayout* thl) {
@@ -63,7 +63,7 @@ void EcbPanel::build_controls(QHBoxLayout* thl) {
     series_combo_->setFixedHeight(26);
     series_combo_->setMinimumWidth(220);
 
-    thl->addWidget(lbl("SERIES"));
+    thl->addWidget(series_lbl_ = lbl(tr("SERIES")));
     thl->addWidget(series_combo_);
 }
 
@@ -71,9 +71,14 @@ void EcbPanel::on_fetch() {
     const int idx = series_combo_->currentIndex();
     const auto& series = kEcbSeries[idx];
 
-    show_loading("Fetching ECB data: " + series.label + "…");
+    show_loading(tr("Fetching ECB data: %1…").arg(series.label));
 
-    QStringList args = {series.command};
+    // EconomicsService::execute() already prepends `command` to the argv, so
+    // args must carry ONLY the extra positional arguments. Repeating the
+    // command here shifted every parameter by one — the CLI read
+    // `exchange_rates exchange_rates USD` as currency="exchange_rates",
+    // freq="USD", so every ECB fetch silently queried a bogus series.
+    QStringList args;
     if (!series.arg.isEmpty())
         args << series.arg;
 
@@ -120,12 +125,26 @@ void EcbPanel::on_result(const QString& request_id, const services::EconomicsRes
     }
 
     if (obs.isEmpty()) {
-        show_error("No observations returned for " + series.label);
+        show_error(tr("No observations returned for %1").arg(series.label));
         return;
     }
 
     display(obs, "ECB: " + series.label);
     LOG_INFO("EcbPanel", QString("Displayed %1 observations for %2").arg(obs.size()).arg(series.label));
+}
+
+// ── i18n ──────────────────────────────────────────────────────────────────────
+
+void EcbPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    EconPanelBase::changeEvent(event);
+}
+
+void EcbPanel::retranslateUi() {
+    if (series_lbl_)
+        series_lbl_->setText(tr("SERIES"));
+    EconPanelBase::retranslateUi();
 }
 
 } // namespace fincept::screens

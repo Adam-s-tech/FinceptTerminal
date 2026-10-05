@@ -9,10 +9,12 @@
 #include "screens/common/IStatefulScreen.h"
 #include "services/databento/DatabentoService.h"
 
+#include <QEvent>
 #include <QHash>
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSet>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QString>
@@ -27,9 +29,7 @@ class SurfaceLineWidget;
 class SurfaceControlPanel;
 class SurfaceDataInspector;
 
-class SurfaceAnalyticsScreen : public QWidget,
-                               public fincept::screens::IStatefulScreen,
-                               public fincept::IGroupLinked {
+class SurfaceAnalyticsScreen : public QWidget, public fincept::screens::IStatefulScreen, public fincept::IGroupLinked {
     Q_OBJECT
     Q_INTERFACES(fincept::IGroupLinked)
   public:
@@ -72,11 +72,14 @@ class SurfaceAnalyticsScreen : public QWidget,
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* e) override;
 
   private:
     enum class ViewMode { Surface3D = 0, Table = 1, Line = 2 };
 
     void setup_ui();
+    /// Re-apply tr() lookups to the fixed-label toolbar buttons.
+    void retranslateUi();
     QWidget* build_category_bar();
     QWidget* build_surface_bar();
     void refresh_surface_bar();
@@ -89,9 +92,31 @@ class SurfaceAnalyticsScreen : public QWidget,
     void update_line_view();
     void refresh_provider_status();
     void load_dataset_range_for_active_capability();
+    /// Derive Correlation / PCA / VaR / Drawdown / Beta from an OHLCV response (see the
+    /// definition) and mark exactly those surfaces as real data.
+    void apply_risk_surfaces(const fincept::DatabentoOhlcvResult& r);
+
+    /// Mark `type`'s z-grid as holding genuine (fetched or imported) data and
+    /// refresh the tier badge. Called only from a provider/CSV path that
+    /// actually wrote the grid.
+    void mark_chart_real(ChartType type);
+    /// Re-apply the control panel's DEMO badge for whatever surface is on
+    /// screen. Every surface starts synthetic; the badge is per-surface, not
+    /// per-screen, so switching from a fetched surface to an un-fetched one has
+    /// to put DEMO back.
+    void sync_synthetic_badge();
 
     QString current_symbol_or_default() const;
     float spot_for(const QString& sym) const;
+    /// True when `sym` has a REAL quote (subscribed cache or hub) - i.e. spot_for()
+    /// is not returning its 100.0 placeholder. Fetches for option surfaces must not
+    /// run on the placeholder: the spot sets the strike window and the IV solve.
+    bool has_live_spot(const QString& sym) const;
+    /// (Re)subscribe to the current symbol's `market:quote:<sym>` while visible so
+    /// spot_cache_ holds a live price. Nothing else ever populated it, so spot_for()
+    /// returned the 100.0 placeholder for any symbol no other screen happened to be
+    /// subscribed to.
+    void resubscribe_spot();
     const std::vector<std::vector<float>>* active_z_grid() const;
 
     // Control bar widgets (kept for dynamic rebuild)
@@ -100,6 +125,8 @@ class SurfaceAnalyticsScreen : public QWidget,
     QPushButton* btn_3d_ = nullptr;
     QPushButton* btn_table_ = nullptr;
     QPushButton* btn_line_ = nullptr;
+    QPushButton* import_btn_ = nullptr;  // fixed-label, cached for retranslateUi
+    QPushButton* refresh_btn_ = nullptr; // fixed-label, cached for retranslateUi
 
     // Main panels
     SurfaceControlPanel* control_panel_ = nullptr;
@@ -108,6 +135,13 @@ class SurfaceAnalyticsScreen : public QWidget,
     SurfaceTableWidget* surface_table_ = nullptr;
     SurfaceLineWidget* surface_line_ = nullptr;
     QStackedWidget* view_stack_ = nullptr;
+    /// Always-visible banner directly above the chart, shown whenever the
+    /// surface on screen is SurfaceDemoData's rand() output. The control
+    /// panel's DEMO badge lives inside the ASSET group box, which
+    /// apply_capability_visibility() *hides* for the 12 surfaces that need no
+    /// underlying — precisely the always-synthetic ones. Those users saw
+    /// fabricated curves with no marking at all.
+    QLabel* demo_banner_ = nullptr;
 
     // State
     int active_category_ = 0;
@@ -148,12 +182,21 @@ class SurfaceAnalyticsScreen : public QWidget,
     InflationExpData inflation_data_;
     MonetaryPolicyData monetary_data_;
 
+    /// ChartTypes (as int) whose z-grid currently holds real fetched/imported
+    /// data rather than SurfaceDemoData's rand() output. Everything not in here
+    /// is synthetic and must be badged DEMO. Cleared by load_demo_data().
+    QSet<int> real_data_charts_;
+
     // Symbol group link — SymbolGroup::None when unlinked.
     fincept::SymbolGroup link_group_ = fincept::SymbolGroup::None;
 
     // Spot cache, populated from DataHub::peek("market:quote:<sym>") on demand.
     // Falls back to a constant if the hub has no quote for the symbol.
     QHash<QString, float> spot_cache_;
+    QString spot_symbol_; // symbol whose quote topic is currently subscribed ("" = none)
+    /// True while on_group_symbol_changed() is applying a symbol it received, so the
+    /// resulting on_control_symbol_changed() does not publish it straight back.
+    bool applying_group_symbol_ = false;
 
     // Category accent colors (R,G,B)
     static constexpr int CAT_COLORS[][3] = {

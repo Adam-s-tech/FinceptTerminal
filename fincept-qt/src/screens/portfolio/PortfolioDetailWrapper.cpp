@@ -14,6 +14,7 @@
 
 #include <QEvent>
 #include <QHBoxLayout>
+#include <QKeySequence>
 #include <QVBoxLayout>
 
 namespace fincept::screens {
@@ -30,9 +31,10 @@ void PortfolioDetailWrapper::build_ui() {
     // ── Header bar (36px) ────────────────────────────────────────────────────
     auto* header = new QWidget(this);
     header->setFixedHeight(36);
-    header->setStyleSheet(QString("background: qlineargradient(x1:0,x2:1, stop:0 %1, stop:1 %2);"
-                                  "border-bottom:1px solid %3;")
-                              .arg(ui::colors::BG_RAISED(), ui::colors::BG_SURFACE(), ui::colors::AMBER()));
+    // Flat fill — DESIGN_SYSTEM §9 forbids gradients ("depth comes from
+    // background layering only").
+    header->setStyleSheet(QString("background:%1; border-bottom:1px solid %2;")
+                              .arg(ui::colors::BG_RAISED(), ui::colors::AMBER()));
 
     auto* h_layout = new QHBoxLayout(header);
     h_layout->setContentsMargins(8, 0, 8, 0);
@@ -46,6 +48,11 @@ void PortfolioDetailWrapper::build_ui() {
                                      "  padding:0 10px; font-size:9px; font-weight:700; letter-spacing:0.5px; }"
                                      "QPushButton:hover { background:%1; color:#000; }")
                                  .arg(ui::colors::AMBER()));
+    // Esc leaves the detail view. Owned by the button, so it is inert while
+    // this page is not the visible one in PortfolioScreen's stack.
+    back_btn_->setShortcut(QKeySequence(Qt::Key_Escape));
+    back_btn_->setToolTip(tr("Back to the portfolio workspace  (Esc)"));
+    back_btn_->setAccessibleName(tr("Back to the portfolio workspace"));
     connect(back_btn_, &QPushButton::clicked, this, &PortfolioDetailWrapper::back_requested);
     h_layout->addWidget(back_btn_);
 
@@ -101,6 +108,12 @@ void PortfolioDetailWrapper::update_snapshots(const QVector<portfolio::Portfolio
         if (auto* v = qobject_cast<PerformanceRiskView*>(*it))
             v->set_snapshots(snapshots);
     }
+    // Planning derives its real return/volatility assumptions from snapshots.
+    auto pit = views_.find(static_cast<int>(portfolio::DetailView::Planning));
+    if (pit != views_.end()) {
+        if (auto* p = qobject_cast<PlanningView*>(*pit))
+            p->set_snapshots(snapshots);
+    }
 }
 
 void PortfolioDetailWrapper::update_data(const portfolio::PortfolioSummary& summary, const QString& currency) {
@@ -114,9 +127,11 @@ void PortfolioDetailWrapper::update_data(const portfolio::PortfolioSummary& summ
     // Update the active view with new data
     if (auto* sectors_v = qobject_cast<AnalyticsSectorsView*>(current)) {
         sectors_v->set_data(summary, currency);
+        sectors_v->set_correlation(current_correlation_);
     } else if (auto* perf_v = qobject_cast<PerformanceRiskView*>(current)) {
         perf_v->set_data(summary, currency);
         perf_v->set_snapshots(current_snapshots_);
+        perf_v->set_metrics(current_metrics_);
     } else if (auto* risk_v = qobject_cast<RiskManagementView*>(current)) {
         risk_v->set_data(summary, currency);
         risk_v->set_metrics(current_metrics_);
@@ -130,6 +145,8 @@ void PortfolioDetailWrapper::update_data(const portfolio::PortfolioSummary& summ
         idx_v->set_data(summary, currency);
     } else if (auto* plan_v = qobject_cast<PlanningView*>(current)) {
         plan_v->set_data(summary, currency);
+        plan_v->set_snapshots(current_snapshots_);
+        plan_v->set_metrics(current_metrics_);
     } else if (auto* econ_v = qobject_cast<EconomicsView*>(current)) {
         econ_v->set_data(summary, currency);
     }
@@ -142,6 +159,25 @@ void PortfolioDetailWrapper::update_metrics(const portfolio::ComputedMetrics& me
         return;
     if (auto* v = qobject_cast<RiskManagementView*>(current))
         v->set_metrics(metrics);
+    else if (auto* p = qobject_cast<PerformanceRiskView*>(current))
+        p->set_metrics(metrics);
+    else if (auto* plan = qobject_cast<PlanningView*>(current))
+        plan->set_metrics(metrics);
+}
+
+void PortfolioDetailWrapper::update_correlation(const QHash<QString, double>& matrix) {
+    current_correlation_ = matrix;
+    auto* current = view_stack_->currentWidget();
+    if (!current)
+        return;
+    if (auto* v = qobject_cast<AnalyticsSectorsView*>(current))
+        v->set_correlation(matrix);
+}
+
+void PortfolioDetailWrapper::set_optimization_target(double annual_return) {
+    auto* widget = get_or_create_view(portfolio::DetailView::Optimization);
+    if (auto* opt = qobject_cast<PortfolioOptimizationView*>(widget))
+        opt->set_target_return(annual_return);
 }
 
 QWidget* PortfolioDetailWrapper::get_or_create_view(portfolio::DetailView view) {
@@ -154,8 +190,9 @@ QWidget* PortfolioDetailWrapper::get_or_create_view(portfolio::DetailView view) 
     switch (view) {
         case portfolio::DetailView::AnalyticsSectors: {
             auto* asv = new AnalyticsSectorsView;
-            connect(asv, &AnalyticsSectorsView::sector_selected,
-                    this, &PortfolioDetailWrapper::sector_selected);
+            connect(asv, &AnalyticsSectorsView::sector_selected, this, &PortfolioDetailWrapper::sector_selected);
+            if (!current_correlation_.isEmpty())
+                asv->set_correlation(current_correlation_);
             widget = asv;
             break;
         }
@@ -163,6 +200,7 @@ QWidget* PortfolioDetailWrapper::get_or_create_view(portfolio::DetailView view) 
             auto* prv = new PerformanceRiskView;
             if (!current_snapshots_.isEmpty())
                 prv->set_snapshots(current_snapshots_);
+            prv->set_metrics(current_metrics_);
             widget = prv;
             break;
         }
@@ -184,9 +222,17 @@ QWidget* PortfolioDetailWrapper::get_or_create_view(portfolio::DetailView view) 
         case portfolio::DetailView::Indices:
             widget = new CustomIndexView;
             break;
-        case portfolio::DetailView::Planning:
-            widget = new PlanningView;
+        case portfolio::DetailView::Planning: {
+            auto* pv = new PlanningView;
+            if (!current_snapshots_.isEmpty())
+                pv->set_snapshots(current_snapshots_);
+            pv->set_metrics(current_metrics_);
+            // "Optimize for this return" → navigate to the Optimization sub-tab.
+            connect(pv, &PlanningView::optimize_for_return, this,
+                    [this](double target) { emit optimize_requested(target); });
+            widget = pv;
             break;
+        }
         case portfolio::DetailView::Economics:
             widget = new EconomicsView;
             break;
@@ -204,9 +250,14 @@ void PortfolioDetailWrapper::changeEvent(QEvent* event) {
 }
 
 void PortfolioDetailWrapper::retranslateUi() {
-    if (back_btn_)    back_btn_->setText(tr("← BACK"));
-    if (title_label_) title_label_->setText(view_title(current_view_));
-    // portfolio_label_ holds "💼 NAME | CURRENCY" — pure portfolio data, no
+    if (back_btn_) {
+        back_btn_->setText(tr("← BACK"));
+        back_btn_->setToolTip(tr("Back to the portfolio workspace  (Esc)"));
+        back_btn_->setAccessibleName(tr("Back to the portfolio workspace"));
+    }
+    if (title_label_)
+        title_label_->setText(view_title(current_view_));
+    // portfolio_label_ holds "NAME | CURRENCY" — pure portfolio data, no
     // translation needed.
 }
 

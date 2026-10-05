@@ -126,6 +126,65 @@ KNOWN_PERSONS = {
 }
 
 
+def _boundary_regex(term):
+    """Whole-word matcher for a lowercase term (applied to lowercased text).
+
+    Uses look-arounds instead of ``\\b`` so terms that end in punctuation
+    ("u.s.", "opec+") still match. Bare substring tests used to hit inside other
+    words — "un" in "fund", "sec" in "second", "boe" in "boeing", "xi" in "taxi".
+    """
+    return re.compile(r'(?<![a-z0-9])' + re.escape(term) + r'(?![a-z0-9])')
+
+
+def _proper_noun_regex(term):
+    """Matcher for short/ambiguous terms: only the Capitalised or UPPER form in
+    the original-case text counts ("UN", "SEC", "WHO", "Xi" — not "who", "sec")."""
+    return re.compile(r'(?<![A-Za-z0-9])(?:' + re.escape(term.capitalize()) + '|' +
+                      re.escape(term.upper()) + r')(?![A-Za-z0-9])')
+
+
+# Canonical display name per country code = the first alias listed for it.
+_COUNTRY_CANON = {}
+for _p, _c in COUNTRIES.items():
+    _COUNTRY_CANON.setdefault(_c, _p)
+
+# (regex, uses_original_case, canonical name) — compiled once per process.
+_COUNTRY_MATCHERS = [(_boundary_regex(p) if " " not in p else None, p, c) for p, c in COUNTRIES.items()]
+_ORG_MATCHERS = [((_proper_noun_regex(p), True) if len(p) <= 3 else (_boundary_regex(p), False), n)
+                 for p, n in ORGANIZATIONS.items()]
+_PERSON_MATCHERS = [((_proper_noun_regex(p), True) if len(p) <= 4 else (_boundary_regex(p), False), n)
+                    for p, n in KNOWN_PERSONS.items()]
+
+# Words / news acronyms that look like tickers but are not. Kept in step with
+# NewsService::enrich_article() on the C++ side.
+_TICKER_STOPWORDS = {
+    "THE", "FOR", "AND", "BUT", "NOT", "FROM", "WITH", "THIS", "THAT", "HAVE", "WILL", "BEEN",
+    "THEY", "WERE", "SAID", "HAS", "ITS", "NEW", "ARE", "WAS", "WHO", "HOW", "WHY", "ALL", "CAN",
+    "MAY", "NOW", "OUT", "ONE", "TWO", "OUR", "YOU", "HER", "HIS", "SAYS", "SAY", "GET", "GOT",
+    "LET", "TOP", "BIG", "NEXT", "OVER", "INTO", "AFTER", "WHAT", "WHEN", "ABOUT", "AM", "PM",
+    "TV", "PC", "OK", "VS", "NO", "OR", "IN", "IS", "OF", "ON", "TO", "AT", "BY", "AS", "AN",
+    "IF", "SO", "UP", "DO", "GO", "BE", "WE", "HE", "ME", "MY", "US", "UK", "EU", "UN", "UAE",
+    "USA", "AI", "CEO", "CFO", "COO", "CTO", "IPO", "ETF", "GDP", "CPI", "PPI", "PMI", "FED",
+    "FOMC", "ECB", "BOE", "BOJ", "PBOC", "IMF", "WTO", "NATO", "OPEC", "SEC", "FDA", "DOJ", "FBI",
+    "CIA", "NSA", "IRS", "FTC", "FCC", "EPA", "NYSE", "DOW", "USD", "EUR", "GBP", "JPY", "CNY",
+    "INR", "AUD", "CAD", "CHF", "GOP", "ESG", "COVID", "UPDATE", "LIVE", "VIDEO", "WATCH",
+    "EXCLUSIVE", "ALERT", "BREAKING", "URGENT", "NEWS", "TIMES", "POST",
+}
+_CASHTAG_RE = re.compile(r'\$([A-Z]{1,5})\b')
+_TICKER_RE = re.compile(r'\b[A-Z]{2,5}\b')
+
+
+def _extract_tickers(text_orig):
+    """Ordered ticker candidates: cashtags first, then bare uppercase words.
+    Skips bare words entirely when the text is shouted in capitals."""
+    found = [m.group(1) for m in _CASHTAG_RE.finditer(text_orig)]
+    letters = sum(1 for ch in text_orig if ch.isalpha())
+    upper = sum(1 for ch in text_orig if ch.isalpha() and ch.isupper())
+    if not (letters >= 24 and upper * 10 >= letters * 6):
+        found.extend(t for t in _TICKER_RE.findall(text_orig) if t not in _TICKER_STOPWORDS)
+    return found
+
+
 def extract_entities(headlines_json):
     """Extract countries, organizations, people, and tickers from headlines."""
     try:
@@ -150,31 +209,24 @@ def extract_entities(headlines_json):
         people = []
         tickers = []
 
-        # Country extraction — use word-boundary matching to avoid substring hits
-        # (e.g. "rome" inside "jerome", "uk" inside "truck", "thai" inside "thailand")
-        for pattern, code in COUNTRIES.items():
-            if len(pattern) <= 4 or " " not in pattern:
-                # Short or single-word patterns: require word boundaries
-                if re.search(r'\b' + re.escape(pattern) + r'\b', text):
-                    countries.append({"name": pattern.title(), "code": code})
-                    all_countries[code] += 1
-            else:
-                # Multi-word patterns: simple substring is fine
-                if pattern in text:
-                    countries.append({"name": pattern.title(), "code": code})
-                    all_countries[code] += 1
+        # Country extraction — whole-word matching for single-word patterns to
+        # avoid substring hits (e.g. "rome" inside "jerome", "uk" inside "truck",
+        # "thai" inside "thailand"); multi-word patterns are specific enough for
+        # a plain substring test.
+        for regex, pattern, code in _COUNTRY_MATCHERS:
+            hit = regex.search(text) if regex is not None else (pattern in text)
+            if hit:
+                countries.append({"name": _COUNTRY_CANON.get(code, pattern).title(), "code": code})
 
         # Organization extraction
-        for pattern, name in ORGANIZATIONS.items():
-            if pattern in text:
+        for (regex, orig_case), name in _ORG_MATCHERS:
+            if regex.search(text_orig if orig_case else text):
                 orgs.append(name)
-                all_orgs[name] += 1
 
         # Person extraction — known persons
-        for pattern, name in KNOWN_PERSONS.items():
-            if pattern in text:
+        for (regex, orig_case), name in _PERSON_MATCHERS:
+            if regex.search(text_orig if orig_case else text):
                 people.append(name)
-                all_people[name] += 1
 
         # Person extraction — title patterns
         for pat in PERSON_TITLES:
@@ -182,24 +234,28 @@ def extract_entities(headlines_json):
                 name = match.group(2).strip()
                 if len(name) > 3 and name not in people:
                     people.append(name)
-                    all_people[name] += 1
 
-        # Ticker extraction (uppercase 2-5 chars, filter common words)
-        common = {"THE", "FOR", "AND", "BUT", "NOT", "FROM", "WITH", "THIS", "THAT",
-                  "HAVE", "WILL", "BEEN", "THEY", "WERE", "SAID", "HAS", "ITS", "NEW",
-                  "ARE", "WAS", "WHO", "HOW", "WHY", "ALL", "CAN", "MAY", "NOW", "SEC",
-                  "GDP", "CEO", "CFO", "IPO", "ETF", "GDP", "CPI", "PMI"}
-        for m in re.finditer(r'\b[A-Z]{2,5}\b', text_orig):
-            t = m.group()
-            if t not in common:
-                tickers.append(t)
-                all_tickers[t] += 1
+        # Ticker extraction (cashtags + uppercase 2-5 chars, minus common words)
+        tickers = _extract_tickers(text_orig)
 
-        # Deduplicate
-        countries = list({c["code"]: c for c in countries}.values())[:5]
+        # Deduplicate (first match wins, so a country keeps its canonical name —
+        # "China", not the last alias in the table such as "Shanghai") and count
+        # each entity once per article.
+        by_code = {}
+        for c in countries:
+            by_code.setdefault(c["code"], c)
+        countries = list(by_code.values())[:5]
         orgs = list(dict.fromkeys(orgs))[:5]
         people = list(dict.fromkeys(people))[:5]
         tickers = list(dict.fromkeys(tickers))[:5]
+        for c in countries:
+            all_countries[c["code"]] += 1
+        for o in orgs:
+            all_orgs[o] += 1
+        for p in people:
+            all_people[p] += 1
+        for t in tickers:
+            all_tickers[t] += 1
 
         per_article.append({
             "id": article.get("id", ""),
@@ -345,56 +401,109 @@ def cluster_semantic(headlines_json):
     }
 
 
+# Finance keyword lexicon — doubles as the VADER lexicon nudge and the offline
+# fallback scorer. Weights are valences on VADER's [-4, 4] scale.
+_FINANCE_POSITIVE = {
+    "surge": 3.0, "soar": 3.2, "skyrocket": 3.5, "breakthrough": 3.0, "boom": 2.8,
+    "rally": 2.5, "gain": 2.0, "gains": 2.0, "rise": 1.8, "jump": 2.5,
+    "jumps": 2.5, "climb": 2.0, "rebound": 2.2, "boost": 2.0, "beat": 2.2,
+    "beats": 2.2, "exceed": 2.0, "outperform": 2.5, "upgrade": 2.5, "profit": 1.8,
+    "growth": 1.8, "recover": 2.0, "record": 1.5, "strong": 1.5, "robust": 1.5,
+    "bullish": 3.0, "optimism": 1.8, "milestone": 1.5, "approval": 1.8, "deal": 1.2,
+}
+_FINANCE_NEGATIVE = {
+    "crash": -3.5, "plunge": -3.2, "collapse": -3.5, "meltdown": -3.5, "bankruptcy": -3.8,
+    "fall": -1.8, "drop": -2.0, "decline": -2.0, "tumble": -2.5, "slump": -2.5,
+    "miss": -2.0, "misses": -2.0, "fail": -2.2, "recession": -2.8, "crisis": -2.5,
+    "sanction": -2.0, "tariff": -1.8, "escalat": -1.5, "layoff": -2.2, "layoffs": -2.2,
+    "downgrade": -2.5, "fraud": -3.5, "scandal": -2.8, "selloff": -2.5, "default": -2.5,
+    "lawsuit": -1.8, "probe": -1.5, "weak": -1.5, "loss": -1.5, "deficit": -1.2,
+    "fear": -1.5, "threat": -1.5, "warning": -1.5, "bearish": -3.0, "halt": -1.5,
+}
+
+# Integer-weighted view used by the keyword fallback scorer (and confidence).
+_KW_POSITIVE = {k: max(1, int(round(abs(v) / 1.6))) for k, v in _FINANCE_POSITIVE.items()}
+_KW_NEGATIVE = {k: max(1, int(round(abs(v) / 1.6))) for k, v in _FINANCE_NEGATIVE.items()}
+
+_VADER = None
+_VADER_TRIED = False
+
+
+def _get_vader():
+    """Lazily build a finance-tuned VADER analyzer; None if unavailable."""
+    global _VADER, _VADER_TRIED
+    if _VADER_TRIED:
+        return _VADER
+    _VADER_TRIED = True
+    try:
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        analyzer = SentimentIntensityAnalyzer()
+        analyzer.lexicon.update(_FINANCE_POSITIVE)
+        analyzer.lexicon.update(_FINANCE_NEGATIVE)
+        _VADER = analyzer
+    except Exception:
+        _VADER = None
+    return _VADER
+
+
+def _keyword_signals(text):
+    """Finance keyword hit counts (used for fallback scoring and confidence)."""
+    pos = sum(w for p, w in _KW_POSITIVE.items() if p in text)
+    neg = sum(w for p, w in _KW_NEGATIVE.items() if p in text)
+    return pos, neg
+
+
+def _label_from_score(score):
+    if score >= 0.15:
+        return "BULLISH"
+    if score <= -0.15:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
 def analyze_sentiment_batch(headlines_json):
-    """Batch sentiment analysis with confidence scores."""
+    """Batch sentiment analysis with confidence scores.
+
+    Prefers VADER (finance-tuned) when ``vaderSentiment`` is installed; otherwise
+    falls back to the offline keyword scorer. Output schema is stable across both
+    engines; ``engine`` reports which path ran."""
     try:
         articles = json.loads(headlines_json) if isinstance(headlines_json, str) else headlines_json
     except json.JSONDecodeError:
         return {"success": False, "error": "Invalid JSON"}
 
-    positives = {
-        "surge": 3, "soar": 3, "skyrocket": 3, "breakthrough": 3, "boom": 3,
-        "record high": 3, "rally": 2, "gain": 2, "rise": 2, "jump": 2,
-        "climb": 2, "rebound": 2, "boost": 2, "beat": 2, "exceed": 2,
-        "upgrade": 2, "profit": 2, "growth": 2, "recover": 2, "victory": 2,
-        "ceasefire": 2, "strong": 1, "robust": 1, "bullish": 1, "optimism": 1,
-        "milestone": 1, "positive": 1, "success": 1, "approval": 1, "deal": 1,
-    }
-    negatives = {
-        "crash": 3, "plunge": 3, "collapse": 3, "devastat": 3, "catastroph": 3,
-        "invasion": 3, "war crime": 3, "bankruptcy": 3, "meltdown": 3,
-        "fall": 2, "drop": 2, "decline": 2, "tumble": 2, "slump": 2, "miss": 2,
-        "fail": 2, "recession": 2, "crisis": 2, "conflict": 2, "attack": 2,
-        "sanction": 2, "tariff": 2, "escalat": 2, "layoff": 2, "downgrade": 2,
-        "fraud": 2, "scandal": 2, "disaster": 2, "weak": 1, "loss": 1,
-        "deficit": 1, "fear": 1, "threat": 1, "warning": 1, "bearish": 1,
-        "volatile": 1, "uncertain": 1, "ban": 1, "suspend": 1,
-    }
+    analyzer = _get_vader()
+    engine = "vader" if analyzer else "lexicon"
 
     results = []
     for article in articles:
         text = (article.get("headline", "") + " " + article.get("summary", "")).lower()
-        pos_score = sum(w for p, w in positives.items() if p in text)
-        neg_score = sum(w for p, w in negatives.items() if p in text)
+        pos_score, neg_score = _keyword_signals(text)
         total = pos_score + neg_score
-        net = pos_score - neg_score
 
-        if total == 0:
-            sentiment = "NEUTRAL"
-            score = 0.0
-            confidence = 0.2
-        elif net >= 2:
-            sentiment = "BULLISH"
-            score = min(net / max(total, 1), 1.0)
-            confidence = min(0.4 + total * 0.05, 0.95)
-        elif net <= -2:
-            sentiment = "BEARISH"
-            score = max(net / max(total, 1), -1.0)
-            confidence = min(0.4 + total * 0.05, 0.95)
+        if analyzer is not None:
+            score = analyzer.polarity_scores(text)["compound"]  # -1..1
+            sentiment = _label_from_score(score)
+            if sentiment == "NEUTRAL":
+                confidence = round(min(0.2 + abs(score) * 0.8, 0.4), 3)
+            else:
+                confidence = round(min(0.45 + abs(score) * 0.45 + total * 0.02, 0.97), 3)
         else:
-            sentiment = "NEUTRAL"
-            score = net / max(total, 1)
-            confidence = 0.3
+            net = pos_score - neg_score
+            if total == 0:
+                sentiment, score, confidence = "NEUTRAL", 0.0, 0.2
+            elif net >= 2:
+                sentiment = "BULLISH"
+                score = min(net / max(total, 1), 1.0)
+                confidence = min(0.4 + total * 0.05, 0.95)
+            elif net <= -2:
+                sentiment = "BEARISH"
+                score = max(net / max(total, 1), -1.0)
+                confidence = min(0.4 + total * 0.05, 0.95)
+            else:
+                sentiment = "NEUTRAL"
+                score = net / max(total, 1)
+                confidence = 0.3
 
         results.append({
             "id": article.get("id", ""),
@@ -412,6 +521,7 @@ def analyze_sentiment_batch(headlines_json):
 
     return {
         "success": True,
+        "engine": engine,
         "results": results,
         "aggregate": {"bullish": bull, "bearish": bear, "neutral": neut},
         "overall_score": round(sum(r["score"] for r in results) / max(len(results), 1), 3),
@@ -447,14 +557,17 @@ def main(args=None):
     command = args[0]
     data = resolve_arg(args[1])
 
-    if command == "extract_entities":
-        result = extract_entities(data)
-    elif command == "cluster_semantic":
-        result = cluster_semantic(data)
-    elif command == "analyze_sentiment_batch":
-        result = analyze_sentiment_batch(data)
-    else:
-        result = {"success": False, "error": f"Unknown command: {command}"}
+    try:
+        if command == "extract_entities":
+            result = extract_entities(data)
+        elif command == "cluster_semantic":
+            result = cluster_semantic(data)
+        elif command == "analyze_sentiment_batch":
+            result = analyze_sentiment_batch(data)
+        else:
+            result = {"success": False, "error": f"Unknown command: {command}"}
+    except Exception as exc:  # malformed payload (e.g. not an array) — report, don't traceback
+        result = {"success": False, "error": f"{type(exc).__name__}: {exc}"}
 
     print(json.dumps(result))
 

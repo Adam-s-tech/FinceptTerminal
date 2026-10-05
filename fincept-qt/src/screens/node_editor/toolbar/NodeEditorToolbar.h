@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QEvent>
+#include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QShowEvent>
@@ -20,6 +22,9 @@ class NodeEditorToolbar : public QWidget {
     void set_can_redo(bool can);
     void set_executing(bool running);
 
+    /// Replace the status badge text ("DRAFT" by default) — e.g. "SAVED 14:32", "UNSAVED".
+    void set_status_text(const QString& text);
+
   signals:
     void undo_clicked();
     void redo_clicked();
@@ -35,14 +40,25 @@ class NodeEditorToolbar : public QWidget {
 
   protected:
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     void build_ui();
     void apply_background();
+    void retranslateUi();
 
     QLineEdit* name_edit_ = nullptr;
+    QLabel* status_badge_ = nullptr;
+    QString status_override_; // custom badge text; empty = default "DRAFT"
     QPushButton* undo_btn_ = nullptr;
     QPushButton* redo_btn_ = nullptr;
+    QPushButton* save_btn_ = nullptr;
+    QPushButton* load_btn_ = nullptr;
+    QPushButton* clear_btn_ = nullptr;
+    QPushButton* import_btn_ = nullptr;
+    QPushButton* export_btn_ = nullptr;
+    QPushButton* templates_btn_ = nullptr;
+    QPushButton* deploy_btn_ = nullptr;
     QPushButton* execute_btn_ = nullptr;
 };
 

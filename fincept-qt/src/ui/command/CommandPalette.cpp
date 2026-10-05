@@ -32,49 +32,62 @@ void CommandPalette::show_for(QWidget* parent_frame) {
 CommandPalette::CommandPalette(QWidget* parent) : QDialog(parent) {
     setWindowFlag(Qt::FramelessWindowHint);
     setWindowFlag(Qt::Popup);
-    setStyleSheet(
-        "QDialog { background: #111827; border: 1px solid #374151; }"
-        "QLineEdit { background: #1f2937; color: #e5e7eb; border: 1px solid #374151; "
-        "            padding: 8px 12px; font-size: 13px; font-family: 'Consolas', monospace; }"
-        "QListWidget { background: #111827; color: #e5e7eb; border: none; }"
-        "QListWidget::item { padding: 6px 10px; }"
-        "QListWidget::item:hover { background: #1f2937; }"
-        "QListWidget::item:selected { background: #1f2937; color: #d97706; }");
+    setStyleSheet("QDialog { background: #111827; border: 1px solid #374151; }"
+                  "QLineEdit { background: #1f2937; color: #e5e7eb; border: 1px solid #374151; "
+                  "            padding: 8px 12px; font-size: 13px; font-family: 'Consolas', monospace; }"
+                  "QListWidget { background: #111827; color: #e5e7eb; border: none; }"
+                  "QListWidget::item { padding: 6px 10px; }"
+                  "QListWidget::item:hover { background: #1f2937; }"
+                  "QListWidget::item:selected { background: #1f2937; color: #d97706; }");
 
     auto* vl = new QVBoxLayout(this);
     vl->setContentsMargins(8, 8, 8, 8);
     vl->setSpacing(6);
 
     input_ = new QLineEdit(this);
-    input_->setPlaceholderText("Search actions, layouts… (Esc to cancel, Enter to run)");
+    input_->setPlaceholderText(tr("Search actions, layouts… (Esc to cancel, Enter to run)"));
     connect(input_, &QLineEdit::textChanged, this, &CommandPalette::on_text_changed);
     connect(input_, &QLineEdit::returnPressed, this, &CommandPalette::on_accept);
     vl->addWidget(input_);
 
     suggestions_ = new QListWidget(this);
     suggestions_->setSelectionMode(QAbstractItemView::SingleSelection);
-    connect(suggestions_, &QListWidget::itemActivated, this,
-            [this](QListWidgetItem*) { on_accept(); });
+    connect(suggestions_, &QListWidget::itemActivated, this, [this](QListWidgetItem*) { on_accept(); });
     vl->addWidget(suggestions_, /*stretch=*/1);
 
     // Initial population: first ~25 actions so the user sees something.
     on_text_changed({});
 }
 
+void CommandPalette::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QDialog::changeEvent(event);
+}
+
+void CommandPalette::retranslateUi() {
+    if (input_)
+        input_->setPlaceholderText(tr("Search actions, layouts… (Esc to cancel, Enter to run)"));
+}
+
 void CommandPalette::on_text_changed(const QString& text) {
-    if (!suggestions_) return;
+    if (!suggestions_)
+        return;
     suggestions_->clear();
-    auto matches = SuggestionIndex::instance().query(
-        text.isEmpty() ? QStringLiteral("a") : text, /*limit=*/25);
-    if (matches.isEmpty() && !text.isEmpty()) {
-        // Empty query branch: still show top actions by walking the registry.
+    auto matches = SuggestionIndex::instance().query(text.isEmpty() ? QStringLiteral("a") : text, /*limit=*/25);
+    if (matches.isEmpty() && text.isEmpty()) {
+        // Empty query (nothing typed): still show top actions by walking the
+        // registry. A non-empty query with no match must stay EMPTY — listing
+        // unrelated actions made Enter run whichever happened to be first.
         for (const QString& id : ActionRegistry::instance().all_ids()) {
             const auto* def = ActionRegistry::instance().find(id);
-            if (!def) continue;
+            if (!def)
+                continue;
             auto* item = new QListWidgetItem(def->display.isEmpty() ? def->id : def->display);
             item->setData(Qt::UserRole, def->id);
             suggestions_->addItem(item);
-            if (suggestions_->count() >= 25) break;
+            if (suggestions_->count() >= 25)
+                break;
         }
     } else {
         for (const auto& m : matches) {
@@ -104,17 +117,22 @@ void CommandPalette::on_accept() {
         accept();
         return;
     }
+    // The palette is parented to the frame it was opened over; run the action
+    // there. WindowCycler::focused_frame() cannot be used on its own: while this
+    // popup is the active window it falls back to the FIRST registered frame,
+    // so in a multi-window setup the action ran against the wrong window.
     CommandContext ctx;
     ctx.shell = &TerminalShell::instance();
-    ctx.focused_frame = WindowCycler::instance().focused_frame();
+    ctx.focused_frame = qobject_cast<WindowFrame*>(parentWidget());
+    if (!ctx.focused_frame)
+        ctx.focused_frame = WindowCycler::instance().focused_frame();
+    // Dismiss the popup first so actions that open their own dialogs (layout
+    // save-as, file pickers, ...) don't do so from inside a live Qt::Popup.
+    accept();
     auto r = ActionRegistry::instance().invoke(action_id, ctx);
     if (r.is_err()) {
-        ToastService::instance().post(
-            ToastService::Severity::Warning,
-            QString::fromStdString(r.error()),
-            "palette");
+        ToastService::instance().post(ToastService::Severity::Warning, QString::fromStdString(r.error()), "palette");
     }
-    accept();
 }
 
 } // namespace fincept::ui

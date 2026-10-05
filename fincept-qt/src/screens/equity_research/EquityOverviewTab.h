@@ -3,6 +3,10 @@
 #include "services/equity/EquityResearchModels.h"
 #include "ui/widgets/LoadingOverlay.h"
 
+#ifdef HAS_QT_WEBENGINE
+#    include "ui/charts/KLineChartWidget.h"
+#endif
+
 #include <QHash>
 #include <QLabel>
 #include <QPixmap>
@@ -48,6 +52,9 @@ class EquityOverviewTab : public QWidget {
     void set_symbol(const QString& symbol);
 
     static QString currency_symbol(const QString& currency_code);
+    // Compact magnitude formatter (1.90T / 890.00B / …). Public so the parent
+    // research screen's title bar formats market cap identically to this tab.
+    static QString fmt_large(double v);
 
   protected:
     void changeEvent(QEvent* event) override;
@@ -73,7 +80,7 @@ class EquityOverviewTab : public QWidget {
     QFrame* make_panel_(const char* title_key, const char* title_color);
     QLabel* add_row_(QFrame* panel, const char* key, const char* val_color);
 
-    QHash<QLabel*, const char*> i18n_labels_;  ///< label → English source key for tr()
+    QHash<QLabel*, const char*> i18n_labels_; ///< label → English source key for tr()
 
     QWidget* build_col1();
     QWidget* build_chart_panel();
@@ -95,7 +102,6 @@ class EquityOverviewTab : public QWidget {
     void rebuild_chart(const QVector<services::equity::Candle>& candles);
     void switch_period(QPushButton* btn, const QString& period);
 
-    static QString fmt_large(double v);
     static QString fmt_pct(double v);
     QString fmt_price(double v) const;
 
@@ -127,6 +133,9 @@ class EquityOverviewTab : public QWidget {
     QLabel* short_pct_val_ = nullptr;
 
     // Chart
+#ifdef HAS_QT_WEBENGINE
+    fincept::ui::KLineChartWidget* kline_chart_ = nullptr;
+#endif
     ResearchCandleCanvas* candle_canvas_ = nullptr;
     QPushButton* btn_1m_ = nullptr;
     QPushButton* btn_3m_ = nullptr;

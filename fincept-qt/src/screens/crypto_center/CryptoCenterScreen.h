@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QEvent>
 #include <QString>
 #include <QWidget>
 
@@ -40,14 +41,19 @@ class CryptoCenterScreen : public QWidget {
     explicit CryptoCenterScreen(QWidget* parent = nullptr);
     ~CryptoCenterScreen() override;
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private:
     void build_ui();
     void build_empty_page();
     void build_connected_page();
     void apply_theme();
+    void retranslateUi();
 
     void on_wallet_connected(const QString& pubkey, const QString& label);
     void on_wallet_disconnected();
+    void on_connect_failed(const QString& reason);
 
     // Header
     QWidget* header_ = nullptr;
@@ -55,6 +61,10 @@ class CryptoCenterScreen : public QWidget {
     QLabel* header_route_ = nullptr;
     QLabel* header_separator_ = nullptr;
     QLabel* header_status_ = nullptr;
+
+    // Empty-state panel head (fixed UI labels — cached for retranslateUi)
+    QLabel* empty_head_title_ = nullptr;
+    QLabel* empty_head_status_ = nullptr;
 
     // Stack
     QStackedWidget* stack_ = nullptr;
@@ -66,6 +76,7 @@ class CryptoCenterScreen : public QWidget {
     QLabel* empty_lede_ = nullptr;
     QLabel* empty_security_label_ = nullptr;
     QLabel* empty_security_text_ = nullptr;
+    QLabel* empty_error_ = nullptr; ///< reason the last connect attempt failed (hidden until then)
     QPushButton* connect_button_ = nullptr;
 
     // Connected state
@@ -77,9 +88,9 @@ class CryptoCenterScreen : public QWidget {
     TradeTab* trade_tab_ = nullptr;
     ActivityTab* activity_tab_ = nullptr;
     SettingsTab* settings_tab_ = nullptr;
-    StakeTab* stake_tab_ = nullptr;       // Phase 3 — veFNCPT lock + tier
-    MarketsTab* markets_tab_ = nullptr;   // Phase 4 — internal prediction markets
-    RoadmapTab* roadmap_tab_ = nullptr;   // Phase 5 — buyback & burn dashboard
+    StakeTab* stake_tab_ = nullptr;     // Phase 3 — veFNCPT lock + tier
+    MarketsTab* markets_tab_ = nullptr; // Phase 4 — internal prediction markets
+    RoadmapTab* roadmap_tab_ = nullptr; // Phase 5 — buyback & burn dashboard
 };
 
 } // namespace fincept::screens

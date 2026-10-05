@@ -6,9 +6,8 @@
 //
 // Part of the partial-class split of WindowFrame.cpp.
 
-#include "app/WindowFrame.h"
-
 #include "app/DockScreenRouter.h"
+#include "app/WindowFrame.h"
 #include "core/layout/LayoutCatalog.h"
 #include "core/layout/WorkspaceShell.h"
 #include "core/logging/Logger.h"
@@ -25,7 +24,6 @@
 #include <DockManager.h>
 #include <DockWidget.h>
 #include <FloatingDockContainer.h>
-
 #include <algorithm>
 
 namespace fincept {
@@ -40,7 +38,13 @@ layout::FrameLayout WindowFrame::capture_layout() const {
     if (!dock_manager_ || !dock_router_)
         return fl;
 
-    // ADS dock state — opaque blob covering splits, tab order, sizes.
+    // ADS dock state — opaque blob covering splits, tab order, sizes. Prune
+    // closed panels first so workspace snapshots capture only the visible grid
+    // and don't carry phantom areas that reshuffle the layout on restore. The
+    // session-layout timer keeps the live tree pruned continuously, so this is
+    // normally a no-op; it just guarantees a clean blob if a snapshot lands in
+    // the sub-500ms window after a layout change.
+    dock_router_->prune_hidden_panels();
     fl.dock_state = dock_manager_->saveState();
 
     // Active panel — whichever dock widget currently has focus.
@@ -107,7 +111,9 @@ layout::FrameLayout WindowFrame::capture_layout() const {
     }
 
     LOG_INFO("WindowFrame", QString("capture_layout: window %1 -> %2 panels, dock_state=%3 bytes")
-                                .arg(window_id_).arg(fl.panels.size()).arg(fl.dock_state.size()));
+                                .arg(window_id_)
+                                .arg(fl.panels.size())
+                                .arg(fl.dock_state.size()));
     return fl;
 }
 
@@ -118,7 +124,9 @@ bool WindowFrame::apply_layout(const layout::FrameLayout& fl) {
     }
 
     LOG_INFO("WindowFrame", QString("apply_layout: window %1, %2 panels, dock_state=%3 bytes")
-                                .arg(window_id_).arg(fl.panels.size()).arg(fl.dock_state.size()));
+                                .arg(window_id_)
+                                .arg(fl.panels.size())
+                                .arg(fl.dock_state.size()));
 
     // Phase 8 staged materialisation (decision 9.3): split the per-panel
     // work into a cheap "shell-only" pass that runs synchronously before
@@ -139,6 +147,12 @@ bool WindowFrame::apply_layout(const layout::FrameLayout& fl) {
     // dock_widgets_), groups everything as hidden tabs in one CenterDockArea
     // (vs. prepare_dock_widget's one-area-per-call), and is also what the
     // constructor calls on the QSettings-restore path — same protection here.
+    // Suppress the debounced layout save during the bulk pre-create +
+    // restoreState pass. These operations fire dockWidgetAdded and
+    // viewToggled dozens of times; saving mid-restore would persist an
+    // incomplete intermediate state.
+    suppress_layout_save_ = true;
+
     dock_router_->ensure_all_registered();
 
     // Track each panel's resolved string id alongside its FrameLayout
@@ -156,8 +170,10 @@ bool WindowFrame::apply_layout(const layout::FrameLayout& fl) {
         QString id = ps.type_id;
         int dup_index = 0;
         for (const auto& other : fl.panels) {
-            if (&other == &ps) break;
-            if (other.type_id == ps.type_id) ++dup_index;
+            if (&other == &ps)
+                break;
+            if (other.type_id == ps.type_id)
+                ++dup_index;
         }
         if (dup_index > 0)
             id = QString("%1#dup%2").arg(ps.type_id).arg(dup_index + 1);
@@ -178,8 +194,12 @@ bool WindowFrame::apply_layout(const layout::FrameLayout& fl) {
         ok = dock_manager_->restoreState(fl.dock_state);
         if (!ok) {
             LOG_WARN("WindowFrame", "apply_layout: CDockManager::restoreState rejected dock blob");
+            suppress_layout_save_ = false;
+            return false;
         }
     }
+
+    suppress_layout_save_ = false;
 
     // Phase 3: chrome flags.
     if (focus_mode_ != fl.focus_mode)
@@ -232,7 +252,8 @@ bool WindowFrame::apply_layout(const layout::FrameLayout& fl) {
         PanelMaterialiser::instance().enqueue(
             id,
             [router_guard, id]() {
-                if (!router_guard) return;
+                if (!router_guard)
+                    return;
                 router_guard->materialize_now(id);
             },
             priority,
@@ -240,7 +261,9 @@ bool WindowFrame::apply_layout(const layout::FrameLayout& fl) {
     }
 
     LOG_INFO("WindowFrame", QString("apply_layout: window %1 staged %2 panels (active='%3')")
-                                .arg(window_id_).arg(panel_ids.size()).arg(active_id));
+                                .arg(window_id_)
+                                .arg(panel_ids.size())
+                                .arg(active_id));
 
     return ok;
 }

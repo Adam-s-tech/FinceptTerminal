@@ -1,6 +1,8 @@
 #include "trading/brokers/groww/GrowwBroker.h"
 
+#include "trading/brokers/BrokerClientOrderId.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerTokenUtil.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -11,10 +13,23 @@
 #include <QUrlQuery>
 #include <QUuid>
 
+#include <algorithm>
+
 namespace fincept::trading {
 
 static int64_t now_ts() {
     return QDateTime::currentSecsSinceEpoch();
+}
+
+// Groww reports the plain exchange (NSE/BSE) on orders and positions of the FNO segment.
+// Map it to the terminal's derivative exchange code (NFO/BFO), which groww_exchange() /
+// groww_segment() turn back into {NSE|BSE, FNO} when an order is sent.
+static QString groww_derivative_exchange(const QString& exchange) {
+    if (exchange == QLatin1String("NSE"))
+        return QStringLiteral("NFO");
+    if (exchange == QLatin1String("BSE"))
+        return QStringLiteral("BFO");
+    return exchange;
 }
 
 // ============================================================================
@@ -31,7 +46,7 @@ bool GrowwBroker::is_token_expired(const BrokerHttpResponse& resp) {
     return false;
 }
 
-QString GrowwBroker::checked_error(const BrokerHttpResponse& resp, const QString& fallback) {
+static QString groww_error_text(const BrokerHttpResponse& resp, const QString& fallback) {
     if (!resp.json.isEmpty()) {
         // Preferred Groww shape: { status: "FAILURE", error: { code: "GA00x", message: "..." } }
         QJsonValue err_v = resp.json["error"];
@@ -59,6 +74,16 @@ QString GrowwBroker::checked_error(const BrokerHttpResponse& resp, const QString
     if (!resp.raw_body.isEmpty())
         return resp.raw_body.left(200);
     return fallback;
+}
+
+// Every caller tests `!resp.success` BEFORE `is_token_expired()`, and BrokerHttp reports
+// HTTP 401/403 as !success — so the "[TOKEN_EXPIRED]" literal those callers return after
+// the check was only reachable for a 2xx GA005 and a real 401 surfaced as plain text.
+// The marker is what IBroker::validate_session / AccountDataStream classify on (silent
+// re-mint of the daily token, "session expired" prompt), so tag it here.
+QString GrowwBroker::checked_error(const BrokerHttpResponse& resp, const QString& fallback) {
+    const QString msg = groww_error_text(resp, fallback);
+    return is_token_expired(resp) ? QStringLiteral("[TOKEN_EXPIRED] ") + msg : msg;
 }
 
 QString GrowwBroker::error_code(const BrokerHttpResponse& resp) {
@@ -96,7 +121,7 @@ const BrokerEnumMap<QString>& GrowwBroker::groww_enum_map() {
         BrokerEnumMap<QString> x;
         x.set(OrderType::Market, "MARKET");
         x.set(OrderType::Limit, "LIMIT");
-        x.set(OrderType::StopLoss, "STOP_LOSS_MARKET");      // SL-M: trigger only, market fill
+        x.set(OrderType::StopLoss, "STOP_LOSS_MARKET");     // SL-M: trigger only, market fill
         x.set(OrderType::StopLossLimit, "STOP_LOSS_LIMIT"); // SL:   trigger + limit price
         x.set(ProductType::Intraday, "MIS");
         x.set(ProductType::Delivery, "CNC");
@@ -111,12 +136,15 @@ int GrowwBroker::resolution_to_minutes(const QString& resolution) {
     return history_interval_minutes(resolution);
 }
 
-// Groww /v1/historical/candles accepts 1, 5, 10, 15, 30, 60 minute bars plus 1440 (1D)
-// and 10080 (1W). Windows are capped per interval: ≤5m → 30d, 10–30m → 90d, ≥1h → 180d.
+// Groww /v1/historical/candles accepts 1, 2, 3, 5, 10, 15, 30, 60 minute bars plus
+// 1440 (1D), 10080 (1W) and 43200 (1M). Windows are capped per interval:
+// ≤5m → 30d, 10–30m → 90d, ≥1h → 180d.
 int GrowwBroker::history_interval_minutes(const QString& resolution) {
     const QString r = resolution.toLower();
     if (r == "1" || r == "1m" || r == "1min")
         return 1;
+    if (r == "2" || r == "2m" || r == "2min")
+        return 2;
     if (r == "3" || r == "3m" || r == "3min")
         return 3;
     if (r == "5" || r == "5m" || r == "5min")
@@ -140,23 +168,37 @@ int GrowwBroker::history_interval_minutes(const QString& resolution) {
     return 1;
 }
 
-// Groww /v1/historical/candles takes a string token, NOT a number.
-// Token enum per docs: 1min, 3min, 5min, 10min, 15min, 30min, 1hour, 4hours,
-// 1day, 1week, 1month.
+// Groww /v1/historical/candles takes a string candle_interval token, NOT a number.
+// Token enum per docs (full-word SINGULAR): 1minute, 2minute, 3minute, 5minute,
+// 10minute, 15minute, 30minute, 1hour, 4hour, 1day, 1week, 1month.
 QString GrowwBroker::history_interval_token(const QString& resolution) {
     switch (history_interval_minutes(resolution)) {
-        case 1:    return "1min";
-        case 3:    return "3min";
-        case 5:    return "5min";
-        case 10:   return "10min";
-        case 15:   return "15min";
-        case 30:   return "30min";
-        case 60:   return "1hour";
-        case 240:  return "4hours";
-        case 1440: return "1day";
-        case 10080:return "1week";
-        case 43200:return "1month";
-        default:   return "1min";
+        case 1:
+            return "1minute";
+        case 2:
+            return "2minute";
+        case 3:
+            return "3minute";
+        case 5:
+            return "5minute";
+        case 10:
+            return "10minute";
+        case 15:
+            return "15minute";
+        case 30:
+            return "30minute";
+        case 60:
+            return "1hour";
+        case 240:
+            return "4hour";
+        case 1440:
+            return "1day";
+        case 10080:
+            return "1week";
+        case 43200:
+            return "1month";
+        default:
+            return "1minute";
     }
 }
 
@@ -203,14 +245,26 @@ TokenExchangeResponse GrowwBroker::exchange_token(const QString& api_key, const 
 
     auto resp = BrokerHttp::instance().post_json("https://api.groww.in/v1/token/api/access", body, headers);
 
+    // Login errors are bad credentials, not an expired session — no [TOKEN_EXPIRED] tag.
     if (!resp.success)
-        return {false, "", "", "", checked_error(resp, "Network error"), ""};
+        return {.success = false, .error = groww_error_text(resp, "Network error")};
 
     QString token = resp.json["token"].toString();
     if (token.isEmpty())
-        return {false, "", "", "", checked_error(resp, "No token in response"), ""};
+        return {.success = false, .error = groww_error_text(resp, "No token in response")};
 
-    return {true, token, "", "", "", ""};
+    // Groww daily access tokens are minted purely from the api_key + api_secret
+    // (checksum flow) — both are stored, so the session can be silently
+    // re-minted without any user interaction.
+    const QString extra = with_token_expiry({}, next_ist_flush_epoch(6, 0));
+    return {.success = true, .access_token = token, .additional_data = extra};
+}
+
+// Silent refresh = re-mint the daily token from the stored api_key + api_secret.
+TokenExchangeResponse GrowwBroker::refresh_session(const BrokerCredentials& creds) {
+    if (creds.api_key.isEmpty() || creds.api_secret.isEmpty())
+        return {.success = false, .error = "Groww silent refresh requires stored API key and secret"};
+    return exchange_token(creds.api_key, creds.api_secret, QString());
 }
 
 // ============================================================================
@@ -229,6 +283,10 @@ OrderPlaceResponse GrowwBroker::place_order(const BrokerCredentials& creds, cons
     body["product"] = groww_enum_map().product_or(order.product_type, "CNC");
     body["order_type"] = groww_enum_map().order_type_or(order.order_type, "MARKET");
     body["transaction_type"] = (order.side == OrderSide::Buy) ? "BUY" : "SELL";
+    // Stable per order intent (UnifiedOrder::client_order_id) so a retry after an 8s
+    // client-side timeout carries the same reference and Groww can reject it as a
+    // duplicate (see BrokerClientOrderId.h). Groww requires 8-20 alphanumeric chars.
+    body["order_reference_id"] = client_order_ref_for(order, 20);
 
     if (order.order_type != OrderType::Market)
         body["price"] = order.price;
@@ -354,7 +412,7 @@ ApiResponse<QVector<BrokerOrderInfo>> GrowwBroker::get_orders(const BrokerCreden
         return "open";
     };
 
-    auto fetch_segment = [&](const QString& segment) -> bool {
+    auto fetch_segment = [&](const QString& segment, QString* error_out) -> bool {
         constexpr int PAGE_SIZE = 25; // Groww API max per page
         int page = 0;
         while (true) {
@@ -363,10 +421,11 @@ ApiResponse<QVector<BrokerOrderInfo>> GrowwBroker::get_orders(const BrokerCreden
                               .arg(page)
                               .arg(PAGE_SIZE);
             auto resp = BrokerHttp::instance().get(url, hdrs);
-            if (!resp.success)
+            if (!resp.success || is_token_expired(resp)) {
+                if (error_out)
+                    *error_out = checked_error(resp, "Network error");
                 return false;
-            if (is_token_expired(resp))
-                return false;
+            }
 
             QJsonObject payload = resp.json["payload"].toObject();
             QJsonArray list = payload["order_list"].toArray();
@@ -378,10 +437,17 @@ ApiResponse<QVector<BrokerOrderInfo>> GrowwBroker::get_orders(const BrokerCreden
                 if (info.order_id.isEmpty())
                     info.order_id = o["order_id"].toString();
                 info.symbol = o["trading_symbol"].toString();
+                // The response reports the plain exchange (NSE/BSE) for both segments. The
+                // terminal's convention — and what place_order / modify_order derive the
+                // segment from — is NFO/BFO for derivatives, so a modify hydrated from this
+                // row would otherwise be sent to the CASH segment.
                 info.exchange = o["exchange"].toString();
+                if (segment == QLatin1String("FNO"))
+                    info.exchange = groww_derivative_exchange(info.exchange);
                 info.quantity = o["quantity"].toInt();
                 info.filled_qty = o["filled_quantity"].toInt();
                 info.price = o["price"].toDouble();
+                info.avg_price = o["average_fill_price"].toDouble();
                 info.trigger_price = o["trigger_price"].toDouble();
                 // Doc-canonical status field is `order_status`; older endpoints used `status`.
                 QString raw_status = o["order_status"].toString();
@@ -404,8 +470,13 @@ ApiResponse<QVector<BrokerOrderInfo>> GrowwBroker::get_orders(const BrokerCreden
         return true;
     };
 
-    fetch_segment("CASH");
-    fetch_segment("FNO");
+    // CASH is the primary book: a failure there (expired token, network) must surface instead
+    // of masquerading as "no orders" — an unreadable book also made cancel_all_orders report
+    // success with nothing cancelled. FNO is best-effort: accounts without F&O enabled reject it.
+    QString cash_error;
+    if (!fetch_segment("CASH", &cash_error))
+        return {false, std::nullopt, cash_error, ts};
+    fetch_segment("FNO", nullptr);
 
     return {true, orders, "", ts};
 }
@@ -434,7 +505,10 @@ ApiResponse<QJsonObject> GrowwBroker::get_trade_book(const BrokerCredentials& cr
             QJsonArray orders = list_resp.json["payload"].toObject()["order_list"].toArray();
             for (const auto& it : orders) {
                 QJsonObject o = it.toObject();
-                QString status = o["status"].toString();
+                // Doc-canonical field is `order_status` (see get_orders); `status` is the legacy spelling.
+                QString status = o["order_status"].toString();
+                if (status.isEmpty())
+                    status = o["status"].toString();
                 if (o["filled_quantity"].toInt() == 0 && status != "COMPLETED" && status != "EXECUTED")
                     continue;
 
@@ -444,8 +518,8 @@ ApiResponse<QJsonObject> GrowwBroker::get_trade_book(const BrokerCredentials& cr
                 if (oid.isEmpty())
                     continue;
 
-                QString trades_url = QString("https://api.groww.in/v1/order/trades/%1?segment=%2&page=0&page_size=50")
-                                         .arg(oid, segment);
+                QString trades_url =
+                    QString("https://api.groww.in/v1/order/trades/%1?segment=%2&page=0&page_size=50").arg(oid, segment);
                 auto tr = BrokerHttp::instance().get(trades_url, hdrs);
                 if (!tr.success || is_token_expired(tr))
                     continue;
@@ -475,6 +549,7 @@ ApiResponse<QVector<BrokerPosition>> GrowwBroker::get_positions(const BrokerCred
     int64_t ts = now_ts();
     auto hdrs = auth_headers(creds);
     QVector<BrokerPosition> positions;
+    QMap<QString, QVector<SymbolRef>> refs_by_segment; // for LTP hydration below
 
     auto fetch_segment = [&](const QString& segment) -> bool {
         QString url = QString("https://api.groww.in/v1/positions/user?segment=%1").arg(segment);
@@ -510,12 +585,30 @@ ApiResponse<QVector<BrokerPosition>> GrowwBroker::get_positions(const BrokerCred
 
             BrokerPosition pos;
             pos.symbol = p["trading_symbol"].toString();
+            // NSE/BSE on both segments; derivatives are NFO/BFO app-wide (see get_orders). Without
+            // it a "close position" order for an F&O row is sent on the CASH segment.
             pos.exchange = p["exchange"].toString();
+            if (segment == QLatin1String("FNO"))
+                pos.exchange = groww_derivative_exchange(pos.exchange);
             pos.quantity = qty;
             pos.avg_price = avg;
-            pos.ltp = 0.0; // Not returned by positions endpoint; query live-data/ltp separately if needed.
+            pos.ltp = 0.0; // Not returned by positions endpoint — hydrated below via /live-data/ltp.
             pos.pnl = p["realised_pnl"].toDouble();
             pos.product_type = p["product"].toString();
+            pos.pnl_pct = 0.0;
+            // credit - debit carries the sign, but PortfolioReplicationService
+            // takes fabs() of quantity and reads direction from `side` alone —
+            // leaving it empty replicated every short as a long and inverted
+            // its P&L.
+            pos.side = qty > 0 ? "LONG" : "SHORT";
+
+            SymbolRef ref;
+            ref.orig = pos.symbol;
+            ref.exchange = pos.exchange.isEmpty() ? QStringLiteral("NSE") : pos.exchange;
+            ref.trading_symbol = pos.symbol;
+            ref.segment = segment;
+            ref.exchange_symbol = groww_exchange(ref.exchange) + "_" + ref.trading_symbol;
+            refs_by_segment[segment].append(ref);
             positions.append(pos);
         }
         return true;
@@ -523,6 +616,24 @@ ApiResponse<QVector<BrokerPosition>> GrowwBroker::get_positions(const BrokerCred
 
     fetch_segment("CASH");
     fetch_segment("FNO");
+
+    // Hydrate LTP — the positions endpoint returns no price, which left value/P&L
+    // silently 0. Batch via the existing /v1/live-data/ltp plumbing (≤50/call).
+    QVector<BrokerQuote> ltp_quotes;
+    for (auto it = refs_by_segment.constBegin(); it != refs_by_segment.constEnd(); ++it)
+        fetch_ltp_batch(creds, it.key(), it.value(), ltp_quotes);
+    for (auto& pos : positions) {
+        for (const auto& q : ltp_quotes) {
+            if (q.symbol != pos.symbol || q.ltp <= 0.0)
+                continue;
+            pos.ltp = q.ltp;
+            if (pos.avg_price > 0.0)
+                pos.pnl_pct = ((pos.ltp - pos.avg_price) / pos.avg_price) * 100.0;
+            // realised_pnl (above) misses the open MTM — add the unrealised leg.
+            pos.pnl += (pos.ltp - pos.avg_price) * pos.quantity;
+            break;
+        }
+    }
 
     return {true, positions, "", ts};
 }
@@ -550,9 +661,41 @@ ApiResponse<QVector<BrokerHolding>> GrowwBroker::get_holdings(const BrokerCreden
         holding.exchange = h.contains("exchange") ? h["exchange"].toString() : QStringLiteral("NSE");
         holding.quantity = h["quantity"].toInt();
         holding.avg_price = h["average_price"].toDouble();
-        holding.ltp = 0.0; // Not returned by holdings endpoint; query live-data/ltp separately if needed.
-        holding.pnl = 0.0; // Derived value — compute in the service layer once LTP is fetched.
+        holding.invested_value = holding.quantity * holding.avg_price;
+        holding.ltp = 0.0; // Not returned by holdings endpoint — hydrated below via /live-data/ltp.
+        holding.current_value = 0.0;
+        holding.pnl = 0.0;
+        holding.pnl_pct = 0.0;
         holdings.append(holding);
+    }
+
+    // Hydrate LTP and derive value/P&L — previously left 0, so holdings views
+    // without a live-quote subscription showed ₹0 for real positions. Demat
+    // holdings are equities → CASH segment; batch via /v1/live-data/ltp.
+    QVector<SymbolRef> refs;
+    refs.reserve(holdings.size());
+    for (const auto& h : holdings) {
+        SymbolRef ref;
+        ref.orig = h.symbol;
+        ref.exchange = h.exchange;
+        ref.trading_symbol = h.symbol;
+        ref.segment = QStringLiteral("CASH");
+        ref.exchange_symbol = groww_exchange(ref.exchange) + "_" + ref.trading_symbol;
+        refs.append(ref);
+    }
+    QVector<BrokerQuote> ltp_quotes;
+    fetch_ltp_batch(creds, QStringLiteral("CASH"), refs, ltp_quotes);
+    for (auto& holding : holdings) {
+        for (const auto& q : ltp_quotes) {
+            if (q.symbol != holding.symbol || q.ltp <= 0.0)
+                continue;
+            holding.ltp = q.ltp;
+            holding.current_value = holding.quantity * q.ltp;
+            holding.pnl = holding.current_value - holding.invested_value;
+            if (holding.invested_value > 0.0)
+                holding.pnl_pct = (holding.pnl / holding.invested_value) * 100.0;
+            break;
+        }
     }
 
     return {true, holdings, "", ts};
@@ -744,9 +887,11 @@ ApiResponse<QVector<BrokerQuote>> GrowwBroker::get_quotes(const BrokerCredential
     if (symbols.size() == 1) {
         auto hdrs = auth_headers(creds);
         const auto ref = split_symbol(symbols.first());
+        // trading_symbol is percent-encoded: "M&M" / "M&MFIN" would otherwise end the parameter at '&'.
         QString url = QString("https://api.groww.in/v1/live-data/quote"
                               "?exchange=%1&segment=%2&trading_symbol=%3")
-                          .arg(groww_exchange(ref.exchange), ref.segment, ref.trading_symbol);
+                          .arg(groww_exchange(ref.exchange), ref.segment,
+                               QString::fromUtf8(QUrl::toPercentEncoding(ref.trading_symbol)));
         auto resp = BrokerHttp::instance().get(url, hdrs);
         if (!resp.success)
             return {false, std::nullopt, checked_error(resp, "Network error"), ts};
@@ -811,21 +956,189 @@ ApiResponse<QVector<BrokerCandle>> GrowwBroker::get_history(const BrokerCredenti
     // groww_symbol is "EXCHANGE-TRADINGSYMBOL" (e.g. "NSE-WIPRO"); for options the
     // suffix is the option-contract code (e.g. "NSE-NIFTY-30Sep25-24650-CE"). The
     // hyphen prefix is required — passing the bare trading symbol returns 4xx.
-    QString start_time = from_date + " 09:15:00";
-    QString end_time = to_date + " 15:30:00";
     const QString groww_symbol = ex + "-" + trading_symbol;
 
-    QUrl qurl(QStringLiteral("https://api.groww.in/v1/historical/candles"));
-    QUrlQuery qq;
-    qq.addQueryItem(QStringLiteral("exchange"), ex);
-    qq.addQueryItem(QStringLiteral("segment"), segment);
-    qq.addQueryItem(QStringLiteral("groww_symbol"), groww_symbol);
-    qq.addQueryItem(QStringLiteral("start_time"), start_time);
-    qq.addQueryItem(QStringLiteral("end_time"), end_time);
-    qq.addQueryItem(QStringLiteral("candle_interval"), interval_token);
-    qurl.setQuery(qq);
-    const QString url = qurl.toString();
+    // Groww caps the queryable window per request by interval. Resolve the cap (in
+    // days) from the interval-minutes bucket so large ranges can be chunked into
+    // consecutive sub-windows and stitched back together.
+    //   ≤5m → 30d, 10/15/30m → 90d, ≥1h (incl. day/week/month) → 180d.
+    const int interval_minutes = history_interval_minutes(resolution);
+    int window_cap_days;
+    if (interval_minutes <= 5)
+        window_cap_days = 30;
+    else if (interval_minutes <= 30)
+        window_cap_days = 90;
+    else
+        window_cap_days = 180;
 
+    // One-window fetch + parse. Returns the BrokerHttpResponse so the caller can
+    // distinguish a hard failure (network / token) from a successful-but-empty
+    // window, and appends parsed candles into `out`. Only start_time/end_time vary
+    // between windows; the 09:15:00 / 15:30:00 session suffixes are preserved.
+    auto fetch_window = [&](const QString& win_from, const QString& win_to,
+                            QVector<BrokerCandle>& out) -> BrokerHttpResponse {
+        const QString start_time = win_from + " 09:15:00";
+        const QString end_time = win_to + " 15:30:00";
+
+        QUrl qurl(QStringLiteral("https://api.groww.in/v1/historical/candles"));
+        QUrlQuery qq;
+        qq.addQueryItem(QStringLiteral("exchange"), ex);
+        qq.addQueryItem(QStringLiteral("segment"), segment);
+        qq.addQueryItem(QStringLiteral("groww_symbol"), groww_symbol);
+        qq.addQueryItem(QStringLiteral("start_time"), start_time);
+        qq.addQueryItem(QStringLiteral("end_time"), end_time);
+        qq.addQueryItem(QStringLiteral("candle_interval"), interval_token);
+        qurl.setQuery(qq);
+
+        auto resp = BrokerHttp::instance().get(qurl.toString(), hdrs);
+        if (!resp.success || is_token_expired(resp))
+            return resp;
+
+        const QJsonArray candles = resp.json["payload"].toObject()["candles"].toArray();
+        out.reserve(out.size() + candles.size());
+        for (const auto& item : candles) {
+            QJsonArray c = item.toArray();
+            if (c.size() < 6)
+                continue;
+            BrokerCandle candle;
+            // [timestamp_ms, open, high, low, close, volume]
+            candle.timestamp = static_cast<int64_t>(c[0].toDouble());
+            candle.open = c[1].toDouble();
+            candle.high = c[2].toDouble();
+            candle.low = c[3].toDouble();
+            candle.close = c[4].toDouble();
+            candle.volume = c[5].toDouble();
+            out.append(candle);
+        }
+        return resp;
+    };
+
+    const QDate from = QDate::fromString(from_date, QStringLiteral("yyyy-MM-dd"));
+    const QDate to = QDate::fromString(to_date, QStringLiteral("yyyy-MM-dd"));
+
+    QVector<BrokerCandle> result;
+
+    // Single-request path: when the dates don't parse (defensive) or the span fits
+    // within the cap, issue exactly one GET — behaviour is unchanged from before.
+    if (!from.isValid() || !to.isValid() || from.daysTo(to) <= window_cap_days) {
+        auto resp = fetch_window(from_date, to_date, result);
+        if (!resp.success)
+            return {false, std::nullopt, checked_error(resp, "Network error"), ts};
+        if (is_token_expired(resp))
+            return {false, std::nullopt, "[TOKEN_EXPIRED]", ts};
+        return {true, result, "", ts};
+    }
+
+    // Chunked path: walk consecutive ≤cap-day sub-windows. The first window's
+    // failure is fatal (mirrors the single-request behaviour); a later failure once
+    // we already have data breaks the loop and returns the partial series.
+    constexpr int kMaxIterations = 60;
+    QDate win_start = from;
+    int iterations = 0;
+    bool first = true;
+    while (win_start <= to && iterations < kMaxIterations) {
+        QDate win_end = win_start.addDays(window_cap_days);
+        if (win_end > to)
+            win_end = to;
+
+        auto resp = fetch_window(win_start.toString(QStringLiteral("yyyy-MM-dd")),
+                                 win_end.toString(QStringLiteral("yyyy-MM-dd")), result);
+        const bool failed = !resp.success || is_token_expired(resp);
+        if (failed) {
+            if (first) {
+                if (is_token_expired(resp))
+                    return {false, std::nullopt, "[TOKEN_EXPIRED]", ts};
+                return {false, std::nullopt, checked_error(resp, "Network error"), ts};
+            }
+            break; // partial data already collected — return what we have
+        }
+
+        first = false;
+        // Advance past this window. Sub-windows are half-open against the day-cap so
+        // adjacent windows don't re-request the same boundary day (dedupe still guards
+        // overlap from the inclusive session suffixes).
+        win_start = win_end.addDays(1);
+        ++iterations;
+    }
+
+    // Sort ascending by timestamp and drop duplicate bars (windows can overlap at
+    // their boundaries / on retried days).
+    std::sort(result.begin(), result.end(),
+              [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp < b.timestamp; });
+    result.erase(std::unique(result.begin(), result.end(),
+                             [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp == b.timestamp; }),
+                 result.end());
+
+    return {true, result, "", ts};
+}
+
+// ============================================================================
+// Batch multi-quotes — get_multi_quotes
+// Uses the existing batch helpers (fetch_ltp_batch + fetch_ohlc_batch) which
+// call /v1/live-data/ltp and /v1/live-data/ohlc (max 50 per call per segment).
+// ============================================================================
+
+ApiResponse<QVector<BrokerQuote>> GrowwBroker::get_multi_quotes(const BrokerCredentials& creds,
+                                                                const QVector<QPair<QString, QString>>& symbols) {
+    int64_t ts = now_ts();
+
+    if (symbols.isEmpty())
+        return {false, std::nullopt, "No symbols", ts};
+
+    // Convert QPair<symbol,exchange> to SymbolRef, using the exchange from the pair.
+    // Group by segment for batching.
+    QMap<QString, QVector<SymbolRef>> by_segment;
+    for (const auto& [sym, exch] : symbols) {
+        SymbolRef ref;
+        ref.orig = sym;
+        ref.exchange = exch.isEmpty() ? QStringLiteral("NSE") : exch;
+        ref.trading_symbol = sym;
+        // If sym has "NSE:RELIANCE" format, split it
+        const int colon = sym.indexOf(':');
+        if (colon != -1) {
+            ref.exchange = sym.left(colon);
+            ref.trading_symbol = sym.mid(colon + 1);
+        } else if (!exch.isEmpty()) {
+            ref.exchange = exch;
+        }
+        ref.segment = groww_segment(ref.exchange);
+        ref.exchange_symbol = groww_exchange(ref.exchange) + "_" + ref.trading_symbol;
+        by_segment[ref.segment].append(ref);
+    }
+
+    QVector<BrokerQuote> quotes;
+    for (auto it = by_segment.constBegin(); it != by_segment.constEnd(); ++it) {
+        if (!fetch_ltp_batch(creds, it.key(), it.value(), quotes))
+            continue; // best-effort — partial batch still returns what succeeded
+        fetch_ohlc_batch(creds, it.key(), it.value(), quotes);
+    }
+
+    return {true, quotes, "", ts};
+}
+
+// ============================================================================
+// Market depth — GET /v1/live-data/quote includes bid/ask depth
+// The /quote endpoint returns: payload.depth.buy[] and payload.depth.sell[]
+// Each level: { price, quantity, orders }
+// ============================================================================
+
+ApiResponse<MarketDepth> GrowwBroker::get_market_depth(const BrokerCredentials& creds, const QString& symbol,
+                                                       const QString& exchange) {
+    int64_t ts = now_ts();
+    auto hdrs = auth_headers(creds);
+
+    QString exch = exchange.isEmpty() ? QStringLiteral("NSE") : exchange;
+    QString trading_symbol = symbol;
+    const int colon = symbol.indexOf(':');
+    if (colon != -1) {
+        exch = symbol.left(colon);
+        trading_symbol = symbol.mid(colon + 1);
+    }
+
+    QString url = QString("https://api.groww.in/v1/live-data/quote"
+                          "?exchange=%1&segment=%2&trading_symbol=%3")
+                      .arg(groww_exchange(exch), groww_segment(exch),
+                           QString::fromUtf8(QUrl::toPercentEncoding(trading_symbol)));
     auto resp = BrokerHttp::instance().get(url, hdrs);
 
     if (!resp.success)
@@ -833,26 +1146,39 @@ ApiResponse<QVector<BrokerCandle>> GrowwBroker::get_history(const BrokerCredenti
     if (is_token_expired(resp))
         return {false, std::nullopt, "[TOKEN_EXPIRED]", ts};
 
-    QJsonArray candles = resp.json["payload"].toObject()["candles"].toArray();
-    QVector<BrokerCandle> result;
-    result.reserve(candles.size());
+    QJsonObject payload = resp.json["payload"].toObject();
 
-    for (const auto& item : candles) {
-        QJsonArray c = item.toArray();
-        if (c.size() < 6)
-            continue;
-        BrokerCandle candle;
-        // [timestamp_ms, open, high, low, close, volume]
-        candle.timestamp = static_cast<int64_t>(c[0].toDouble());
-        candle.open = c[1].toDouble();
-        candle.high = c[2].toDouble();
-        candle.low = c[3].toDouble();
-        candle.close = c[4].toDouble();
-        candle.volume = c[5].toDouble();
-        result.append(candle);
+    MarketDepth depth;
+    depth.symbol = symbol;
+    depth.exchange = exch;
+    depth.ltp = payload["last_price"].toDouble();
+    depth.volume = payload["volume"].toDouble();
+    depth.oi = payload["oi"].toDouble();
+
+    // Parse depth levels — Groww returns { depth: { buy: [...], sell: [...] } }
+    QJsonObject depth_obj = payload["depth"].toObject();
+    QJsonArray buy_levels = depth_obj["buy"].toArray();
+    QJsonArray sell_levels = depth_obj["sell"].toArray();
+
+    for (const auto& v : buy_levels) {
+        QJsonObject lvl = v.toObject();
+        DepthLevel dl;
+        dl.price = lvl["price"].toDouble();
+        dl.quantity = lvl["quantity"].toInt();
+        dl.orders = lvl["orders"].toInt();
+        depth.bids.append(dl);
     }
 
-    return {true, result, "", ts};
+    for (const auto& v : sell_levels) {
+        QJsonObject lvl = v.toObject();
+        DepthLevel dl;
+        dl.price = lvl["price"].toDouble();
+        dl.quantity = lvl["quantity"].toInt();
+        dl.orders = lvl["orders"].toInt();
+        depth.asks.append(dl);
+    }
+
+    return {true, depth, "", ts};
 }
 
 // ============================================================================
@@ -875,8 +1201,7 @@ QJsonObject GrowwBroker::order_to_margin_row(const UnifiedOrder& order) {
     return row;
 }
 
-ApiResponse<OrderMargin> GrowwBroker::get_order_margins(const BrokerCredentials& creds,
-                                                        const UnifiedOrder& order) {
+ApiResponse<OrderMargin> GrowwBroker::get_order_margins(const BrokerCredentials& creds, const UnifiedOrder& order) {
     int64_t ts = now_ts();
     auto hdrs = auth_headers(creds);
 
@@ -908,9 +1233,8 @@ ApiResponse<OrderMargin> GrowwBroker::get_order_margins(const BrokerCredentials&
     m.var_margin = payload["span_required"].toDouble(); // closest analogue for F&O; 0 for cash
     m.elm = payload["exposure_required"].toDouble();
     m.additional = payload["option_buy_premium"].toDouble();
-    m.cash = payload.contains("cash_cnc_margin_required")
-                 ? payload["cash_cnc_margin_required"].toDouble()
-                 : payload["cash_mis_margin_required"].toDouble();
+    m.cash = payload.contains("cash_cnc_margin_required") ? payload["cash_cnc_margin_required"].toDouble()
+                                                          : payload["cash_mis_margin_required"].toDouble();
     m.bo_margin = 0.0; // Groww has no bracket orders
     m.pnl = 0.0;
     if (m.total > 0 && order.price > 0 && order.quantity > 0)
@@ -1119,8 +1443,8 @@ ApiResponse<GttOrder> GrowwBroker::gtt_get(const BrokerCredentials& creds, const
     const QStringList types = {"GTT", "OCO"};
     for (const auto& seg : segs) {
         for (const auto& type : types) {
-            QString url = QString("https://api.groww.in/v1/order-advance/status/%1/%2/internal/%3")
-                              .arg(seg, type, gtt_id);
+            QString url =
+                QString("https://api.groww.in/v1/order-advance/status/%1/%2/internal/%3").arg(seg, type, gtt_id);
             auto resp = BrokerHttp::instance().get(url, hdrs);
             if (!resp.success || is_token_expired(resp))
                 continue;
@@ -1164,7 +1488,7 @@ ApiResponse<QVector<GttOrder>> GrowwBroker::gtt_list(const BrokerCredentials& cr
 }
 
 ApiResponse<GttOrder> GrowwBroker::gtt_modify(const BrokerCredentials& creds, const QString& gtt_id,
-                                               const GttOrder& updated) {
+                                              const GttOrder& updated) {
     int64_t ts = now_ts();
     auto hdrs = auth_headers(creds);
     QJsonObject body = gtt_to_advance_body(updated, /*is_create=*/false);

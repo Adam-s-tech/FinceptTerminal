@@ -9,6 +9,7 @@
 #include <QValueAxis>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace fincept::screens::fno {
@@ -25,7 +26,7 @@ QColor with_alpha(const QString& hex, int alpha) {
     return c;
 }
 
-}  // namespace
+} // namespace
 
 MaxPainChart::MaxPainChart(QWidget* parent) : QChartView(parent) {
     setRenderHint(QPainter::Antialiasing, true);
@@ -35,7 +36,7 @@ MaxPainChart::MaxPainChart(QWidget* parent) : QChartView(parent) {
     chart_->setPlotAreaBackgroundBrush(QColor(colors::BG_BASE()));
     chart_->setPlotAreaBackgroundVisible(true);
     chart_->setMargins(QMargins(0, 4, 0, 0));
-    chart_->setTitle(QStringLiteral("Max Pain Profile"));
+    chart_->setTitle(tr("Max Pain Profile"));
     chart_->setTitleBrush(QColor(colors::TEXT_SECONDARY()));
     QFont title_font = chart_->titleFont();
     title_font.setPointSize(9);
@@ -44,8 +45,8 @@ MaxPainChart::MaxPainChart(QWidget* parent) : QChartView(parent) {
     chart_->legend()->setVisible(false);
     setChart(chart_);
 
-    others_set_ = new QBarSet(QStringLiteral("Pain"));
-    min_set_ = new QBarSet(QStringLiteral("Max Pain"));
+    others_set_ = new QBarSet(tr("Pain"));
+    min_set_ = new QBarSet(tr("Max Pain"));
     others_set_->setColor(with_alpha(colors::TEXT_TERTIARY(), 140));
     min_set_->setColor(with_alpha(colors::AMBER(), 220));
     others_set_->setBorderColor(Qt::transparent);
@@ -97,9 +98,14 @@ void MaxPainChart::set_chain(const OptionChain& chain) {
     categories.reserve(hi - lo + 1);
     pain_vals.reserve(hi - lo + 1);
 
-    // Per-strike pain — O(N²) on the windowed slice. Cheap for 20 strikes.
+    // Per-strike pain — total intrinsic value writers would owe if the
+    // underlying expired at S:
+    //   pain(S) = Σ_{K<S} (S−K)·CE_OI(K)  +  Σ_{K>S} (K−S)·PE_OI(K)
+    // summed over the WHOLE chain (not just the drawn window), so the profile
+    // is correct even though only ±strike_window_ bars are rendered.
     double min_pain = std::numeric_limits<double>::infinity();
     int min_idx = 0;
+    int chain_max_pain_idx = -1;
     for (int i = lo; i <= hi; ++i) {
         const double S = chain.rows[i].strike;
         double pain = 0;
@@ -110,12 +116,20 @@ void MaxPainChart::set_chain(const OptionChain& chain) {
                 pain += (r.strike - S) * double(r.pe_quote.oi);
         }
         pain_vals.append(pain);
-        categories.append(QString::number(S, 'f', S < 100 ? 2 : 0));
+        categories.append(fincept::services::options::format_strike(S));
         if (pain < min_pain) {
             min_pain = pain;
             min_idx = i - lo;
         }
+        if (chain.max_pain > 0 && std::abs(S - chain.max_pain) < 1e-6)
+            chain_max_pain_idx = i - lo;
     }
+    // Highlight the chain's own max-pain strike when it falls inside the drawn
+    // window. The local minimum of a clipped window can be a different strike
+    // from the producer's full-chain answer, which is what the header ribbon
+    // shows — two different "max pain" numbers on one screen is worse than one.
+    if (chain_max_pain_idx >= 0)
+        min_idx = chain_max_pain_idx;
 
     // Stack the two sets so each strike has a value in exactly one of them.
     for (int i = 0; i < pain_vals.size(); ++i) {
@@ -134,6 +148,21 @@ void MaxPainChart::set_chain(const OptionChain& chain) {
     for (double v : pain_vals)
         max_pain = std::max(max_pain, v);
     axis_y_->setRange(0, max_pain * 1.05);
+}
+
+void MaxPainChart::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QChartView::changeEvent(event);
+}
+
+void MaxPainChart::retranslateUi() {
+    if (chart_)
+        chart_->setTitle(tr("Max Pain Profile"));
+    if (others_set_)
+        others_set_->setLabel(tr("Pain"));
+    if (min_set_)
+        min_set_->setLabel(tr("Max Pain"));
 }
 
 } // namespace fincept::screens::fno

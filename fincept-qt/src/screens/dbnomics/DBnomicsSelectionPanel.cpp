@@ -76,6 +76,77 @@ DBnomicsSelectionPanel::DBnomicsSelectionPanel(QWidget* parent) : QWidget(parent
     connect(anim_timer_, &QTimer::timeout, this, &DBnomicsSelectionPanel::tick_anim);
 }
 
+// ── Live language switch ─────────────────────────────────────────────────────
+
+void DBnomicsSelectionPanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void DBnomicsSelectionPanel::retranslateUi() {
+    // Section headers
+    if (search_section_lbl_)
+        search_section_lbl_->setText(tr("GLOBAL SEARCH"));
+    if (provider_section_lbl_)
+        provider_section_lbl_->setText(tr("PROVIDERS"));
+    if (dataset_section_lbl_)
+        dataset_section_lbl_->setText(tr("DATASETS"));
+    if (series_section_lbl_)
+        series_section_lbl_->setText(tr("SERIES"));
+    if (comparison_section_lbl_)
+        comparison_section_lbl_->setText(tr("COMPARISON SLOTS"));
+
+    // Inputs
+    if (global_search_input_)
+        global_search_input_->setPlaceholderText(tr("Search providers, datasets..."));
+    if (provider_filter_input_)
+        provider_filter_input_->setPlaceholderText(tr("Filter providers..."));
+    if (series_search_input_)
+        series_search_input_->setPlaceholderText(tr("Search series..."));
+
+    // Action buttons
+    if (add_single_btn_)
+        add_single_btn_->setText(tr("ADD TO SINGLE VIEW"));
+    if (clear_all_btn_)
+        clear_all_btn_->setText(tr("CLEAR ALL"));
+    if (add_slot_btn_)
+        add_slot_btn_->setText(tr("+ ADD SLOT"));
+
+    // Load-more buttons (created via shared helper, cached individually)
+    if (search_load_more_btn_)
+        search_load_more_btn_->setText(tr("LOAD MORE"));
+    if (dataset_load_more_btn_)
+        dataset_load_more_btn_->setText(tr("LOAD MORE"));
+    if (series_load_more_btn_)
+        series_load_more_btn_->setText(tr("LOAD MORE"));
+
+    // Idle spinner text (visible only while loading; refreshed by tick_anim).
+    if (prov_spin_ && !prov_loading_)
+        prov_spin_->setText(tr("%1  LOADING PROVIDERS...").arg(QStringLiteral("⣾")));
+    if (ds_spin_ && !ds_loading_)
+        ds_spin_->setText(tr("%1  LOADING DATASETS...").arg(QStringLiteral("⣾")));
+    if (series_spin_ && !series_loading_)
+        series_spin_->setText(tr("%1  LOADING SERIES...").arg(QStringLiteral("⣾")));
+    if (search_spin_ && !search_loading_)
+        search_spin_->setText(tr("%1  SEARCHING...").arg(QStringLiteral("⣾")));
+
+    // Dynamic comparison-slot rows: SLOT label numbers follow layout order;
+    // the add-series button text is fixed. Both are tagged by object name.
+    if (slots_layout_) {
+        for (int i = 0; i < slots_layout_->count(); ++i) {
+            QLayoutItem* it = slots_layout_->itemAt(i);
+            QWidget* slot_widget = it ? it->widget() : nullptr;
+            if (!slot_widget)
+                continue;
+            if (auto* lbl = slot_widget->findChild<QLabel*>(QStringLiteral("dbnSlotLabel")))
+                lbl->setText(tr("SLOT %1").arg(i + 1));
+            if (auto* btn = slot_widget->findChild<QPushButton*>(QStringLiteral("dbnAddSeriesBtn")))
+                btn->setText(tr("+ ADD CURRENT SERIES"));
+        }
+    }
+}
+
 // ── Helper builders ──────────────────────────────────────────────────────────
 
 QLabel* DBnomicsSelectionPanel::make_section_label(const QString& text) {
@@ -99,7 +170,7 @@ QListWidget* DBnomicsSelectionPanel::make_styled_list(int fixed_height) {
 }
 
 QPushButton* DBnomicsSelectionPanel::make_load_more_button() {
-    auto* btn = new QPushButton("LOAD MORE");
+    auto* btn = new QPushButton(tr("LOAD MORE"));
     btn->setStyleSheet(kLoadMoreStyle());
     btn->setFixedHeight(22);
     btn->hide();
@@ -114,16 +185,19 @@ QWidget* DBnomicsSelectionPanel::build_search_section() {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    layout->addWidget(make_section_label("GLOBAL SEARCH"));
+    search_section_lbl_ = make_section_label(tr("GLOBAL SEARCH"));
+    layout->addWidget(search_section_lbl_);
 
     global_search_input_ = new QLineEdit(w);
     global_search_input_->setStyleSheet(kInputStyle());
     global_search_input_->setFixedHeight(28);
-    global_search_input_->setPlaceholderText("Search providers, datasets...");
+    global_search_input_->setPlaceholderText(tr("Search providers, datasets..."));
+    global_search_input_->setAccessibleName(tr("Global DBnomics search"));
+    global_search_input_->setClearButtonEnabled(true);
     layout->addWidget(global_search_input_);
 
     // Loading spinner (hidden by default, appears between input and results)
-    search_spin_ = make_spin_label("⣾  SEARCHING...", w);
+    search_spin_ = make_spin_label(tr("%1  SEARCHING...").arg(QStringLiteral("⣾")), w);
     layout->addWidget(search_spin_);
 
     // Search results content
@@ -178,9 +252,10 @@ QWidget* DBnomicsSelectionPanel::build_provider_section() {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    layout->addWidget(make_section_label("PROVIDERS"));
+    provider_section_lbl_ = make_section_label(tr("PROVIDERS"));
+    layout->addWidget(provider_section_lbl_);
 
-    prov_spin_ = make_spin_label("⣾  LOADING PROVIDERS...", w);
+    prov_spin_ = make_spin_label(tr("%1  LOADING PROVIDERS...").arg(QStringLiteral("⣾")), w);
     layout->addWidget(prov_spin_);
 
     prov_content_ = new QWidget(w);
@@ -191,11 +266,16 @@ QWidget* DBnomicsSelectionPanel::build_provider_section() {
     provider_filter_input_ = new QLineEdit(prov_content_);
     provider_filter_input_->setStyleSheet(kInputStyle());
     provider_filter_input_->setFixedHeight(26);
-    provider_filter_input_->setPlaceholderText("Filter providers...");
+    provider_filter_input_->setPlaceholderText(tr("Filter providers..."));
+    provider_filter_input_->setAccessibleName(tr("Filter provider list"));
+    provider_filter_input_->setClearButtonEnabled(true);
     pc_layout->addWidget(provider_filter_input_);
 
     provider_list_ = make_styled_list(130);
+    provider_list_->setAccessibleName(tr("DBnomics providers"));
     pc_layout->addWidget(provider_list_);
+
+    QWidget::setTabOrder(provider_filter_input_, provider_list_);
 
     layout->addWidget(prov_content_);
 
@@ -231,9 +311,10 @@ QWidget* DBnomicsSelectionPanel::build_dataset_section() {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    layout->addWidget(make_section_label("DATASETS"));
+    dataset_section_lbl_ = make_section_label(tr("DATASETS"));
+    layout->addWidget(dataset_section_lbl_);
 
-    ds_spin_ = make_spin_label("⣾  LOADING DATASETS...", w);
+    ds_spin_ = make_spin_label(tr("%1  LOADING DATASETS...").arg(QStringLiteral("⣾")), w);
     layout->addWidget(ds_spin_);
 
     ds_content_ = new QWidget(w);
@@ -242,6 +323,7 @@ QWidget* DBnomicsSelectionPanel::build_dataset_section() {
     dc_layout->setSpacing(0);
 
     dataset_list_ = make_styled_list(130);
+    dataset_list_->setAccessibleName(tr("Datasets published by the selected provider"));
     dc_layout->addWidget(dataset_list_);
 
     dataset_load_more_btn_ = make_load_more_button();
@@ -272,9 +354,10 @@ QWidget* DBnomicsSelectionPanel::build_series_section() {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    layout->addWidget(make_section_label("SERIES"));
+    series_section_lbl_ = make_section_label(tr("SERIES"));
+    layout->addWidget(series_section_lbl_);
 
-    series_spin_ = make_spin_label("⣾  LOADING SERIES...", w);
+    series_spin_ = make_spin_label(tr("%1  LOADING SERIES...").arg(QStringLiteral("⣾")), w);
     layout->addWidget(series_spin_);
 
     series_content_ = new QWidget(w);
@@ -285,11 +368,16 @@ QWidget* DBnomicsSelectionPanel::build_series_section() {
     series_search_input_ = new QLineEdit(series_content_);
     series_search_input_->setStyleSheet(kInputStyle());
     series_search_input_->setFixedHeight(26);
-    series_search_input_->setPlaceholderText("Search series...");
+    series_search_input_->setPlaceholderText(tr("Search series..."));
+    series_search_input_->setAccessibleName(tr("Search series within the selected dataset"));
+    series_search_input_->setClearButtonEnabled(true);
     sc_layout->addWidget(series_search_input_);
 
     series_list_ = make_styled_list(130);
+    series_list_->setAccessibleName(tr("Series in the selected dataset"));
     sc_layout->addWidget(series_list_);
+
+    QWidget::setTabOrder(series_search_input_, series_list_);
 
     series_load_more_btn_ = make_load_more_button();
     sc_layout->addWidget(series_load_more_btn_);
@@ -323,30 +411,30 @@ QWidget* DBnomicsSelectionPanel::build_action_buttons() {
     layout->setSpacing(4);
 
     // "ADD TO SINGLE VIEW" button — amber style
-    auto* add_btn = new QPushButton("ADD TO SINGLE VIEW");
-    add_btn->setFixedHeight(26);
-    add_btn->setStyleSheet(
+    add_single_btn_ = new QPushButton(tr("ADD TO SINGLE VIEW"));
+    add_single_btn_->setFixedHeight(26);
+    add_single_btn_->setStyleSheet(
         QString("QPushButton { background: rgba(217,119,6,0.1); color: %1; "
                 "border: 1px solid %2; padding: 3px 8px; "
                 "font-family: 'Consolas','Courier New',monospace; font-size: 10px; font-weight: 700; }"
                 "QPushButton:hover { background: rgba(217,119,6,0.2); }")
             .arg(col::AMBER())
             .arg(col::AMBER_DIM()));
-    connect(add_btn, &QPushButton::clicked, this, [this]() { emit add_to_single_view_clicked(); });
-    layout->addWidget(add_btn);
+    connect(add_single_btn_, &QPushButton::clicked, this, [this]() { emit add_to_single_view_clicked(); });
+    layout->addWidget(add_single_btn_);
 
     // "CLEAR ALL" button — red style
-    auto* clear_btn = new QPushButton("CLEAR ALL");
-    clear_btn->setFixedHeight(26);
-    clear_btn->setStyleSheet(
+    clear_all_btn_ = new QPushButton(tr("CLEAR ALL"));
+    clear_all_btn_->setFixedHeight(26);
+    clear_all_btn_->setStyleSheet(
         QString("QPushButton { background: rgba(220,38,38,0.1); color: %1; "
                 "border: 1px solid %2; padding: 3px 8px; "
                 "font-family: 'Consolas','Courier New',monospace; font-size: 10px; font-weight: 700; }"
                 "QPushButton:hover { background: rgba(220,38,38,0.2); }")
             .arg(col::NEGATIVE())
             .arg("#7f1d1d"));
-    connect(clear_btn, &QPushButton::clicked, this, [this]() { emit clear_all_clicked(); });
-    layout->addWidget(clear_btn);
+    connect(clear_all_btn_, &QPushButton::clicked, this, [this]() { emit clear_all_clicked(); });
+    layout->addWidget(clear_all_btn_);
 
     return w;
 }
@@ -357,19 +445,20 @@ QWidget* DBnomicsSelectionPanel::build_comparison_slots_section() {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    layout->addWidget(make_section_label("COMPARISON SLOTS"));
+    comparison_section_lbl_ = make_section_label(tr("COMPARISON SLOTS"));
+    layout->addWidget(comparison_section_lbl_);
 
     // "+ ADD SLOT" button — green style
-    auto* add_slot_btn = new QPushButton("+ ADD SLOT");
-    add_slot_btn->setFixedHeight(24);
-    add_slot_btn->setStyleSheet(
+    add_slot_btn_ = new QPushButton(tr("+ ADD SLOT"));
+    add_slot_btn_->setFixedHeight(24);
+    add_slot_btn_->setStyleSheet(
         QString("QPushButton { background: rgba(22,163,74,0.1); color: %1; "
                 "border: 1px solid rgba(22,163,74,0.4); padding: 3px 8px; "
                 "font-family: 'Consolas','Courier New',monospace; font-size: 10px; font-weight: 700; }"
                 "QPushButton:hover { background: rgba(22,163,74,0.2); }")
             .arg(col::POSITIVE()));
-    connect(add_slot_btn, &QPushButton::clicked, this, [this]() { emit add_slot_clicked(); });
-    layout->addWidget(add_slot_btn);
+    connect(add_slot_btn_, &QPushButton::clicked, this, [this]() { emit add_slot_clicked(); });
+    layout->addWidget(add_slot_btn_);
 
     // Container for slots
     auto* slots_container = new QWidget();
@@ -419,7 +508,7 @@ void DBnomicsSelectionPanel::build_ui() {
     root_layout->addWidget(scroll);
 
     // Status label — fixed outside scroll at bottom
-    status_label_ = new QLabel("Ready");
+    status_label_ = new QLabel(tr("Ready"));
     status_label_->setStyleSheet(QString("color: %1; font-size: 10px; "
                                          "font-family: 'Consolas','Courier New',monospace; "
                                          "padding: 3px 8px; background: %2; "
@@ -449,10 +538,11 @@ void DBnomicsSelectionPanel::add_comparison_slot() {
     header_layout->setContentsMargins(0, 0, 0, 0);
     header_layout->setSpacing(4);
 
-    auto* slot_label = new QLabel(QString("SLOT %1").arg(slot_idx + 1));
+    auto* slot_label = new QLabel(tr("SLOT %1").arg(slot_idx + 1));
     slot_label->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: 700; "
                                       "font-family: 'Consolas','Courier New',monospace;")
                                   .arg(col::AMBER()));
+    slot_label->setObjectName("dbnSlotLabel");
     header_layout->addWidget(slot_label);
     header_layout->addStretch();
 
@@ -462,13 +552,21 @@ void DBnomicsSelectionPanel::add_comparison_slot() {
                                       "border: 1px solid rgba(220,38,38,0.3); font-size: 11px; font-weight: 700; }"
                                       "QPushButton:hover { background: rgba(220,38,38,0.25); }")
                                   .arg(col::NEGATIVE()));
-    connect(remove_btn, &QPushButton::clicked, this, [this, slot_idx]() { emit remove_slot_clicked(slot_idx); });
+    // Resolve the slot's index from its live layout position at click time — a
+    // baked-in slot_idx goes stale once an earlier slot is removed and the
+    // remaining widgets shift up.
+    connect(remove_btn, &QPushButton::clicked, this, [this, slot_widget]() {
+        const int idx = slots_layout_->indexOf(slot_widget);
+        if (idx >= 0)
+            emit remove_slot_clicked(idx);
+    });
     header_layout->addWidget(remove_btn);
     slot_layout->addWidget(header_row);
 
     // "+ ADD CURRENT SERIES" button
-    auto* add_series_btn = new QPushButton("+ ADD CURRENT SERIES");
+    auto* add_series_btn = new QPushButton(tr("+ ADD CURRENT SERIES"));
     add_series_btn->setFixedHeight(20);
+    add_series_btn->setObjectName("dbnAddSeriesBtn");
     add_series_btn->setStyleSheet(QString("QPushButton { background: transparent; color: %1; "
                                           "border: 1px solid %2; "
                                           "font-family: 'Consolas','Courier New',monospace; font-size: 9px; }"
@@ -476,7 +574,11 @@ void DBnomicsSelectionPanel::add_comparison_slot() {
                                       .arg(col::TEXT_TERTIARY())
                                       .arg(col::BORDER_DIM())
                                       .arg(col::AMBER()));
-    connect(add_series_btn, &QPushButton::clicked, this, [this, slot_idx]() { emit add_to_slot_clicked(slot_idx); });
+    connect(add_series_btn, &QPushButton::clicked, this, [this, slot_widget]() {
+        const int idx = slots_layout_->indexOf(slot_widget);
+        if (idx >= 0)
+            emit add_to_slot_clicked(idx);
+    });
     slot_layout->addWidget(add_series_btn);
 
     slots_layout_->addWidget(slot_widget);
@@ -498,6 +600,23 @@ void DBnomicsSelectionPanel::remove_comparison_slot(int index) {
     }
     if (slot_count_ > 0)
         --slot_count_;
+
+    // Remaining slot widgets shifted up — renumber their SLOT labels so the
+    // visible numbering stays 1..N and matches their new layout positions.
+    renumber_slots();
+}
+
+void DBnomicsSelectionPanel::renumber_slots() {
+    if (!slots_layout_)
+        return;
+    for (int i = 0; i < slots_layout_->count(); ++i) {
+        QLayoutItem* it = slots_layout_->itemAt(i);
+        QWidget* slot_widget = it ? it->widget() : nullptr;
+        if (!slot_widget)
+            continue;
+        if (auto* lbl = slot_widget->findChild<QLabel*>(QStringLiteral("dbnSlotLabel")))
+            lbl->setText(tr("SLOT %1").arg(i + 1));
+    }
 }
 
 void DBnomicsSelectionPanel::clear_slots() {
@@ -527,7 +646,15 @@ void DBnomicsSelectionPanel::populate_providers(const QVector<services::DbnProvi
         provider_list_->addItem(item);
     }
 
-    set_status(QString("%1 providers").arg(providers.size()));
+    // Highlight the remembered provider (state restore) — setCurrentItem emits no itemClicked.
+    for (int i = 0; i < provider_list_->count() && !selected_provider_.isEmpty(); ++i) {
+        if (provider_list_->item(i)->data(Qt::UserRole).toString() == selected_provider_) {
+            provider_list_->setCurrentRow(i);
+            break;
+        }
+    }
+
+    set_status(tr("%1 providers").arg(providers.size()));
 }
 
 void DBnomicsSelectionPanel::populate_datasets(const QVector<services::DbnDataset>& datasets,
@@ -542,6 +669,13 @@ void DBnomicsSelectionPanel::populate_datasets(const QVector<services::DbnDatase
         item->setData(Qt::UserRole, ds.code);
         item->setToolTip(ds.code);
         dataset_list_->addItem(item);
+    }
+
+    for (int i = 0; i < dataset_list_->count() && !selected_dataset_.isEmpty(); ++i) {
+        if (dataset_list_->item(i)->data(Qt::UserRole).toString() == selected_dataset_) {
+            dataset_list_->setCurrentRow(i);
+            break;
+        }
     }
 
     datasets_next_offset_ = page.offset + page.limit;
@@ -564,6 +698,13 @@ void DBnomicsSelectionPanel::populate_series(const QVector<services::DbnSeriesIn
         item->setData(Qt::UserRole, s.code);
         item->setToolTip(s.code + " \u2014 " + s.name);
         series_list_->addItem(item);
+    }
+
+    for (int i = 0; i < series_list_->count() && !selected_series_.isEmpty(); ++i) {
+        if (series_list_->item(i)->data(Qt::UserRole).toString() == selected_series_) {
+            series_list_->setCurrentRow(i);
+            break;
+        }
     }
 
     series_next_offset_ = page.offset + page.limit;
@@ -603,7 +744,7 @@ void DBnomicsSelectionPanel::populate_search_results(const QVector<services::Dbn
 
 void DBnomicsSelectionPanel::set_loading(bool loading) {
     if (loading) {
-        status_label_->setText("LOADING...");
+        status_label_->setText(tr("LOADING..."));
     }
 }
 
@@ -618,13 +759,13 @@ void DBnomicsSelectionPanel::tick_anim() {
     const QString f = frames[anim_frame_ % 8];
     ++anim_frame_;
     if (prov_loading_ && prov_spin_)
-        prov_spin_->setText(f + "  LOADING PROVIDERS...");
+        prov_spin_->setText(tr("%1  LOADING PROVIDERS...").arg(f));
     if (ds_loading_ && ds_spin_)
-        ds_spin_->setText(f + "  LOADING DATASETS...");
+        ds_spin_->setText(tr("%1  LOADING DATASETS...").arg(f));
     if (series_loading_ && series_spin_)
-        series_spin_->setText(f + "  LOADING SERIES...");
+        series_spin_->setText(tr("%1  LOADING SERIES...").arg(f));
     if (search_loading_ && search_spin_)
-        search_spin_->setText(f + "  SEARCHING...");
+        search_spin_->setText(tr("%1  SEARCHING...").arg(f));
 }
 
 static void apply_loading(bool on, bool& flag, QLabel* spin, QWidget* content, QTimer* timer, int& frame) {
@@ -692,9 +833,16 @@ void DBnomicsSelectionPanel::update_slot_series(int slot_index, const QVector<se
         }
     }
 
-    // Dot colors for series rows
-    static const QStringList dot_colors = {"#ea580c", "#d97706", "#16a34a", "#2563eb",
-                                           "#0891b2", "#9333ea", "#dc2626", "#ca8a04"};
+    // Row chrome is identical for every series \u2014 build the two stylesheet
+    // strings once instead of re-formatting them per row.
+    const QString name_style = QString("color: %1; font-size: 10px; "
+                                       "font-family: 'Consolas','Courier New',monospace;")
+                                   .arg(col::TEXT_SECONDARY());
+    const QString remove_style =
+        QString("QPushButton { background: transparent; color: %1; border: none; font-size: 10px; }"
+                "QPushButton:hover { color: %2; }")
+            .arg(col::TEXT_TERTIARY())
+            .arg(col::NEGATIVE());
 
     for (int i = 0; i < series.size(); ++i) {
         const auto& dp = series[i];
@@ -704,10 +852,12 @@ void DBnomicsSelectionPanel::update_slot_series(int slot_index, const QVector<se
         row_layout->setContentsMargins(0, 0, 0, 0);
         row_layout->setSpacing(4);
 
-        // Colored dot
-        const QString dot_color = dot_colors[i % dot_colors.size()];
+        // Legend dot \u2014 use the series' OWN assigned colour. It used to be
+        // pulled from a second, different hard-coded palette, so from the 2nd
+        // series onward the sidebar legend named the wrong colour for the
+        // wrong line in the chart.
         auto* dot = new QLabel("\u25CF");
-        dot->setStyleSheet(QString("color: %1; font-size: 8px;").arg(dot_color));
+        dot->setStyleSheet(QString("color: %1; font-size: 8px; background: transparent;").arg(dp.color.name()));
         dot->setFixedWidth(12);
         row_layout->addWidget(dot);
 
@@ -717,9 +867,7 @@ void DBnomicsSelectionPanel::update_slot_series(int slot_index, const QVector<se
             name = name.left(19) + "...";
         }
         auto* name_label = new QLabel(name);
-        name_label->setStyleSheet(QString("color: %1; font-size: 10px; "
-                                          "font-family: 'Consolas','Courier New',monospace;")
-                                      .arg(col::TEXT_SECONDARY()));
+        name_label->setStyleSheet(name_style);
         name_label->setToolTip(dp.series_name);
         row_layout->addWidget(name_label, 1);
 
@@ -727,17 +875,49 @@ void DBnomicsSelectionPanel::update_slot_series(int slot_index, const QVector<se
         const QString series_id = dp.series_id;
         auto* remove_btn = new QPushButton("\u00D7");
         remove_btn->setFixedSize(14, 14);
-        remove_btn->setStyleSheet(
-            QString("QPushButton { background: transparent; color: %1; border: none; font-size: 10px; }"
-                    "QPushButton:hover { color: %2; }")
-                .arg(col::TEXT_TERTIARY())
-                .arg(col::NEGATIVE()));
-        connect(remove_btn, &QPushButton::clicked, this,
-                [this, slot_index, series_id]() { emit remove_from_slot_clicked(slot_index, series_id); });
+        remove_btn->setAccessibleName(tr("Remove %1 from this slot").arg(dp.series_name));
+        remove_btn->setToolTip(tr("Remove %1").arg(dp.series_name));
+        remove_btn->setStyleSheet(remove_style);
+        connect(remove_btn, &QPushButton::clicked, this, [this, slot_widget, series_id]() {
+            const int idx = slots_layout_->indexOf(slot_widget);
+            if (idx >= 0)
+                emit remove_from_slot_clicked(idx, series_id);
+        });
         row_layout->addWidget(remove_btn);
 
         slot_layout->addWidget(row);
     }
+}
+
+void DBnomicsSelectionPanel::restore_selection(const QString& provider, const QString& dataset,
+                                               const QString& series) {
+    selected_provider_ = provider;
+    selected_dataset_ = dataset;
+    selected_series_ = series;
+}
+
+// ── Search text accessors (for state persistence) ────────────────────────────
+
+QString DBnomicsSelectionPanel::global_search_text() const {
+    return global_search_input_ ? global_search_input_->text() : QString();
+}
+QString DBnomicsSelectionPanel::provider_filter_text() const {
+    return provider_filter_input_ ? provider_filter_input_->text() : QString();
+}
+QString DBnomicsSelectionPanel::series_search_text() const {
+    return series_search_input_ ? series_search_input_->text() : QString();
+}
+void DBnomicsSelectionPanel::set_global_search_text(const QString& t) {
+    if (global_search_input_)
+        global_search_input_->setText(t);
+}
+void DBnomicsSelectionPanel::set_provider_filter_text(const QString& t) {
+    if (provider_filter_input_)
+        provider_filter_input_->setText(t);
+}
+void DBnomicsSelectionPanel::set_series_search_text(const QString& t) {
+    if (series_search_input_)
+        series_search_input_->setText(t);
 }
 
 } // namespace fincept::screens

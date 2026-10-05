@@ -1,12 +1,16 @@
 // src/screens/portfolio/PortfolioBlotter.h
 #pragma once
 #include "screens/portfolio/PortfolioTypes.h"
+#include "trading/TradingTypes.h"
 
 #include <QComboBox>
 #include <QHash>
+#include <QHideEvent>
 #include <QLabel>
 #include <QPointer>
 #include <QPushButton>
+#include <QShowEvent>
+#include <QStringList>
 #include <QTableWidget>
 #include <QWidget>
 
@@ -26,12 +30,21 @@ class PortfolioBlotter : public QWidget {
     /// Show only rows whose symbol is in @p symbols. Empty list = show all.
     void set_sector_filter(const QStringList& symbols);
     void refresh_theme();
+    /// Tell the blotter which broker account (if any) backs the portfolio so it
+    /// can overlay live broker ticks. Safe to call repeatedly and with an empty
+    /// id (= unlinked portfolio); the id is remembered across re-subscriptions.
+    void hub_resubscribe_broker_quotes(const QString& broker_account_id);
 
   protected:
     void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
   signals:
     void symbol_selected(QString symbol);
+    /// "Open <symbol> in <screen_id>" (double-click / context menu). The owner
+    /// publishes it on the EventBus (nav.open_symbol).
+    void open_symbol_requested(QString screen_id, QString symbol);
     void sort_changed(portfolio::SortColumn col, portfolio::SortDirection dir);
     void edit_transaction_requested(QString symbol);
     void delete_position_requested(QString symbol);
@@ -49,8 +62,15 @@ class PortfolioBlotter : public QWidget {
 
     // ── Pagination ──────────────────────────────────────────────────────────
     /// Filtered + sorted view (after filter/sector trim) used as the source
-    /// of truth for pagination math. Recomputed every populate_table().
-    QVector<portfolio::HoldingWithQuote> visible_view() const;
+    /// of truth for pagination math.
+    ///
+    /// Memoised: a single populate_table() used to call this five times (clamp
+    /// → total_pages → paged_view → update_pagination_controls → total_pages),
+    /// each one re-filtering and deep-copying the whole holdings vector, and
+    /// every live broker tick called it again per row.
+    const QVector<portfolio::HoldingWithQuote>& visible_view() const;
+    /// Drop the memoised view. Call whenever holdings/filter/sort change.
+    void invalidate_view_cache();
     /// Rows for the current page only — what actually goes into table_.
     QVector<portfolio::HoldingWithQuote> paged_view() const;
     /// Update footer labels + button enabled-states from current state.
@@ -64,10 +84,10 @@ class PortfolioBlotter : public QWidget {
 
     // Pagination footer widgets
     QWidget* footer_ = nullptr;
-    QLabel* footer_status_ = nullptr;        // "Showing 1-10 of 47"
+    QLabel* footer_status_ = nullptr; // "Showing 1-10 of 47"
     QPushButton* btn_first_ = nullptr;
     QPushButton* btn_prev_ = nullptr;
-    QLabel* footer_page_label_ = nullptr;    // "Page 1 of 5"
+    QLabel* footer_page_label_ = nullptr; // "Page 1 of 5"
     QPushButton* btn_next_ = nullptr;
     QPushButton* btn_last_ = nullptr;
     QComboBox* page_size_combo_ = nullptr;
@@ -75,13 +95,19 @@ class PortfolioBlotter : public QWidget {
 
     void fetch_sparklines();
 
-    void hub_resubscribe_sparklines();
+    void hub_resubscribe_sparklines(bool force_refresh);
+    void subscribe_broker_quotes();
     void hub_unsubscribe_all();
     void repaint_sparkline_cells();
+    void update_row_price(const QString& symbol, double ltp, double change_pct);
     bool hub_active_ = false;
+    QStringList sub_symbols_;   // sorted symbol set the hub subscriptions were built for
+    QString broker_account_id_; // backing broker account of the current portfolio ("" = none)
 
     QVector<portfolio::HoldingWithQuote> holdings_;
     QVector<portfolio::HoldingWithQuote> sorted_;
+    mutable QVector<portfolio::HoldingWithQuote> view_cache_;
+    mutable bool view_cache_valid_ = false;
     QString selected_symbol_;
     QString filter_text_;
     QStringList sector_symbols_; // empty = no sector filter

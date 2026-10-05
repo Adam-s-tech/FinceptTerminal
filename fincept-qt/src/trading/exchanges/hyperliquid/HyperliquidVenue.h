@@ -4,9 +4,11 @@
 // Phase-5c partial:
 //   * Public surface — mark prices, funding rates, position reconcile from
 //     `info` REST + WS subscriptions — fully wired.
-//   * Trading surface — gated by HyperliquidSigner::is_wired(). Until the
-//     signer lands, place_order() returns an OrderAck with status="rejected"
-//     and error="hl_signer_not_wired".
+//   * Trading surface — the signer is wired (HyperliquidSigner::is_wired()
+//     returns true), but live order submission is not yet connected:
+//     place_order() builds the signed action then returns OrderAck
+//     status="rejected", error="hl_live_path_not_yet_wired". Remaining work is
+//     asset-id resolution from `meta` and the exchange POST/ack (see .cpp).
 //
 // Reference: .grill-me/alpha-arena-production-refactor.md §Phase 5c.
 
@@ -22,8 +24,7 @@
 
 namespace fincept::trading::hyperliquid {
 
-class HyperliquidVenue : public QObject,
-                         public fincept::services::alpha_arena::IExchangeVenue {
+class HyperliquidVenue : public QObject, public fincept::services::alpha_arena::IExchangeVenue {
     Q_OBJECT
   public:
     explicit HyperliquidVenue(QObject* parent = nullptr);
@@ -38,8 +39,8 @@ class HyperliquidVenue : public QObject,
     /// HyperliquidSigner).
     void set_user_address(const QString& addr);
 
-    /// Bind to the active competition so reconcile_tick can compare local
-    /// positions persisted under that competition against the venue.
+    /// Bind to the active competition — HyperliquidSigner reads the agent
+    /// wallet key from SecureStorage under "alpha_arena/agent_key/<comp_id>".
     void set_competition_id(const QString& comp_id);
 
     /// Open WS, subscribe to public mark/trades feeds, start reconcile loop.
@@ -61,12 +62,12 @@ class HyperliquidVenue : public QObject,
     void on_liquidation(std::function<void(fincept::services::alpha_arena::LiquidationEvent)> cb) override {
         liq_cb_ = std::move(cb);
     }
-    void on_mark_update(std::function<void(QString, double, qint64)> cb) override {
-        mark_update_cb_ = std::move(cb);
-    }
+    void on_mark_update(std::function<void(QString, double, qint64)> cb) override { mark_update_cb_ = std::move(cb); }
 
   signals:
-    /// Local-vs-remote drift detected by the 30-s reconcile loop.
+    /// Local-vs-remote drift detected by the 30-s reconcile loop. Currently
+    /// never emitted: the legacy local ledger (AlphaArenaRepo) is gone; this
+    /// will be re-wired against fincept::arena::ArenaStore with live trading.
     void position_drift(QString coin, double local_qty, double remote_qty);
 
   private slots:

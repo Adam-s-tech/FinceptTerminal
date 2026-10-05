@@ -15,6 +15,7 @@
 #include "core/session/ScreenStateManager.h"
 #include "datahub/DataHub.h"
 #include "datahub/DataHubMetaTypes.h"
+#include "services/cloud/CloudSyncEngine.h"
 #include "services/file_manager/FileManagerService.h"
 #include "services/markets/MarketDataService.h"
 #include "services/report_builder/ReportBuilderService.h"
@@ -28,6 +29,7 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -40,10 +42,11 @@
 #include <QPrintPreviewDialog>
 #include <QPrinter>
 #include <QPushButton>
+#include <QScopedValueRollback>
+#include <QShortcut>
 #include <QTextDocument>
 #include <QTextFrame>
 #include <QVBoxLayout>
-
 
 namespace fincept::screens {
 
@@ -94,8 +97,7 @@ ReportBuilderScreen::ReportBuilderScreen(QWidget* parent) : QWidget(parent) {
     // ── Component toolbar wiring ─────────────────────────────────────────
     connect(comp_toolbar_, &ComponentToolbar::new_report_requested, this, &ReportBuilderScreen::on_new);
     connect(comp_toolbar_, &ComponentToolbar::open_report_requested, this, &ReportBuilderScreen::on_open);
-    connect(comp_toolbar_, &ComponentToolbar::recent_reports_requested, this,
-            &ReportBuilderScreen::show_recent_dialog);
+    connect(comp_toolbar_, &ComponentToolbar::recent_reports_requested, this, &ReportBuilderScreen::show_recent_dialog);
     connect(comp_toolbar_, &ComponentToolbar::templates_requested, this, &ReportBuilderScreen::show_template_dialog);
     connect(comp_toolbar_, &ComponentToolbar::theme_requested, this, &ReportBuilderScreen::show_theme_dialog);
     connect(comp_toolbar_, &ComponentToolbar::metadata_requested, this, &ReportBuilderScreen::show_metadata_dialog);
@@ -119,10 +121,12 @@ ReportBuilderScreen::ReportBuilderScreen(QWidget* parent) : QWidget(parent) {
     connect(comp_toolbar_, &ComponentToolbar::move_down, this, &ReportBuilderScreen::move_down_at);
 
     // ── Properties panel wiring ───────────────────────────────────────────
-    connect(properties_, &PropertiesPanel::content_changed, this, [](int idx, const QString& content) {
+    connect(properties_, &PropertiesPanel::content_changed, this, [this](int idx, const QString& content) {
         const auto comps = Service::instance().components();
         if (idx < 0 || idx >= comps.size())
             return;
+        // The edit came FROM the panel — keep its widgets (see props_editing_).
+        QScopedValueRollback<bool> editing(props_editing_, true);
         Service::instance().update_component(comps[idx].id, content, comps[idx].config);
     });
 
@@ -166,27 +170,39 @@ ReportBuilderScreen::ReportBuilderScreen(QWidget* parent) : QWidget(parent) {
                                         return v != 0 ? QString::number(v * 100, 'f', 2) + "%" : "—";
                                     };
                                     auto fmt_mcap = [](double v) -> QString {
-                                        if (v <= 0) return QString("—");
-                                        if (v >= 1e12) return QString::number(v / 1e12, 'f', 2) + "T";
-                                        if (v >= 1e9) return QString::number(v / 1e9, 'f', 2) + "B";
-                                        if (v >= 1e6) return QString::number(v / 1e6, 'f', 2) + "M";
+                                        if (v <= 0)
+                                            return QString("—");
+                                        if (v >= 1e12)
+                                            return QString::number(v / 1e12, 'f', 2) + "T";
+                                        if (v >= 1e9)
+                                            return QString::number(v / 1e9, 'f', 2) + "B";
+                                        if (v >= 1e6)
+                                            return QString::number(v / 1e6, 'f', 2) + "M";
                                         return QString::number(v, 'f', 0);
                                     };
                                     auto fmt_vol = [](double v) -> QString {
-                                        if (v <= 0) return QString("—");
-                                        if (v >= 1e9) return QString::number(v / 1e9, 'f', 2) + "B";
-                                        if (v >= 1e6) return QString::number(v / 1e6, 'f', 2) + "M";
-                                        if (v >= 1e3) return QString::number(v / 1e3, 'f', 1) + "K";
+                                        if (v <= 0)
+                                            return QString("—");
+                                        if (v >= 1e9)
+                                            return QString::number(v / 1e9, 'f', 2) + "B";
+                                        if (v >= 1e6)
+                                            return QString::number(v / 1e6, 'f', 2) + "M";
+                                        if (v >= 1e3)
+                                            return QString::number(v / 1e3, 'f', 1) + "K";
                                         return QString::number(v, 'f', 0);
                                     };
 
                                     if (!ok) {
                                         lines << "Error: Could not fetch data for " + sym;
                                     } else {
-                                        if (!info.name.isEmpty()) lines << "Company: " + info.name;
-                                        if (!info.sector.isEmpty()) lines << "Sector: " + info.sector;
-                                        if (!info.industry.isEmpty()) lines << "Industry: " + info.industry;
-                                        if (!info.country.isEmpty()) lines << "Country: " + info.country;
+                                        if (!info.name.isEmpty())
+                                            lines << "Company: " + info.name;
+                                        if (!info.sector.isEmpty())
+                                            lines << "Sector: " + info.sector;
+                                        if (!info.industry.isEmpty())
+                                            lines << "Industry: " + info.industry;
+                                        if (!info.country.isEmpty())
+                                            lines << "Country: " + info.country;
                                         lines << "Market Cap: " + fmt_mcap(info.market_cap);
                                         lines << "P/E Ratio: " + fmt_dbl(info.pe_ratio);
                                         lines << "Forward P/E: " + fmt_dbl(info.forward_pe);
@@ -202,7 +218,8 @@ ReportBuilderScreen::ReportBuilderScreen(QWidget* parent) : QWidget(parent) {
                                             lines << "Debt/Equity: " + fmt_dbl(info.debt_to_equity);
                                         if (info.current_ratio != 0)
                                             lines << "Current Ratio: " + fmt_dbl(info.current_ratio);
-                                        if (info.eps != 0) lines << "Rev/Share: " + fmt_dbl(info.eps);
+                                        if (info.eps != 0)
+                                            lines << "Rev/Share: " + fmt_dbl(info.eps);
                                     }
                                     auto cfg = comps2[idx2].config;
                                     cfg["data"] = lines.join("\n");
@@ -267,8 +284,7 @@ ReportBuilderScreen::ReportBuilderScreen(QWidget* parent) : QWidget(parent) {
                     }
 
                     hub.subscribe<QVector<fincept::services::HistoryPoint>>(
-                        this, topic,
-                        [self, topic, apply](const QVector<fincept::services::HistoryPoint>& history) {
+                        this, topic, [self, topic, apply](const QVector<fincept::services::HistoryPoint>& history) {
                             if (!self)
                                 return;
                             apply(history);
@@ -317,8 +333,7 @@ ReportBuilderScreen::ReportBuilderScreen(QWidget* parent) : QWidget(parent) {
                         return;
                     }
                     hub.subscribe<fincept::services::QuoteData>(
-                        this, topic,
-                        [self, topic, apply](const fincept::services::QuoteData& q) {
+                        this, topic, [self, topic, apply](const fincept::services::QuoteData& q) {
                             if (!self)
                                 return;
                             apply(q);
@@ -328,9 +343,11 @@ ReportBuilderScreen::ReportBuilderScreen(QWidget* parent) : QWidget(parent) {
                     return;
                 }
 
-                // Generic single-key config patch.
+                // Generic single-key config patch. The panel's own editor already shows
+                // this value, so don't rebuild the panel around it (see props_editing_).
                 QMap<QString, QString> patch;
                 patch[key] = val;
+                QScopedValueRollback<bool> editing(props_editing_, true);
                 svc.patch_component(comp_id, nullptr, patch);
             });
 
@@ -392,7 +409,7 @@ QWidget* ReportBuilderScreen::build_toolbar() {
     hl->setContentsMargins(8, 0, 8, 0);
     hl->setSpacing(6);
 
-    auto make_panel_toggle = [&](const char* glyph, const char* tooltip, const char* shortcut) {
+    auto make_panel_toggle = [&](const char* glyph, const QString& tooltip, const char* shortcut) {
         auto* b = new QPushButton(glyph);
         b->setFixedSize(26, 26);
         b->setCursor(Qt::PointingHandCursor);
@@ -408,17 +425,17 @@ QWidget* ReportBuilderScreen::build_toolbar() {
         return b;
     };
 
-    left_toggle_btn_ = make_panel_toggle("‹", "Collapse components panel  (Ctrl+B)", "Ctrl+B");
+    left_toggle_btn_ = make_panel_toggle("‹", tr("Collapse components panel  (Ctrl+B)"), "Ctrl+B");
     connect(left_toggle_btn_, &QPushButton::clicked, this, &ReportBuilderScreen::on_toggle_left);
 
-    auto* title = new QLabel("REPORT BUILDER");
-    title->setStyleSheet(
+    toolbar_title_ = new QLabel(tr("REPORT BUILDER"));
+    toolbar_title_->setStyleSheet(
         QString("color: %1; font-size: 14px; font-weight: bold; background: transparent;").arg(ui::colors::AMBER()));
-    hl->addWidget(title);
+    hl->addWidget(toolbar_title_);
 
     hl->addStretch();
 
-    auto make_btn = [&](const char* text) {
+    auto make_btn = [&](const QString& text) {
         auto* b = new QPushButton(text);
         b->setFixedHeight(26);
         hl->addWidget(b);
@@ -427,48 +444,119 @@ QWidget* ReportBuilderScreen::build_toolbar() {
 
     auto* undo_stack = Service::instance().undo_stack();
 
-    auto* undo_btn = make_btn("Undo");
-    undo_btn->setEnabled(undo_stack->canUndo());
-    connect(undo_stack, &QUndoStack::canUndoChanged, undo_btn, &QPushButton::setEnabled);
-    connect(undo_btn, &QPushButton::clicked, undo_stack, &QUndoStack::undo);
+    undo_btn_ = make_btn(tr("Undo"));
+    undo_btn_->setEnabled(undo_stack->canUndo());
+    connect(undo_stack, &QUndoStack::canUndoChanged, undo_btn_, &QPushButton::setEnabled);
+    connect(undo_btn_, &QPushButton::clicked, undo_stack, &QUndoStack::undo);
 
-    auto* redo_btn = make_btn("Redo");
-    redo_btn->setEnabled(undo_stack->canRedo());
-    connect(undo_stack, &QUndoStack::canRedoChanged, redo_btn, &QPushButton::setEnabled);
-    connect(redo_btn, &QPushButton::clicked, undo_stack, &QUndoStack::redo);
+    redo_btn_ = make_btn(tr("Redo"));
+    redo_btn_->setEnabled(undo_stack->canRedo());
+    connect(undo_stack, &QUndoStack::canRedoChanged, redo_btn_, &QPushButton::setEnabled);
+    connect(redo_btn_, &QPushButton::clicked, undo_stack, &QUndoStack::redo);
 
     make_btn("|")->setEnabled(false);
 
-    auto* open_btn = make_btn("Open");
-    connect(open_btn, &QPushButton::clicked, this, &ReportBuilderScreen::on_open);
+    open_btn_ = make_btn(tr("Open"));
+    connect(open_btn_, &QPushButton::clicked, this, &ReportBuilderScreen::on_open);
 
-    auto* save_btn = make_btn("Save");
-    connect(save_btn, &QPushButton::clicked, this, &ReportBuilderScreen::on_save);
+    save_btn_ = make_btn(tr("Save"));
+    connect(save_btn_, &QPushButton::clicked, this, &ReportBuilderScreen::on_save);
 
-    auto* pdf_btn = make_btn("Export PDF");
-    pdf_btn->setStyleSheet(QString("QPushButton { color: %1; font-weight: bold; }").arg(ui::colors::AMBER()));
-    connect(pdf_btn, &QPushButton::clicked, this, &ReportBuilderScreen::on_export_pdf);
+    pdf_btn_ = make_btn(tr("Export PDF"));
+    pdf_btn_->setStyleSheet(QString("QPushButton { color: %1; font-weight: bold; }").arg(ui::colors::AMBER()));
+    connect(pdf_btn_, &QPushButton::clicked, this, &ReportBuilderScreen::on_export_pdf);
 
-    auto* preview_btn = make_btn("Preview");
-    connect(preview_btn, &QPushButton::clicked, this, &ReportBuilderScreen::on_preview);
+    preview_btn_ = make_btn(tr("Preview"));
+    connect(preview_btn_, &QPushButton::clicked, this, &ReportBuilderScreen::on_preview);
 
-    right_toggle_btn_ = make_panel_toggle("›", "Collapse properties panel  (Ctrl+Shift+B)", "Ctrl+Shift+B");
+    right_toggle_btn_ = make_panel_toggle("›", tr("Collapse properties panel  (Ctrl+Shift+B)"), "Ctrl+Shift+B");
     connect(right_toggle_btn_, &QPushButton::clicked, this, &ReportBuilderScreen::on_toggle_right);
+
+    // ── Standard document shortcuts ───────────────────────────────────────────
+    // Undo/Redo were toolbar-only; Save/Open/New/Print had no key bindings at
+    // all, which is surprising for a document editor.
+    auto add_sc = [this](QKeySequence::StandardKey key, auto fn) {
+        auto* sc = new QShortcut(QKeySequence(key), this);
+        sc->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(sc, &QShortcut::activated, this, fn);
+    };
+    add_sc(QKeySequence::Save, [this]() { on_save(); });
+    add_sc(QKeySequence::Open, [this]() { on_open(); });
+    add_sc(QKeySequence::New, [this]() { on_new(); });
+    add_sc(QKeySequence::Print, [this]() { on_preview(); });
+    {
+        auto* undo_sc = new QShortcut(QKeySequence(QKeySequence::Undo), this);
+        undo_sc->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(undo_sc, &QShortcut::activated, undo_stack, &QUndoStack::undo);
+        auto* redo_sc = new QShortcut(QKeySequence(QKeySequence::Redo), this);
+        redo_sc->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(redo_sc, &QShortcut::activated, undo_stack, &QUndoStack::redo);
+    }
+
+    // ── Accessibility ─────────────────────────────────────────────────────────
+    undo_btn_->setAccessibleName(tr("Undo last change"));
+    redo_btn_->setAccessibleName(tr("Redo last change"));
+    open_btn_->setAccessibleName(tr("Open a saved report"));
+    save_btn_->setAccessibleName(tr("Save this report"));
+    pdf_btn_->setAccessibleName(tr("Export this report as PDF"));
+    preview_btn_->setAccessibleName(tr("Print preview"));
+    save_btn_->setToolTip(tr("Save  (Ctrl+S)"));
+    open_btn_->setToolTip(tr("Open  (Ctrl+O)"));
+    preview_btn_->setToolTip(tr("Preview  (Ctrl+P)"));
 
     return bar;
 }
 
 // ── Side-panel collapse ──────────────────────────────────────────────────────
 
-
 void ReportBuilderScreen::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
     // The service runs autosave continuously. We just rebind from current
     // service state in case mutations happened while the screen was hidden.
     rebind_from_service();
+    // Rate-gated pull of cloud reports on screen entry (no-op when sync is off).
+    fincept::services::cloud::CloudSyncEngine::instance().request_pull(QStringLiteral("report"));
 }
 
-void ReportBuilderScreen::hideEvent(QHideEvent* e) { QWidget::hideEvent(e); }
+void ReportBuilderScreen::hideEvent(QHideEvent* e) {
+    QWidget::hideEvent(e);
+}
+
+// ── Live language switch ─────────────────────────────────────────────────────
+
+void ReportBuilderScreen::changeEvent(QEvent* e) {
+    if (e->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(e);
+}
+
+void ReportBuilderScreen::retranslateUi() {
+    if (toolbar_title_)
+        toolbar_title_->setText(tr("REPORT BUILDER"));
+    if (undo_btn_)
+        undo_btn_->setText(tr("Undo"));
+    if (redo_btn_)
+        redo_btn_->setText(tr("Redo"));
+    if (open_btn_)
+        open_btn_->setText(tr("Open"));
+    if (save_btn_)
+        save_btn_->setText(tr("Save"));
+    if (pdf_btn_)
+        pdf_btn_->setText(tr("Export PDF"));
+    if (preview_btn_)
+        preview_btn_->setText(tr("Preview"));
+    // Re-apply the panel-toggle tooltips for the current collapse state.
+    if (left_toggle_btn_)
+        left_toggle_btn_->setToolTip(left_collapsed_ ? tr("Expand components panel  (Ctrl+B)")
+                                                     : tr("Collapse components panel  (Ctrl+B)"));
+    if (right_toggle_btn_)
+        right_toggle_btn_->setToolTip(right_collapsed_ ? tr("Expand properties panel  (Ctrl+Shift+B)")
+                                                       : tr("Collapse properties panel  (Ctrl+Shift+B)"));
+    // The properties panel rebuilds itself from its cached copy of the component, which is
+    // no longer refreshed on every edit (see props_editing_) — re-sync it from the service
+    // so a language switch can't resurrect stale text.
+    rebind_from_service();
+}
 
 // ── IStatefulScreen ──────────────────────────────────────────────────────────
 

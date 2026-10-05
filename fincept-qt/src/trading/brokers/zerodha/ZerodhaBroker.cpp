@@ -2,14 +2,23 @@
 
 #include "core/logging/Logger.h"
 #include "trading/adapter/BrokerEnumMap.h"
+#include "trading/brokers/BrokerClientOrderId.h"
 #include "trading/brokers/BrokerHttp.h"
+#include "trading/brokers/BrokerLogRedact.h"
+#include "trading/brokers/BrokerTokenUtil.h"
 #include "trading/brokers/zerodha/ZerodhaAutoLogin.h"
 #include "trading/instruments/InstrumentService.h"
 
 #include <QCryptographicHash>
+#include <QDate>
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QUrl>
+
+#include <algorithm>
+#include <cmath>
+#include <utility>
 
 namespace fincept::trading {
 
@@ -18,16 +27,46 @@ QString ZerodhaBroker::kite_login_url(const QString& api_key) {
 }
 
 TokenExchangeResponse ZerodhaBroker::login_with_totp(const QString& user_id, const QString& password,
-                                                    const QString& api_key, const QString& api_secret,
-                                                    const QString& totp_secret,
-                                                    std::function<void(const QString&)> progress) {
-    auto result = zerodha::run_auto_login(user_id, password, api_key, api_secret, totp_secret,
-                                          std::move(progress));
+                                                     const QString& api_key, const QString& api_secret,
+                                                     const QString& totp_secret,
+                                                     std::function<void(const QString&)> progress) {
+    auto result = zerodha::run_auto_login(user_id, password, api_key, api_secret, totp_secret, std::move(progress));
+    // Kite access tokens are flushed each morning (~06:00 IST). Record the
+    // expiry hint; the live sweep re-validates and silent-relogins on expiry.
+    if (result.token.success)
+        result.token.additional_data = with_token_expiry(result.token.additional_data, next_ist_flush_epoch(6, 0));
     return result.token;
+}
+
+// Silent refresh = replay the stored TOTP auto-login (Kite has no usable refresh
+// token for retail). Requires user_id + password + totp_secret in storage.
+TokenExchangeResponse ZerodhaBroker::refresh_session(const BrokerCredentials& creds) {
+    const auto extra = QJsonDocument::fromJson(creds.additional_data.toUtf8()).object();
+    const QString password = extra.value("password").toString();
+    const QString totp_secret = extra.value("totp_secret").toString();
+    if (creds.user_id.isEmpty() || password.isEmpty() || totp_secret.isEmpty()) {
+        return {.success = false, .error = "Zerodha silent refresh requires stored user id, password and TOTP secret"};
+    }
+    return login_with_totp(creds.user_id, password, creds.api_key, creds.api_secret, totp_secret, {});
 }
 
 static int64_t now_ts() {
     return QDateTime::currentSecsSinceEpoch();
+}
+
+// Variety (regular|amo|co|iceberg|auction) an order was placed under, read from its
+// own history (GET /orders/{id}: one row per state, each carrying `variety`). Kite
+// addresses modify/cancel as /orders/{variety}/{id}, so an AMO or CO order cannot be
+// touched through the "regular" route. Empty on any failure.
+static QString zerodha_lookup_variety(const QString& base, const QString& order_id,
+                                      const QMap<QString, QString>& headers) {
+    auto resp = BrokerHttp::instance().get(QString("%1/orders/%2").arg(base, order_id), headers);
+    if (!resp.success || resp.json.value("status").toString() != "success")
+        return {};
+    const auto rows = resp.json.value("data").toArray();
+    if (rows.isEmpty())
+        return {};
+    return rows.last().toObject().value("variety").toString();
 }
 
 QMap<QString, QString> ZerodhaBroker::auth_headers(const BrokerCredentials& creds) const {
@@ -76,16 +115,34 @@ const char* ZerodhaBroker::zerodha_variety(ProductType p) {
 // listed them; current API rejects them with 400 invalid_input).
 QString ZerodhaBroker::zerodha_interval(const QString& resolution) {
     static const QMap<QString, QString> map = {
-        {"1", "minute"},    {"1m", "minute"},    {"3", "3minute"},    {"3m", "3minute"},   {"5", "5minute"},
-        {"5m", "5minute"},  {"10", "10minute"},  {"10m", "10minute"}, {"15", "15minute"},  {"15m", "15minute"},
-        {"30", "30minute"}, {"30m", "30minute"}, {"60", "60minute"},  {"60m", "60minute"}, {"1h", "60minute"},
-        {"D", "day"},       {"1D", "day"},       {"day", "day"},      {"W", "week"},       {"1W", "week"},
+        {"1", "minute"},
+        {"1m", "minute"},
+        {"3", "3minute"},
+        {"3m", "3minute"},
+        {"5", "5minute"},
+        {"5m", "5minute"},
+        {"10", "10minute"},
+        {"10m", "10minute"},
+        {"15", "15minute"},
+        {"15m", "15minute"},
+        {"30", "30minute"},
+        {"30m", "30minute"},
+        {"60", "60minute"},
+        {"60m", "60minute"},
+        {"1h", "60minute"},
+        {"D", "day"},
+        {"1D", "day"},
+        {"day", "day"},
+        {"W", "week"},
+        {"1W", "week"},
         {"week", "week"},
         // Aliases that Kite rejects — coerce to the nearest supported interval.
-        {"2h", "60minute"}, {"2H", "60minute"},
-        {"3d", "day"},      {"3D", "day"},
+        {"2h", "60minute"},
+        {"2H", "60minute"},
+        {"3d", "day"},
+        {"3D", "day"},
     };
-    return map.value(resolution, "day");
+    return map.value(resolution, QString());
 }
 
 bool ZerodhaBroker::is_token_expired(const BrokerHttpResponse& resp) {
@@ -112,15 +169,21 @@ TokenExchangeResponse ZerodhaBroker::exchange_token(const QString& api_key, cons
     QByteArray input = (api_key + request_token + api_secret).toUtf8();
     QString checksum = QCryptographicHash::hash(input, QCryptographicHash::Sha256).toHex();
 
-    LOG_INFO("Zerodha", QString("exchange_token: api_key=%1 req_token_len=%2 secret_len=%3")
-                            .arg(api_key).arg(request_token.length()).arg(api_secret.length()));
+    LOG_INFO("Zerodha", QString("exchange_token: api_key_len=%1 req_token_len=%2 secret_len=%3")
+                            .arg(api_key.length())
+                            .arg(request_token.length())
+                            .arg(api_secret.length()));
 
     QMap<QString, QString> params = {{"api_key", api_key}, {"request_token", request_token}, {"checksum", checksum}};
     QMap<QString, QString> headers = {{"X-Kite-Version", kite_api_version}};
     auto resp = BrokerHttp::instance().post_form(QString(base_url()) + "/session/token", params, headers);
 
+    // Redacted: a successful /session/token body carries access_token,
+    // public_token and the account email — never log it verbatim.
     LOG_INFO("Zerodha", QString("exchange_token HTTP %1 success=%2 body=%3")
-                            .arg(resp.status_code).arg(resp.success).arg(resp.raw_body.left(500)));
+                            .arg(resp.status_code)
+                            .arg(resp.success)
+                            .arg(redact_body(resp.raw_body)));
 
     TokenExchangeResponse result;
     if (!resp.success) {
@@ -140,6 +203,7 @@ TokenExchangeResponse ZerodhaBroker::exchange_token(const QString& api_key, cons
         result.access_token = data.value("access_token").toString();
         result.refresh_token = data.value("refresh_token").toString();
         result.user_id = data.value("user_id").toString();
+        result.additional_data = with_token_expiry(result.additional_data, next_ist_flush_epoch(6, 0));
         LOG_INFO("Zerodha", QString("exchange_token ok: user_id=%1").arg(result.user_id));
     } else {
         result.error = resp.json.value("message").toString("Token exchange failed");
@@ -149,6 +213,15 @@ TokenExchangeResponse ZerodhaBroker::exchange_token(const QString& api_key, cons
 }
 
 OrderPlaceResponse ZerodhaBroker::place_order(const BrokerCredentials& creds, const UnifiedOrder& order) {
+    // Kite retired Bracket Orders (SEBI): there is no `bo` variety any more, and
+    // the regular-variety fallback in zerodha_variety() would drop the stop-loss /
+    // target legs the user asked for and leave a naked position. Refuse rather
+    // than silently downgrade.
+    if (order.product_type == ProductType::BracketOrder)
+        return {false, "",
+                "Zerodha no longer supports Bracket Orders (discontinued by SEBI) — place a regular order and "
+                "protect it with a GTT stop-loss/target"};
+
     // Variety is derived from order flags, not ProductType. AMO orders take
     // variety="amo" regardless of MIS/CNC/NRML; CoverOrder takes "co".
     // Iceberg/Auction would need new UnifiedOrder flags — not wired yet.
@@ -164,7 +237,11 @@ OrderPlaceResponse ZerodhaBroker::place_order(const BrokerCredentials& creds, co
         {"product", kite_enum_map().product_or(order.product_type, "MIS")},
         {"validity", order.validity.isEmpty() ? "DAY" : order.validity},
         {"disclosed_quantity", "0"},
-        {"tag", "fincept"},
+        // Stable per order intent (UnifiedOrder::client_order_id) so a retry after
+        // an 8s client-side timeout carries the same reference and is traceable to
+        // the first attempt (see BrokerClientOrderId.h). Kite caps `tag` at 20
+        // alphanumeric chars.
+        {"tag", client_order_ref_for(order, 20)},
     };
     if (order.price > 0)
         params["price"] = QString::number(order.price, 'f', 2);
@@ -188,20 +265,45 @@ ApiResponse<QJsonObject> ZerodhaBroker::modify_order(const BrokerCredentials& cr
                                                      const QJsonObject& mods) {
     QString variety = mods.value("variety").toString("regular");
     QMap<QString, QString> params;
+
+    // The numeric fields arrive as JSON NUMBERS (every caller inserts doubles).
+    // QJsonValue::toString() returns an EMPTY string for a non-string value, so
+    // reading them that way sent Kite `quantity=`, `price=` and `trigger_price=`
+    // on every modify. Go through toVariant(), which yields the value for both a
+    // numeric and a string JSON node, and format exactly as place_order does:
+    // integral quantities, 2-decimal prices.
+    auto as_int_str = [&mods](const char* key) {
+        return QString::number(static_cast<int>(mods.value(QLatin1String(key)).toVariant().toDouble()));
+    };
+    auto as_price_str = [&mods](const char* key) {
+        return QString::number(mods.value(QLatin1String(key)).toVariant().toDouble(), 'f', 2);
+    };
+
     if (mods.contains("order_type"))
-        params["order_type"] = mods.value("order_type").toString();
+        params["order_type"] = mods.value("order_type").toVariant().toString();
     if (mods.contains("quantity"))
-        params["quantity"] = mods.value("quantity").toString();
+        params["quantity"] = as_int_str("quantity");
     if (mods.contains("price"))
-        params["price"] = mods.value("price").toString();
+        params["price"] = as_price_str("price");
     if (mods.contains("trigger_price"))
-        params["trigger_price"] = mods.value("trigger_price").toString();
+        params["trigger_price"] = as_price_str("trigger_price");
     if (mods.contains("disclosed_quantity"))
-        params["disclosed_quantity"] = mods.value("disclosed_quantity").toString();
-    params["validity"] = mods.value("validity").toString("DAY");
+        params["disclosed_quantity"] = as_int_str("disclosed_quantity");
+    params["validity"] = mods.value("validity").toVariant().toString();
+    if (params["validity"].isEmpty())
+        params["validity"] = QStringLiteral("DAY");
 
     auto resp = BrokerHttp::instance().put_form(QString("%1/orders/%2/%3").arg(base_url(), variety, order_id), params,
                                                 auth_headers(creds));
+    // The caller did not name a variety and the "regular" route refused: the order may be an
+    // AMO/CO. Retry once under its real variety (same order id, so it cannot touch another order).
+    if (!mods.contains("variety") && (!resp.success || resp.json.value("status").toString() != "success") &&
+        !is_token_expired(resp)) {
+        const QString real = zerodha_lookup_variety(QString(base_url()), order_id, auth_headers(creds));
+        if (!real.isEmpty() && real != variety)
+            resp = BrokerHttp::instance().put_form(QString("%1/orders/%2/%3").arg(base_url(), real, order_id),
+                                                   params, auth_headers(creds));
+    }
     int64_t ts = now_ts();
     if (!resp.success || resp.json.value("status").toString() != "success")
         return {false, std::nullopt, checked_error(resp, "Modify failed"), ts};
@@ -210,14 +312,27 @@ ApiResponse<QJsonObject> ZerodhaBroker::modify_order(const BrokerCredentials& cr
 
 ApiResponse<QJsonObject> ZerodhaBroker::cancel_order(const BrokerCredentials& creds, const QString& order_id) {
     QString variety = "regular";
+    bool variety_named = false;
     if (!creds.additional_data.isEmpty()) {
         auto ad = QJsonDocument::fromJson(creds.additional_data.toUtf8()).object();
         auto v = ad.value("variety").toString();
-        if (!v.isEmpty())
+        if (!v.isEmpty()) {
             variety = v;
+            variety_named = true;
+        }
     }
     auto resp =
         BrokerHttp::instance().del(QString("%1/orders/%2/%3").arg(base_url(), variety, order_id), auth_headers(creds));
+    // An AMO / CO order can only be cancelled under the variety it was placed with
+    // (DELETE /orders/:variety/:order_id). When no variety was named and the "regular"
+    // route refused, read the order's real variety from its history and retry once.
+    if (!variety_named && (!resp.success || resp.json.value("status").toString() != "success") &&
+        !is_token_expired(resp)) {
+        const QString real = zerodha_lookup_variety(QString(base_url()), order_id, auth_headers(creds));
+        if (!real.isEmpty() && real != variety)
+            resp = BrokerHttp::instance().del(QString("%1/orders/%2/%3").arg(base_url(), real, order_id),
+                                              auth_headers(creds));
+    }
     int64_t ts = now_ts();
     if (!resp.success || resp.json.value("status").toString() != "success")
         return {false, std::nullopt, checked_error(resp, "Cancel failed"), ts};
@@ -298,7 +413,10 @@ ApiResponse<QVector<BrokerHolding>> ZerodhaBroker::get_holdings(const BrokerCred
         BrokerHolding hold;
         hold.symbol = h.value("tradingsymbol").toString();
         hold.exchange = h.value("exchange").toString();
-        hold.quantity = h.value("quantity").toDouble();
+        // Total holding = settled (T+2) demat `quantity` + `t1_quantity` (bought,
+        // not yet settled). Using only `quantity` under-counts a stock bought in the
+        // last 1–2 sessions and makes qty/invested/value disagree with the Kite app.
+        hold.quantity = h.value("quantity").toDouble() + h.value("t1_quantity").toDouble();
         hold.avg_price = h.value("average_price").toDouble();
         hold.ltp = h.value("last_price").toDouble();
         hold.invested_value = hold.quantity * hold.avg_price;
@@ -331,11 +449,15 @@ ApiResponse<BrokerFunds> ZerodhaBroker::get_funds(const BrokerCredentials& creds
 
 ApiResponse<QVector<BrokerQuote>> ZerodhaBroker::get_quotes(const BrokerCredentials& creds,
                                                             const QVector<QString>& symbols) {
+    // Instrument keys go into a query string: percent-encode each one (':' kept) so a
+    // '&' / space / '+' inside a tradingsymbol ("M&M", "NIFTY 50") can't split or
+    // corrupt the `i=` list. Kite decodes the parameter server-side.
     QString query;
     for (const auto& sym : symbols) {
         if (!query.isEmpty())
             query += "&i=";
-        query += sym.contains(':') ? sym : ("NSE:" + sym);
+        const QString key = sym.contains(':') ? sym : ("NSE:" + sym);
+        query += QString::fromUtf8(QUrl::toPercentEncoding(key, QByteArray(":")));
     }
     auto resp = BrokerHttp::instance().get(QString(base_url()) + "/quote?i=" + query, auth_headers(creds));
     int64_t ts = now_ts();
@@ -406,34 +528,117 @@ ApiResponse<QVector<BrokerCandle>> ZerodhaBroker::get_history(const BrokerCreden
     }
 
     QString interval = zerodha_interval(resolution);
-    QString url = QString("%1/instruments/historical/%2/%3?from=%4&to=%5&continuous=0&oi=1")
-                      .arg(base_url(), token, interval, from_date, to_date);
-    auto resp = BrokerHttp::instance().get(url, auth_headers(creds));
-    int64_t ts = now_ts();
-    if (!resp.success)
-        return {false, std::nullopt, checked_error(resp, resp.error), ts};
-
-    QVector<BrokerCandle> candles;
-    auto arr = resp.json.value("data").toObject().value("candles").toArray();
-    for (const auto& v : arr) {
-        auto c = v.toArray();
-        if (c.size() < 6)
-            continue;
-        qint64 epoch = QDateTime::fromString(c[0].toString(), Qt::ISODateWithMs).toSecsSinceEpoch();
-        if (epoch == 0)
-            epoch = QDateTime::fromString(c[0].toString(), Qt::ISODate).toSecsSinceEpoch();
-        BrokerCandle bc;
-        bc.timestamp = epoch;
-        bc.open = c[1].toDouble();
-        bc.high = c[2].toDouble();
-        bc.low = c[3].toDouble();
-        bc.close = c[4].toDouble();
-        bc.volume = c[5].toDouble();
-        // c[6] is Open Interest when oi=1 is requested (F&O only); 0 elsewhere.
-        if (c.size() >= 7)
-            bc.oi = c[6].toDouble();
-        candles.append(bc);
+    if (interval.isEmpty()) {
+        return {false, std::nullopt, "Zerodha get_history: unsupported resolution '" + resolution + "'", now_ts()};
     }
+
+    // Kite Connect caps the date range PER REQUEST by interval. Resolve the max
+    // number of days allowed in a single request for the (already-resolved) interval.
+    auto cap_days_for_interval = [](const QString& iv) -> int {
+        static const QMap<QString, int> caps = {
+            {"minute", 60},    {"2minute", 60},   {"3minute", 100},  {"4minute", 100},  {"5minute", 100},
+            {"10minute", 100}, {"15minute", 200}, {"30minute", 200}, {"60minute", 400}, {"hour", 400},
+            {"2hour", 400},    {"3hour", 400},    {"4hour", 400},    {"day", 2000},     {"week", 2000},
+        };
+        return caps.value(iv, 2000);
+    };
+    const int cap_days = cap_days_for_interval(interval);
+
+    // Fetch + parse ONE date window. Returns {http_resp, parsed_candles}.
+    // Reuses the existing URL build + response parse (percent-encoding/URL unchanged per request).
+    auto fetch_window = [&](const QString& win_from, const QString& win_to) {
+        QString url = QString("%1/instruments/historical/%2/%3?from=%4&to=%5&continuous=0&oi=1")
+                          .arg(base_url(), token, interval, win_from, win_to);
+        auto resp = BrokerHttp::instance().get(url, auth_headers(creds));
+
+        QVector<BrokerCandle> win_candles;
+        if (resp.success) {
+            auto arr = resp.json.value("data").toObject().value("candles").toArray();
+            for (const auto& v : arr) {
+                auto c = v.toArray();
+                if (c.size() < 6)
+                    continue;
+                // BrokerCandle.timestamp is MILLISECONDS since epoch (the contract the
+                // chart and every ms-based broker use). Kite returns ISO-8601 with a
+                // +05:30 offset, e.g. "2024-03-28T09:15:00+0530"; emit ms, not seconds —
+                // seconds here landed candles in Jan 1970 and made the live bar roll a
+                // new candle on every tick (chart "going every second").
+                qint64 epoch_ms = QDateTime::fromString(c[0].toString(), Qt::ISODateWithMs).toMSecsSinceEpoch();
+                if (epoch_ms == 0)
+                    epoch_ms = QDateTime::fromString(c[0].toString(), Qt::ISODate).toMSecsSinceEpoch();
+                BrokerCandle bc;
+                bc.timestamp = epoch_ms;
+                bc.open = c[1].toDouble();
+                bc.high = c[2].toDouble();
+                bc.low = c[3].toDouble();
+                bc.close = c[4].toDouble();
+                bc.volume = c[5].toDouble();
+                // c[6] is Open Interest when oi=1 is requested (F&O only); 0 elsewhere.
+                if (c.size() >= 7)
+                    bc.oi = c[6].toDouble();
+                win_candles.append(bc);
+            }
+        }
+        return std::make_pair(resp, win_candles);
+    };
+
+    // The caller passes "yyyy-MM-dd". Parse to compute the span; on failure, fall back
+    // to the single-request path (preserves existing behavior for unexpected formats).
+    const QDate d_from = QDate::fromString(from_date, "yyyy-MM-dd");
+    const QDate d_to = QDate::fromString(to_date, "yyyy-MM-dd");
+    const bool dates_valid = d_from.isValid() && d_to.isValid() && d_from <= d_to;
+    const qint64 span_days = dates_valid ? d_from.daysTo(d_to) : 0;
+
+    // Single-window path: range fits in one request (or dates couldn't be parsed).
+    // Behaviorally identical to the original implementation.
+    if (!dates_valid || span_days <= cap_days) {
+        auto [resp, candles] = fetch_window(from_date, to_date);
+        int64_t ts = now_ts();
+        if (!resp.success)
+            return {false, std::nullopt, checked_error(resp, resp.error), ts};
+        return {true, candles, "", ts};
+    }
+
+    // Multi-window path: slice [from,to] into consecutive <=cap_days sub-windows
+    // (oldest -> newest) and accumulate candles.
+    QVector<BrokerCandle> candles;
+    constexpr int kMaxIterations = 60;
+    int iterations = 0;
+    QDate cursor = d_from;
+    int64_t ts = now_ts();
+    while (cursor <= d_to) {
+        if (++iterations > kMaxIterations)
+            break; // SAFETY: cap the loop; return what we have so far.
+
+        QDate win_end = cursor.addDays(cap_days);
+        if (win_end > d_to)
+            win_end = d_to;
+
+        auto [resp, win_candles] = fetch_window(cursor.toString("yyyy-MM-dd"), win_end.toString("yyyy-MM-dd"));
+        ts = now_ts();
+        if (!resp.success) {
+            // First window fails -> propagate the error as today. Otherwise, partial success:
+            // stop and return whatever we have already collected.
+            if (candles.isEmpty())
+                return {false, std::nullopt, checked_error(resp, resp.error), ts};
+            break;
+        }
+        candles += win_candles;
+
+        // Advance past the current window. Step to the day after win_end to avoid an
+        // infinite loop and overlap; consecutive duplicate timestamps are deduped below.
+        if (win_end == d_to)
+            break;
+        cursor = win_end.addDays(1);
+    }
+
+    // Sort ascending by timestamp, then dedupe consecutive duplicate timestamps.
+    std::sort(candles.begin(), candles.end(),
+              [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp < b.timestamp; });
+    candles.erase(std::unique(candles.begin(), candles.end(),
+                              [](const BrokerCandle& a, const BrokerCandle& b) { return a.timestamp == b.timestamp; }),
+                  candles.end());
+
     return {true, candles, "", ts};
 }
 
@@ -605,7 +810,78 @@ static GttOrder parse_gtt(const QJsonObject& o) {
 }
 
 GttPlaceResponse ZerodhaBroker::gtt_place(const BrokerCredentials& creds, const GttOrder& order) {
-    auto resp = BrokerHttp::instance().post_json(QString(base_url()) + "/gtt/triggers", build_gtt_body(order),
+    // ── Market-Price-Protection (MPP) ────────────────────────────────────────
+    // Zerodha's GTT infrastructure sends a regular order when the trigger fires.
+    // If the order_type is MARKET, the execution price is unbounded — a flash
+    // crash or spike can fill at an extreme price far from the trigger level.
+    //
+    // MPP converts Market legs to Limit with a protective buffer:
+    //   buffer = max(5% of LTP, 5 × tick_size)
+    //   BUY  → limit_price = LTP + buffer   (ceiling)
+    //   SELL → limit_price = LTP - buffer   (floor, min 0)
+    //
+    // This gives the order enough room to fill under normal volatility while
+    // capping the worst-case slippage. If the symbol's tick_size is available
+    // from InstrumentService we use it; otherwise we fall back to the NSE
+    // default of 0.05.
+    GttOrder mpp_order = order;
+    bool applied_mpp = false;
+
+    for (auto& trigger : mpp_order.triggers) {
+        if (trigger.order_type != OrderType::Market)
+            continue;
+
+        // Fetch LTP via the quote endpoint
+        double ltp = mpp_order.last_price;
+        if (ltp <= 0.0) {
+            // Try to get a live quote for the symbol
+            QVector<QString> syms = {(mpp_order.exchange.isEmpty() ? "NSE" : mpp_order.exchange) + ":" +
+                                     mpp_order.symbol};
+            auto quote_resp = get_quotes(creds, syms);
+            if (quote_resp.success && quote_resp.data.has_value() && !quote_resp.data->isEmpty())
+                ltp = quote_resp.data->first().ltp;
+        }
+        if (ltp <= 0.0) {
+            LOG_WARN("Zerodha",
+                     QString("GTT MPP: could not determine LTP for %1 — sending Market as-is").arg(mpp_order.symbol));
+            continue;
+        }
+
+        // Determine tick_size from InstrumentService (fall back to 0.05)
+        double tick = 0.05;
+        auto inst = InstrumentService::instance().find(
+            mpp_order.symbol, mpp_order.exchange.isEmpty() ? "NSE" : mpp_order.exchange, "zerodha");
+        if (inst.has_value() && inst->tick_size > 0)
+            tick = inst->tick_size;
+
+        // buffer = max(5% of LTP, 5 × tick_size)
+        const double buffer = std::max(ltp * 0.05, 5.0 * tick);
+
+        // Convert to Limit with protective price
+        trigger.order_type = OrderType::Limit;
+        if (trigger.side == OrderSide::Buy)
+            trigger.limit_price = ltp + buffer;
+        else
+            trigger.limit_price = std::max(0.0, ltp - buffer);
+
+        // Round to tick size
+        if (tick > 0)
+            trigger.limit_price = std::round(trigger.limit_price / tick) * tick;
+
+        applied_mpp = true;
+        LOG_INFO("Zerodha", QString("GTT MPP: %1 %2 Market→Limit @ %3 (LTP=%4, buffer=%5, tick=%6)")
+                                .arg(mpp_order.symbol)
+                                .arg(trigger.side == OrderSide::Buy ? "BUY" : "SELL")
+                                .arg(trigger.limit_price, 0, 'f', 2)
+                                .arg(ltp, 0, 'f', 2)
+                                .arg(buffer, 0, 'f', 2)
+                                .arg(tick, 0, 'f', 4));
+    }
+
+    if (applied_mpp)
+        mpp_order.last_price = mpp_order.last_price > 0 ? mpp_order.last_price : 0;
+
+    auto resp = BrokerHttp::instance().post_json(QString(base_url()) + "/gtt/triggers", build_gtt_body(mpp_order),
                                                  auth_headers(creds));
     if (!resp.success || resp.json.value("status").toString() != "success")
         return {false, "", checked_error(resp, "GTT place failed")};
@@ -648,6 +924,129 @@ ApiResponse<QJsonObject> ZerodhaBroker::gtt_cancel(const BrokerCredentials& cred
     if (!resp.success || resp.json.value("status").toString() != "success")
         return {false, std::nullopt, checked_error(resp, "GTT cancel failed"), ts};
     return {true, resp.json, "", ts};
+}
+
+// ============================================================================
+// Multi-Quote & Market Depth — Zerodha /quote endpoint
+// ============================================================================
+
+ApiResponse<QVector<BrokerQuote>> ZerodhaBroker::get_multi_quotes(const BrokerCredentials& creds,
+                                                                  const QVector<QPair<QString, QString>>& symbols) {
+
+    QVector<BrokerQuote> all_quotes;
+    constexpr int kBatchSize = 500;
+
+    for (int start = 0; start < symbols.size(); start += kBatchSize) {
+        int end = std::min<int>(start + kBatchSize, static_cast<int>(symbols.size()));
+
+        // Build query string: ?i=EXCHANGE:SYMBOL&i=...
+        QString query;
+        for (int i = start; i < end; ++i) {
+            const auto& [sym, exch] = symbols[i];
+            // Try InstrumentService for broker-specific symbol; fall back to raw
+            auto br_sym = InstrumentService::instance().to_brsymbol(sym, exch, "zerodha");
+            QString key = (exch.isEmpty() ? "NSE" : exch) + ":" + (br_sym.has_value() ? br_sym.value() : sym);
+            if (!query.isEmpty())
+                query += "&i=";
+            query += QString::fromUtf8(QUrl::toPercentEncoding(key, QByteArray(":"))); // '&' in "M&M"
+        }
+
+        auto resp = BrokerHttp::instance().get(QString(base_url()) + "/quote?i=" + query, auth_headers(creds));
+        int64_t ts = now_ts();
+
+        if (!resp.success)
+            return {false, std::nullopt, checked_error(resp, resp.error), ts};
+
+        auto data = resp.json.value("data").toObject();
+        for (auto it = data.constBegin(); it != data.constEnd(); ++it) {
+            auto q_obj = it.value().toObject();
+            BrokerQuote q;
+            q.symbol = it.key();
+            q.ltp = q_obj.value("last_price").toDouble();
+            auto ohlc = q_obj.value("ohlc").toObject();
+            q.open = ohlc.value("open").toDouble();
+            q.high = ohlc.value("high").toDouble();
+            q.low = ohlc.value("low").toDouble();
+            q.close = ohlc.value("close").toDouble();
+            q.volume = q_obj.value("volume").toDouble();
+            q.change = q_obj.value("net_change").toDouble();
+            q.change_pct = q.close > 0 ? (q.change / q.close) * 100.0 : 0.0;
+
+            auto depth = q_obj.value("depth").toObject();
+            const auto buy_arr = depth.value("buy").toArray();
+            const auto sell_arr = depth.value("sell").toArray();
+            auto buy0 = buy_arr.isEmpty() ? QJsonObject{} : buy_arr.first().toObject();
+            auto sell0 = sell_arr.isEmpty() ? QJsonObject{} : sell_arr.first().toObject();
+            q.bid = buy0.value("price").toDouble();
+            q.bid_size = buy0.value("quantity").toDouble();
+            q.ask = sell0.value("price").toDouble();
+            q.ask_size = sell0.value("quantity").toDouble();
+
+            q.oi = static_cast<qint64>(q_obj.value("oi").toDouble());
+            const double oi_high = q_obj.value("oi_day_high").toDouble();
+            const double oi_low = q_obj.value("oi_day_low").toDouble();
+            if (oi_high > 0)
+                q.oi_change_pct = ((static_cast<double>(q.oi) - oi_low) / oi_high) * 100.0;
+
+            all_quotes.append(q);
+        }
+    }
+
+    return {true, all_quotes, "", now_ts()};
+}
+
+ApiResponse<MarketDepth> ZerodhaBroker::get_market_depth(const BrokerCredentials& creds, const QString& symbol,
+                                                         const QString& exchange) {
+
+    // Resolve broker-specific symbol
+    auto br_sym = InstrumentService::instance().to_brsymbol(symbol, exchange, "zerodha");
+    QString exch = exchange.isEmpty() ? "NSE" : exchange;
+    QString key = exch + ":" + (br_sym.has_value() ? br_sym.value() : symbol);
+
+    auto resp = BrokerHttp::instance().get(
+        QString(base_url()) + "/quote?i=" + QString::fromUtf8(QUrl::toPercentEncoding(key, QByteArray(":"))),
+        auth_headers(creds));
+    int64_t ts = now_ts();
+
+    if (!resp.success)
+        return {false, std::nullopt, checked_error(resp, resp.error), ts};
+
+    auto data = resp.json.value("data").toObject();
+    auto q_obj = data.value(key).toObject();
+    if (q_obj.isEmpty())
+        return {false, std::nullopt, "No data returned for " + key, ts};
+
+    MarketDepth md;
+    md.symbol = symbol;
+    md.exchange = exch;
+    md.ltp = q_obj.value("last_price").toDouble();
+    md.volume = q_obj.value("volume").toDouble();
+    md.oi = q_obj.value("oi").toDouble();
+
+    auto depth = q_obj.value("depth").toObject();
+
+    // Parse 5-level bid/ask depth
+    const auto buy_arr = depth.value("buy").toArray();
+    for (const auto& level : buy_arr) {
+        auto lv = level.toObject();
+        DepthLevel dl;
+        dl.price = lv.value("price").toDouble();
+        dl.quantity = lv.value("quantity").toInt();
+        dl.orders = lv.value("orders").toInt();
+        md.bids.append(dl);
+    }
+
+    const auto sell_arr = depth.value("sell").toArray();
+    for (const auto& level : sell_arr) {
+        auto lv = level.toObject();
+        DepthLevel dl;
+        dl.price = lv.value("price").toDouble();
+        dl.quantity = lv.value("quantity").toInt();
+        dl.orders = lv.value("orders").toInt();
+        md.asks.append(dl);
+    }
+
+    return {true, md, "", ts};
 }
 
 } // namespace fincept::trading

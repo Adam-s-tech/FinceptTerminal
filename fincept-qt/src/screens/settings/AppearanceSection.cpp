@@ -2,6 +2,7 @@
 
 #include "screens/settings/AppearanceSection.h"
 
+#include "core/events/EventBus.h"
 #include "core/logging/Logger.h"
 #include "screens/settings/SettingsRowHelpers.h"
 #include "screens/settings/SettingsStyles.h"
@@ -24,9 +25,31 @@
 namespace fincept::screens {
 
 namespace {
-constexpr const char* kDefaultFontSize   = "14px";
+constexpr const char* kDefaultFontSize = "14px";
 constexpr const char* kDefaultFontFamily = "Consolas";
-constexpr const char* kDefaultDensity    = "Default";
+constexpr const char* kDefaultDensity = "Default";
+
+/// Dynamic-property guard set by reload() when a settings *read* failed. While
+/// it is set, Save is disabled and its handler refuses to write — the widgets
+/// hold defaults, not the user's values, and set() is an INSERT OR REPLACE.
+constexpr const char* kAppearanceReadFailedProp = "fincept_appearance_read_failed";
+
+// make_row() (shared helper in SettingsRowHelpers.h) builds the label — and the
+// optional description — QLabel internally and only returns the row widget. To
+// re-translate those at runtime we grab them back from the row's direct child
+// QLabels. Construction order in make_row is deterministic: the title label is
+// added first, the description label (when present) second, so findChildren
+// returns them in that order.
+//
+// Outputs are written only when found; pass nullptr for desc_out when the row
+// has no description.
+void capture_row_labels(QWidget* row, QLabel** label_out, QLabel** desc_out = nullptr) {
+    const auto labels = row->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+    if (!labels.isEmpty() && label_out)
+        *label_out = labels.at(0);
+    if (labels.size() > 1 && desc_out)
+        *desc_out = labels.at(1);
+}
 } // namespace
 
 AppearanceSection::AppearanceSection(QWidget* parent) : QWidget(parent) {
@@ -60,9 +83,9 @@ void AppearanceSection::build_ui() {
     vl->setSpacing(8);
 
     // ── TYPOGRAPHY ────────────────────────────────────────────────────────────
-    auto* t = new QLabel(tr("TYPOGRAPHY"));
-    t->setStyleSheet(section_title_ss());
-    vl->addWidget(t);
+    typography_title_ = new QLabel(tr("TYPOGRAPHY"));
+    typography_title_->setStyleSheet(section_title_ss());
+    vl->addWidget(typography_title_);
     vl->addWidget(make_sep());
     vl->addSpacing(8);
 
@@ -71,13 +94,42 @@ void AppearanceSection::build_ui() {
         app_font_size_->addItem(QString("%1px").arg(px));
     app_font_size_->setCurrentText(kDefaultFontSize);
     app_font_size_->setStyleSheet(combo_ss());
-    vl->addWidget(make_row(tr("Font Size"), app_font_size_));
+    auto* font_size_row = make_row(tr("Font Size"), app_font_size_);
+    capture_row_labels(font_size_row, &font_size_label_);
+    vl->addWidget(font_size_row);
 
     app_font_family_ = new QComboBox;
-    app_font_family_->addItems(QFontDatabase::families());
-    app_font_family_->setCurrentText(kDefaultFontFamily);
+    // QFontDatabase::families() on macOS includes hidden system families
+    // prefixed with '.' (".Apple Color Emoji UI", ".AppleSystemUIFont", …).
+    // Offering them is a trap: the emoji font carries ASCII digit glyphs
+    // (keycap-emoji bases) that render grossly letter-spaced, so picking it
+    // mangles every number in the UI. Exclude private and emoji families.
+    {
+        QStringList fams;
+        for (const QString& f : QFontDatabase::families())
+            if (!f.startsWith('.') && !f.contains("emoji", Qt::CaseInsensitive))
+                fams << f;
+        app_font_family_->addItems(fams);
+    }
+    // setCurrentText() is a no-op when the default isn't installed (Consolas is
+    // Windows-only), which previously left the combo on item 0 — and with the
+    // '.'-prefixed fonts sorted to the top, item 0 was the emoji font, so a save
+    // persisted it. Fall back to the first available monospace instead.
+    if (app_font_family_->findText(kDefaultFontFamily) >= 0) {
+        app_font_family_->setCurrentText(kDefaultFontFamily);
+    } else {
+        for (const char* mono : {"Menlo", "SF Mono", "Monaco", "Cascadia Mono", "DejaVu Sans Mono", "Courier New"}) {
+            int idx = app_font_family_->findText(QString::fromLatin1(mono));
+            if (idx >= 0) {
+                app_font_family_->setCurrentIndex(idx);
+                break;
+            }
+        }
+    }
     app_font_family_->setStyleSheet(combo_ss());
-    vl->addWidget(make_row(tr("Font Family"), app_font_family_));
+    auto* font_family_row = make_row(tr("Font Family"), app_font_family_);
+    capture_row_labels(font_family_row, &font_family_label_);
+    vl->addWidget(font_family_row);
 
     // Debounced live preview — coalesce rapid changes into one apply after 300ms idle.
     //
@@ -100,7 +152,7 @@ void AppearanceSection::build_ui() {
     connect(appearance_debounce_, &QTimer::timeout, this, [this]() {
         if (!app_font_size_ || !app_font_family_ || !app_density_)
             return;
-        const QString family  = app_font_family_->currentText();
+        const QString family = app_font_family_->currentText();
         const QString density = app_density_->currentText();
         const int px = QString(app_font_size_->currentText()).replace("px", "").toInt();
         // Skip families that aren't actually installed — Qt would otherwise
@@ -110,79 +162,114 @@ void AppearanceSection::build_ui() {
             return;
 
         QPointer<AppearanceSection> guard(this);
-        QMetaObject::invokeMethod(qApp, [guard, family, px, density]() {
-            if (!guard)
-                return;
-            ui::ThemeManager::instance().apply_typography_and_density(family, px, density);
-        }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(
+            qApp,
+            [guard, family, px, density]() {
+                if (!guard)
+                    return;
+                ui::ThemeManager::instance().apply_typography_and_density(family, px, density);
+            },
+            Qt::QueuedConnection);
     });
 
     auto restart_debounce = [this]() { appearance_debounce_->start(); };
-    connect(app_font_size_,   &QComboBox::currentTextChanged, this, restart_debounce,
-            Qt::UniqueConnection);
-    connect(app_font_family_, &QComboBox::currentTextChanged, this, restart_debounce,
-            Qt::UniqueConnection);
+    connect(app_font_size_, &QComboBox::currentTextChanged, this, restart_debounce);
+    connect(app_font_family_, &QComboBox::currentTextChanged, this, restart_debounce);
 
     vl->addSpacing(8);
     vl->addWidget(make_sep());
     vl->addSpacing(8);
 
     // ── THEME ─────────────────────────────────────────────────────────────────
-    auto* t2 = new QLabel(tr("THEME"));
-    t2->setStyleSheet(sub_title_ss());
-    vl->addWidget(t2);
+    theme_title_ = new QLabel(tr("THEME"));
+    theme_title_->setStyleSheet(sub_title_ss());
+    vl->addWidget(theme_title_);
     vl->addSpacing(4);
 
     app_density_ = new QComboBox;
     app_density_->addItems(ui::ThemeManager::available_densities());
     app_density_->setCurrentText("Default");
     app_density_->setStyleSheet(combo_ss());
-    vl->addWidget(make_row(tr("Content Density"), app_density_, tr("Controls padding and spacing throughout the UI.")));
+    auto* density_row =
+        make_row(tr("Content Density"), app_density_, tr("Controls padding and spacing throughout the UI."));
+    capture_row_labels(density_row, &density_label_, &density_desc_);
+    vl->addWidget(density_row);
 
-    connect(app_density_, &QComboBox::currentTextChanged, this, restart_debounce,
-            Qt::UniqueConnection);
+    connect(app_density_, &QComboBox::currentTextChanged, this, restart_debounce);
 
     vl->addSpacing(8);
     vl->addWidget(make_sep());
     vl->addSpacing(8);
 
     // ── INTERFACE ─────────────────────────────────────────────────────────────
-    auto* t3 = new QLabel(tr("INTERFACE"));
-    t3->setStyleSheet(sub_title_ss());
-    vl->addWidget(t3);
+    interface_title_ = new QLabel(tr("INTERFACE"));
+    interface_title_->setStyleSheet(sub_title_ss());
+    vl->addWidget(interface_title_);
     vl->addSpacing(4);
 
     chat_bubble_toggle_ = new QCheckBox(tr("Show AI Chat Bubble"));
     chat_bubble_toggle_->setChecked(true);
     chat_bubble_toggle_->setStyleSheet(check_ss());
-    vl->addWidget(
-        make_row(tr("AI Chat Bubble"), chat_bubble_toggle_, tr("Floating chat assistant in the bottom-right corner.")));
+    auto* chat_bubble_row =
+        make_row(tr("AI Chat Bubble"), chat_bubble_toggle_, tr("Floating chat assistant in the bottom-right corner."));
+    capture_row_labels(chat_bubble_row, &chat_bubble_label_, &chat_bubble_desc_);
+    vl->addWidget(chat_bubble_row);
 
     ticker_bar_toggle_ = new QCheckBox(tr("Show Ticker Bar"));
     ticker_bar_toggle_->setChecked(true);
     ticker_bar_toggle_->setStyleSheet(check_ss());
-    vl->addWidget(make_row(tr("Ticker Bar"), ticker_bar_toggle_, tr("Live price ticker at the bottom of the screen.")));
+    auto* ticker_bar_row =
+        make_row(tr("Ticker Bar"), ticker_bar_toggle_, tr("Live price ticker at the bottom of the screen."));
+    capture_row_labels(ticker_bar_row, &ticker_bar_label_, &ticker_bar_desc_);
+    vl->addWidget(ticker_bar_row);
 
     animations_toggle_ = new QCheckBox(tr("Enable Animations"));
     animations_toggle_->setChecked(true);
     animations_toggle_->setStyleSheet(check_ss());
-    vl->addWidget(make_row(tr("Animations"), animations_toggle_, tr("Fade and transition effects throughout the UI.")));
+    auto* animations_row =
+        make_row(tr("Animations"), animations_toggle_, tr("Fade and transition effects throughout the UI."));
+    capture_row_labels(animations_row, &animations_label_, &animations_desc_);
+    vl->addWidget(animations_row);
 
     vl->addSpacing(16);
 
     // ── SAVE ──────────────────────────────────────────────────────────────────
-    auto* apply_btn = new QPushButton(tr("Save Settings"));
-    apply_btn->setFixedWidth(160);
-    apply_btn->setStyleSheet(btn_primary_ss());
-    connect(apply_btn, &QPushButton::clicked, this, [this]() {
+    // Accessibility: every control here is a bare combo/checkbox next to a
+    // separate QLabel, which screen readers do not associate automatically.
+    app_font_size_->setAccessibleName(tr("Font size"));
+    app_font_family_->setAccessibleName(tr("Font family"));
+    app_density_->setAccessibleName(tr("Content density"));
+    chat_bubble_toggle_->setAccessibleName(tr("Show AI chat bubble"));
+    ticker_bar_toggle_->setAccessibleName(tr("Show ticker bar"));
+    animations_toggle_->setAccessibleName(tr("Enable animations"));
+
+    save_btn_ = new QPushButton(tr("Save Settings"));
+    save_btn_->setFixedWidth(160);
+    save_btn_->setAccessibleName(tr("Save appearance settings"));
+    save_btn_->setStyleSheet(btn_primary_ss());
+    connect(save_btn_, &QPushButton::clicked, this, [this]() {
+        if (property(kAppearanceReadFailedProp).toBool()) {
+            LOG_WARN("Settings", "Refusing to save appearance settings — the stored values could not be read, so "
+                                 "the widgets on screen are defaults rather than the user's settings");
+            return;
+        }
+
         auto& repo = SettingsRepository::instance();
 
-        repo.set("appearance.font_size",         app_font_size_->currentText(),                            "appearance");
-        repo.set("appearance.font_family",       app_font_family_->currentText(),                          "appearance");
-        repo.set("appearance.density",           app_density_->currentText(),                              "appearance");
-        repo.set("appearance.show_chat_bubble",  chat_bubble_toggle_->isChecked() ? "true" : "false",      "appearance");
-        repo.set("appearance.show_ticker_bar",   ticker_bar_toggle_->isChecked()  ? "true" : "false",      "appearance");
-        repo.set("appearance.animations",        animations_toggle_->isChecked()  ? "true" : "false",      "appearance");
+        repo.set("appearance.font_size", app_font_size_->currentText(), "appearance");
+        repo.set("appearance.font_family", app_font_family_->currentText(), "appearance");
+        repo.set("appearance.density", app_density_->currentText(), "appearance");
+        const QString bubble = chat_bubble_toggle_->isChecked() ? "true" : "false";
+        const auto prev_bubble = repo.get("appearance.show_chat_bubble");
+        const bool bubble_changed = !prev_bubble.is_ok() || prev_bubble.value() != bubble;
+        repo.set("appearance.show_chat_bubble", bubble, "appearance");
+        // Every WindowFrame re-applies its chat bubble on this event, so the toggle
+        // takes effect now instead of on the next screen change.
+        if (bubble_changed)
+            EventBus::instance().publish("settings.changed",
+                                         {{"key", QStringLiteral("appearance.show_chat_bubble")}, {"value", bubble}});
+        repo.set("appearance.show_ticker_bar", ticker_bar_toggle_->isChecked() ? "true" : "false", "appearance");
+        repo.set("appearance.animations", animations_toggle_->isChecked() ? "true" : "false", "appearance");
 
         // Flush any pending debounce immediately on save. Same coalesced +
         // queued path as the live-preview lambda above so a Save click that
@@ -190,21 +277,25 @@ void AppearanceSection::build_ui() {
         // back-to-back-restyle Wayland crash.
         if (appearance_debounce_->isActive()) {
             appearance_debounce_->stop();
-            const QString family  = app_font_family_->currentText();
+            const QString family = app_font_family_->currentText();
             const QString density = app_density_->currentText();
             int px = QString(app_font_size_->currentText()).replace("px", "").toInt();
-            if (px <= 0) px = 14;
+            if (px <= 0)
+                px = 14;
             QPointer<AppearanceSection> guard(this);
-            QMetaObject::invokeMethod(qApp, [guard, family, px, density]() {
-                if (!guard)
-                    return;
-                ui::ThemeManager::instance().apply_typography_and_density(family, px, density);
-            }, Qt::QueuedConnection);
+            QMetaObject::invokeMethod(
+                qApp,
+                [guard, family, px, density]() {
+                    if (!guard)
+                        return;
+                    ui::ThemeManager::instance().apply_typography_and_density(family, px, density);
+                },
+                Qt::QueuedConnection);
         }
 
         LOG_INFO("Settings", "Appearance saved and applied");
     });
-    vl->addWidget(apply_btn);
+    vl->addWidget(save_btn_);
     vl->addStretch();
 
     scroll->setWidget(page);
@@ -212,7 +303,8 @@ void AppearanceSection::build_ui() {
 }
 
 void AppearanceSection::reload() {
-    if (!app_font_size_) return;
+    if (!app_font_size_)
+        return;
     auto& repo = SettingsRepository::instance();
 
     // Block signals during load so live-preview slots don't fire for every
@@ -222,26 +314,109 @@ void AppearanceSection::reload() {
     const QSignalBlocker b2(app_font_family_);
     const QSignalBlocker b4(app_density_);
 
+    // A read error is not "unset". The Save handler writes every widget on this
+    // page straight back, so a failed read must disarm Save; the default is
+    // still used in memory so the page renders something sensible.
+    bool read_failed = false;
+    auto log_read_error = [&read_failed](const QString& key, const std::string& err) {
+        LOG_ERROR("Settings", QString("settings read failed for '%1' — showing the default, leaving the stored "
+                                      "value untouched and disabling Save: %2")
+                                  .arg(key, QString::fromStdString(err)));
+        read_failed = true;
+    };
+
     auto load_combo = [&](QComboBox* cb, const QString& key, const QString& def) {
         auto r = repo.get(key);
-        QString val = r.is_ok() ? r.value() : def;
+        if (r.is_err())
+            log_read_error(key, r.error());
+        const QString val = r.is_ok() ? r.value() : def;
         int idx = cb->findText(val);
-        if (idx >= 0) cb->setCurrentIndex(idx);
+        if (idx >= 0)
+            cb->setCurrentIndex(idx);
     };
 
     auto load_check = [&](QCheckBox* cb, const QString& key, bool def) {
-        if (!cb) return;
+        if (!cb)
+            return;
         auto r = repo.get(key);
-        cb->setChecked(!r.is_ok() ? def : r.value() != "false");
+        if (r.is_err()) {
+            log_read_error(key, r.error());
+            cb->setChecked(def);
+            return;
+        }
+        cb->setChecked(r.value() != "false");
     };
 
-    load_combo(app_font_size_,   "appearance.font_size",   kDefaultFontSize);
+    load_combo(app_font_size_, "appearance.font_size", kDefaultFontSize);
     load_combo(app_font_family_, "appearance.font_family", kDefaultFontFamily);
-    load_combo(app_density_,     "appearance.density",     kDefaultDensity);
+    load_combo(app_density_, "appearance.density", kDefaultDensity);
 
     load_check(chat_bubble_toggle_, "appearance.show_chat_bubble", true);
-    load_check(ticker_bar_toggle_,  "appearance.show_ticker_bar",  true);
-    load_check(animations_toggle_,  "appearance.animations",       true);
+    load_check(ticker_bar_toggle_, "appearance.show_ticker_bar", true);
+    load_check(animations_toggle_, "appearance.animations", true);
+
+    setProperty(kAppearanceReadFailedProp, read_failed);
+    if (save_btn_) {
+        save_btn_->setEnabled(!read_failed);
+        save_btn_->setToolTip(read_failed ? tr("Your saved appearance settings could not be read — saving is "
+                                               "disabled so the defaults shown cannot overwrite them. Reopen "
+                                               "Settings to retry.")
+                                          : QString());
+    }
+}
+
+void AppearanceSection::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void AppearanceSection::retranslateUi() {
+    // Section titles.
+    if (typography_title_)
+        typography_title_->setText(tr("TYPOGRAPHY"));
+    if (theme_title_)
+        theme_title_->setText(tr("THEME"));
+    if (interface_title_)
+        interface_title_->setText(tr("INTERFACE"));
+
+    // Typography rows.
+    if (font_size_label_)
+        font_size_label_->setText(tr("Font Size"));
+    if (font_family_label_)
+        font_family_label_->setText(tr("Font Family"));
+
+    // Theme row + description.
+    if (density_label_)
+        density_label_->setText(tr("Content Density"));
+    if (density_desc_)
+        density_desc_->setText(tr("Controls padding and spacing throughout the UI."));
+
+    // Interface rows: row labels, checkbox texts, and descriptions.
+    if (chat_bubble_label_)
+        chat_bubble_label_->setText(tr("AI Chat Bubble"));
+    if (chat_bubble_toggle_)
+        chat_bubble_toggle_->setText(tr("Show AI Chat Bubble"));
+    if (chat_bubble_desc_)
+        chat_bubble_desc_->setText(tr("Floating chat assistant in the bottom-right corner."));
+
+    if (ticker_bar_label_)
+        ticker_bar_label_->setText(tr("Ticker Bar"));
+    if (ticker_bar_toggle_)
+        ticker_bar_toggle_->setText(tr("Show Ticker Bar"));
+    if (ticker_bar_desc_)
+        ticker_bar_desc_->setText(tr("Live price ticker at the bottom of the screen."));
+
+    if (animations_label_)
+        animations_label_->setText(tr("Animations"));
+    if (animations_toggle_)
+        animations_toggle_->setText(tr("Enable Animations"));
+    if (animations_desc_)
+        animations_desc_->setText(tr("Fade and transition effects throughout the UI."));
+
+    // Save button.
+    if (save_btn_)
+        save_btn_->setText(tr("Save Settings"));
 }
 
 } // namespace fincept::screens

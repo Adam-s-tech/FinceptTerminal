@@ -2,6 +2,7 @@
 #include "screens/portfolio/views/CustomIndexView.h"
 
 #include "core/logging/Logger.h"
+#include "services/portfolio/PortfolioService.h"
 #include "ui/theme/Theme.h"
 
 #define QT_CHARTS_USE_NAMESPACE
@@ -13,6 +14,7 @@
 #include <QHeaderView>
 #include <QLineSeries>
 #include <QMessageBox>
+#include <QTabBar>
 #include <QVBoxLayout>
 #include <QValueAxis>
 
@@ -75,6 +77,9 @@ void CustomIndexView::build_ui() {
     layout->setContentsMargins(0, 0, 0, 0);
 
     tabs_ = new QTabWidget;
+    tabs_->tabBar()->setElideMode(Qt::ElideNone);
+    tabs_->tabBar()->setExpanding(false);
+    tabs_->tabBar()->setUsesScrollButtons(false);
     tabs_->setDocumentMode(true);
     tabs_->setStyleSheet(QString("QTabWidget::pane { border:0; background:%1; }"
                                  "QTabBar::tab { background:%2; color:%3; padding:6px 14px; border:0;"
@@ -215,7 +220,8 @@ QWidget* CustomIndexView::build_index_list_panel() {
 
     index_list_table_ = new QTableWidget;
     index_list_table_->setColumnCount(6);
-    index_list_table_->setHorizontalHeaderLabels({tr("NAME"), tr("METHOD"), tr("BASE"), tr("CURRENT VALUE"), tr("CHANGE"), tr("CREATED")});
+    index_list_table_->setHorizontalHeaderLabels(
+        {tr("NAME"), tr("METHOD"), tr("BASE"), tr("CURRENT VALUE"), tr("CHANGE"), tr("CREATED")});
     index_list_table_->setSelectionMode(QAbstractItemView::SingleSelection);
     index_list_table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     index_list_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -260,7 +266,8 @@ QWidget* CustomIndexView::build_performance_panel() {
     // Page 0 — placeholder
     perf_placeholder_ = new QLabel(tr("Select an index from MY INDICES to see its performance."));
     perf_placeholder_->setAlignment(Qt::AlignCenter);
-    perf_placeholder_->setStyleSheet(QString("color:%1; font-size:11px; padding:40px;").arg(ui::colors::TEXT_TERTIARY()));
+    perf_placeholder_->setStyleSheet(
+        QString("color:%1; font-size:11px; padding:40px;").arg(ui::colors::TEXT_TERTIARY()));
     perf_stack_->addWidget(perf_placeholder_);
 
     // Page 1 — chart
@@ -292,22 +299,36 @@ void CustomIndexView::set_data(const portfolio::PortfolioSummary& summary, const
     summary_ = summary;
     currency_ = currency;
     update_constituents();
-    load_indices(); // refresh with latest portfolio prices
+    // PortfolioService records each index's level on every summary refresh
+    // (before it emits the summary), so this reads current values.
+    load_indices();
 }
 
 void CustomIndexView::update_constituents() {
+    // set_data() runs on every portfolio poll, so this table is rebuilt while
+    // the user is still ticking constituents. Snapshot their choices first and
+    // put them back \u2014 otherwise every unticked row silently re-ticked itself
+    // roughly once a minute.
+    QHash<QString, Qt::CheckState> prev_checks;
+    for (int r = 0; r < const_table_->rowCount(); ++r) {
+        const auto* sym_item = const_table_->item(r, 1);
+        const auto* chk = const_table_->item(r, 0);
+        if (sym_item && chk)
+            prev_checks.insert(sym_item->text(), chk->checkState());
+    }
+
     const_table_->setRowCount(static_cast<int>(summary_.holdings.size()));
 
     for (int r = 0; r < static_cast<int>(summary_.holdings.size()); ++r) {
         const auto& h = summary_.holdings[r];
         const_table_->setRowHeight(r, 28);
 
-        // Check box (text-based, ticked by default)
+        // Check box (text-based, ticked by default for newly-seen symbols)
         auto* check = new QTableWidgetItem("\u2611");
         check->setTextAlignment(Qt::AlignCenter);
         check->setForeground(QColor(ui::colors::POSITIVE()));
         check->setFlags(check->flags() | Qt::ItemIsUserCheckable);
-        check->setCheckState(Qt::Checked);
+        check->setCheckState(prev_checks.value(h.symbol, Qt::Checked));
         const_table_->setItem(r, 0, check);
 
         auto set_item = [&](int col, const QString& text, const char* color = nullptr) {
@@ -459,6 +480,16 @@ void CustomIndexView::delete_selected_index() {
 
     const auto& idx = loaded_indices_[row];
 
+    // Destructive and irreversible (the index and its whole value history go),
+    // and it was one click away with no confirmation at all.
+    const auto answer = QMessageBox::question(
+        this, tr("Delete Custom Index"),
+        tr("Delete the index \"%1\"?\n\nIts entire recorded value history will be removed. This cannot be undone.")
+            .arg(idx.name),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+
     auto r = CustomIndexRepository::instance().remove(idx.id);
     if (r.is_err()) {
         LOG_ERROR("CustomIndex", "Delete failed: " + QString::fromStdString(r.error()));
@@ -500,8 +531,12 @@ void CustomIndexView::show_index_performance(const QString& index_id, const QStr
     auto* chart = perf_chart_view_->chart();
     chart->removeAllSeries();
     const auto old_axes = chart->axes();
-    for (auto* ax : old_axes)
+    for (auto* ax : old_axes) {
+        // removeAxis() only detaches — without the delete each re-render leaked
+        // a QDateTimeAxis + a QValueAxis.
         chart->removeAxis(ax);
+        delete ax;
+    }
 
     chart->addSeries(series);
     chart->setTitle(QString());
@@ -535,19 +570,31 @@ void CustomIndexView::changeEvent(QEvent* event) {
 
 void CustomIndexView::retranslateUi() {
     if (tabs_) {
-        if (create_tab_index_ >= 0)     tabs_->setTabText(create_tab_index_, tr("CREATE INDEX"));
-        if (my_indices_tab_index_ >= 0) tabs_->setTabText(my_indices_tab_index_, tr("MY INDICES"));
-        if (performance_tab_index_ >= 0) tabs_->setTabText(performance_tab_index_, tr("PERFORMANCE"));
+        if (create_tab_index_ >= 0)
+            tabs_->setTabText(create_tab_index_, tr("CREATE INDEX"));
+        if (my_indices_tab_index_ >= 0)
+            tabs_->setTabText(my_indices_tab_index_, tr("MY INDICES"));
+        if (performance_tab_index_ >= 0)
+            tabs_->setTabText(performance_tab_index_, tr("PERFORMANCE"));
     }
-    if (create_title_)       create_title_->setText(tr("CREATE CUSTOM INDEX"));
-    if (name_field_label_)   name_field_label_->setText(tr("NAME:"));
-    if (method_field_label_) method_field_label_->setText(tr("METHOD:"));
-    if (base_field_label_)   base_field_label_->setText(tr("BASE:"));
-    if (name_edit_)          name_edit_->setPlaceholderText(tr("My Custom Index"));
-    if (create_btn_)         create_btn_->setText(tr("CREATE INDEX"));
-    if (const_title_)        const_title_->setText(tr("CONSTITUENTS (from portfolio holdings)"));
-    if (indices_title_)      indices_title_->setText(tr("MY CUSTOM INDICES"));
-    if (delete_btn_)         delete_btn_->setText(tr("DELETE SELECTED"));
+    if (create_title_)
+        create_title_->setText(tr("CREATE CUSTOM INDEX"));
+    if (name_field_label_)
+        name_field_label_->setText(tr("NAME:"));
+    if (method_field_label_)
+        method_field_label_->setText(tr("METHOD:"));
+    if (base_field_label_)
+        base_field_label_->setText(tr("BASE:"));
+    if (name_edit_)
+        name_edit_->setPlaceholderText(tr("My Custom Index"));
+    if (create_btn_)
+        create_btn_->setText(tr("CREATE INDEX"));
+    if (const_title_)
+        const_title_->setText(tr("CONSTITUENTS (from portfolio holdings)"));
+    if (indices_title_)
+        indices_title_->setText(tr("MY CUSTOM INDICES"));
+    if (delete_btn_)
+        delete_btn_->setText(tr("DELETE SELECTED"));
     if (list_empty_msg_)
         list_empty_msg_->setText(
             tr("No custom indices created yet.\nGo to CREATE INDEX tab to build one from your portfolio."));
@@ -591,67 +638,10 @@ void CustomIndexView::retranslateUi() {
 // ── Index value computation ───────────────────────────────────────────────────
 
 double CustomIndexView::compute_index_value(const CustomIndex& idx) const {
-    if (idx.constituents.isEmpty())
-        return idx.base_value;
-
-    // Build a map from symbol → current price from live holdings
-    QHash<QString, double> price_map;
-    for (const auto& h : summary_.holdings) {
-        price_map[h.symbol] = h.current_price;
-    }
-
-    const int n = idx.constituents.size();
-    const QString method = idx.method;
-
-    if (method == "Price Weighted") {
-        // Sum of current prices / sum of creation prices * base
-        double sum_cur = 0.0;
-        double sum_base = 0.0;
-        for (const auto& c : idx.constituents) {
-            const double cur = price_map.value(c.symbol, c.price_at_create);
-            sum_cur += cur;
-            sum_base += c.price_at_create;
-        }
-        return sum_base > 0.0 ? (sum_cur / sum_base * idx.base_value) : idx.base_value;
-
-    } else if (method == "Equal Weighted") {
-        double ratio_sum = 0.0;
-        for (const auto& c : idx.constituents) {
-            if (c.price_at_create > 0.0) {
-                const double cur = price_map.value(c.symbol, c.price_at_create);
-                ratio_sum += cur / c.price_at_create;
-            }
-        }
-        return (ratio_sum / n) * idx.base_value;
-
-    } else if (method == "Geometric Mean") {
-        double log_sum = 0.0;
-        int valid = 0;
-        for (const auto& c : idx.constituents) {
-            if (c.price_at_create > 0.0) {
-                const double cur = price_map.value(c.symbol, c.price_at_create);
-                if (cur > 0.0) {
-                    log_sum += std::log(cur / c.price_at_create);
-                    ++valid;
-                }
-            }
-        }
-        return valid > 0 ? (std::exp(log_sum / valid) * idx.base_value) : idx.base_value;
-
-    } else {
-        // Market Cap Weighted / Float Adjusted / Fundamental / Modified / Factor / Risk Parity / Capped
-        // All fall back to weight-based: sum(weight_i * price_ratio_i) * base
-        double weighted_ratio = 0.0;
-        double total_weight = 0.0;
-        for (const auto& c : idx.constituents) {
-            if (c.price_at_create > 0.0 && c.weight > 0.0) {
-                const double cur = price_map.value(c.symbol, c.price_at_create);
-                weighted_ratio += c.weight * (cur / c.price_at_create);
-                total_weight += c.weight;
-            }
-        }
-        return total_weight > 0.0 ? (weighted_ratio / total_weight * idx.base_value) : idx.base_value;
-    }
+    // The maths lives in PortfolioService so the per-refresh recorder (which
+    // keeps the index history growing even when this view is closed) and the
+    // creation path always agree on the level.
+    return services::PortfolioService::compute_custom_index_value(idx, summary_);
 }
 
 } // namespace fincept::screens

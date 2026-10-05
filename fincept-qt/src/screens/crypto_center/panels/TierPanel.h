@@ -2,6 +2,7 @@
 
 #include "services/wallet/WalletTypes.h"
 
+#include <QEvent>
 #include <QString>
 #include <QVariant>
 #include <QWidget>
@@ -33,19 +34,21 @@ class TierPanel : public QWidget {
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     void build_ui();
     void apply_theme();
+    void retranslateUi();
 
     void on_wallet_connected(const QString& pubkey, const QString& label);
     void on_wallet_disconnected();
     void on_tier_update(const QVariant& v);
 
-    void render_state(fincept::wallet::TierStatus::Tier current,
-                      const QString& weight_ui_str,
-                      const QString& next_threshold_ui_str,
-                      bool is_mock);
+    /// `remaining_ui_str` is the veFNCPT weight still missing for the next tier
+    /// (threshold minus current weight), empty at Gold / when unknown.
+    void render_state(fincept::wallet::TierStatus::Tier current, const QString& weight_ui_str,
+                      const QString& remaining_ui_str, bool is_mock);
 
     struct TierRow {
         QFrame* host = nullptr;
@@ -56,6 +59,7 @@ class TierPanel : public QWidget {
     };
 
     // Head
+    QLabel* title_ = nullptr; // "TIER"
     QLabel* current_label_ = nullptr;
 
     // Body

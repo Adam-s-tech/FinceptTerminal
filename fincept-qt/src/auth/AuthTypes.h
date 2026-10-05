@@ -1,4 +1,5 @@
 #pragma once
+#include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QMap>
@@ -93,7 +94,7 @@ struct ApiResponse {
 struct RateLimitInfo {
     int limit = 0;
     int remaining = 0;
-    qint64 reset_at = 0;       // unix timestamp (seconds)
+    qint64 reset_at = 0; // unix timestamp (seconds)
     int window_seconds = 0;
     int concurrent_limit = 0;
 
@@ -253,6 +254,17 @@ struct SessionData {
         return obj;
     }
 
+    // Session JSON with secrets stripped — this is what may be persisted to the
+    // UNENCRYPTED settings table. The api_key and session_token live ONLY in
+    // SecureStorage (AES-256-GCM, machine-bound key). Persisting them in clear
+    // would defeat encryption-at-rest (CR-08).
+    QJsonObject to_persisted_json() const {
+        QJsonObject obj = to_json();
+        obj.remove("api_key");
+        obj.remove("session_token");
+        return obj;
+    }
+
     static SessionData from_json(const QJsonObject& obj) {
         SessionData s;
         s.authenticated = obj["authenticated"].toBool();
@@ -293,11 +305,11 @@ struct ValidationResult {
 
 inline ValidationResult validate_email(const QString& email) {
     if (email.isEmpty())
-        return {false, "Email is required"};
+        return {false, QCoreApplication::translate("AuthTypes", "Email is required")};
     // Basic email regex
     QRegularExpression re("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$");
     if (!re.match(email).hasMatch())
-        return {false, "Invalid email format"};
+        return {false, QCoreApplication::translate("AuthTypes", "Invalid email format")};
     return {true, {}};
 }
 

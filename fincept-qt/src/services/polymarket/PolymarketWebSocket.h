@@ -1,9 +1,9 @@
 #pragma once
 
+#include "datahub/Producer.h"
 #include "services/polymarket/PolymarketTypes.h"
 
-#    include "datahub/Producer.h"
-
+#include <QHash>
 #include <QObject>
 #include <QSet>
 #include <QTimer>
@@ -21,9 +21,7 @@ namespace fincept::services::polymarket {
 /// `polymarket:orderbook:*`. The existing `price_updated` /
 /// `orderbook_updated` signals are kept alive alongside hub publishes
 /// so consumers can migrate incrementally.
-class PolymarketWebSocket : public QObject
-    , public fincept::datahub::Producer
-{
+class PolymarketWebSocket : public QObject, public fincept::datahub::Producer {
     Q_OBJECT
   public:
     static PolymarketWebSocket& instance();
@@ -39,8 +37,8 @@ class PolymarketWebSocket : public QObject
 
     // ── fincept::datahub::Producer ────────────────────────────────────────
     QStringList topic_patterns() const override;
-    void refresh(const QStringList& topics) override;   // no-op: push_only
-    int max_requests_per_sec() const override;          // 10 (CLOB REST cap)
+    void refresh(const QStringList& topics) override; // no-op: push_only
+    int max_requests_per_sec() const override;        // 10 (CLOB REST cap)
 
   signals:
     void price_updated(const QString& asset_id, double price);
@@ -58,11 +56,22 @@ class PolymarketWebSocket : public QObject
     PolymarketWebSocket();
     void ensure_connected();
     void send_subscribe(const QStringList& token_ids);
+    void send_dynamic(const QString& operation, const QStringList& token_ids);
+    void apply_price_changes(const QJsonArray& changes);
 
     fincept::WebSocketClient* ws_ = nullptr;
     QTimer* ping_timer_ = nullptr;
+    QTimer* idle_timer_ = nullptr; // closes the socket after it has been subscription-free for a while
     QSet<QString> subscribed_tokens_;
+    QHash<QString, int> token_refs_; // subscribers per token (screen + dashboard widget can overlap)
     bool connected_ = false;
+    bool connecting_ = false;
+    bool closing_ = false; // disconnect() requested on a live socket, close not yet confirmed
+
+    /// Latest full book per token: seeded by each "book" snapshot and patched by
+    /// "price_change" deltas, so the order book keeps moving between trades
+    /// (deltas were previously dropped, leaving the book frozen until a trade).
+    QHash<QString, OrderBook> books_;
 
     static constexpr const char* WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 

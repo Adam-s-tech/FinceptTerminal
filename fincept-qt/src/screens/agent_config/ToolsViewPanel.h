@@ -3,12 +3,15 @@
 #include "services/agents/AgentTypes.h"
 
 #include <QComboBox>
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QSet>
 #include <QTextEdit>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QWidget>
 
@@ -31,6 +34,7 @@ class ToolsViewPanel : public QWidget {
 
   protected:
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     // ── Build ────────────────────────────────────────────────────────────────
@@ -39,6 +43,10 @@ class ToolsViewPanel : public QWidget {
     QWidget* build_center_panel();
     QWidget* build_right_panel();
     void setup_connections();
+
+    /// Re-apply tr() lookups to every widget whose text we keep a handle to.
+    /// Called from changeEvent() on QEvent::LanguageChange.
+    void retranslateUi();
 
     // ── Data ─────────────────────────────────────────────────────────────────
     void populate_tools(const services::AgentToolsInfo& info);
@@ -60,10 +68,12 @@ class ToolsViewPanel : public QWidget {
     void copy_tool_name(const QString& name);
 
     // ── LEFT panel widgets ───────────────────────────────────────────────────
+    QLabel* assign_to_hdr_ = nullptr;
     QRadioButton* radio_agent_ = nullptr;
     QRadioButton* radio_team_ = nullptr;
     QComboBox* target_combo_ = nullptr;
     QLabel* target_status_ = nullptr;
+    QLabel* selected_tools_hdr_ = nullptr;
     QListWidget* selected_list_ = nullptr;
     QLabel* selected_count_ = nullptr;
     QPushButton* remove_btn_ = nullptr;
@@ -71,6 +81,8 @@ class ToolsViewPanel : public QWidget {
     QPushButton* assign_btn_ = nullptr;
 
     // ── CENTER panel widgets ─────────────────────────────────────────────────
+    QLabel* available_hdr_ = nullptr;
+    QLabel* assigned_hint_ = nullptr;
     QLineEdit* search_edit_ = nullptr;
     QTreeWidget* tool_tree_ = nullptr;
     QLabel* total_count_ = nullptr;
@@ -78,6 +90,10 @@ class ToolsViewPanel : public QWidget {
     QPushButton* copy_btn_ = nullptr;
 
     // ── RIGHT panel widgets ──────────────────────────────────────────────────
+    QLabel* detail_hdr_ = nullptr;
+    QLabel* description_hdr_ = nullptr;
+    QLabel* parameters_hdr_ = nullptr;
+    QLabel* used_by_hdr_ = nullptr;
     QLabel* detail_name_ = nullptr;
     QLabel* detail_category_ = nullptr;
     QTextEdit* detail_desc_ = nullptr;
@@ -90,6 +106,19 @@ class ToolsViewPanel : public QWidget {
     QVector<services::AgentInfo> agent_configs_;
     bool data_loaded_ = false;
     QString current_tool_; // tool shown in detail panel
+
+    // Flat name set of every agent-service tool, rebuilt once per
+    // populate_tools(). filter_tools() used to re-scan every category's
+    // QJsonArray for each MCP tool on every keystroke.
+    QSet<QString> agent_tool_names_;
+    // Tools already assigned to the current target. Refreshed when the target
+    // changes or an assign completes — filter_tools() previously hit
+    // AgentConfigRepository (a DB read) on every keystroke.
+    QStringList assigned_cache_;
+    void refresh_assigned_cache();
+    // 180 ms debounce so a fast typist rebuilds the ~600-node tree once,
+    // not once per character.
+    QTimer* search_debounce_ = nullptr;
 };
 
 } // namespace fincept::screens

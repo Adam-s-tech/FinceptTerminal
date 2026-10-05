@@ -3,6 +3,7 @@
 #include "services/wallet/StakingService.h"
 #include "services/wallet/WalletTypes.h"
 
+#include <QEvent>
 #include <QString>
 #include <QVariant>
 #include <QWidget>
@@ -39,8 +40,11 @@ namespace fincept::screens::panels {
 ///   1. Calls `StakingService::build_lock_tx(...)` — fails fast in mock mode.
 ///   2. On success, opens `WalletActionConfirmDialog` with decoded summary.
 ///   3. On confirm, forwards to `WalletService::sign_and_send`.
-///   4. Polls `getSignatureStatuses` until confirmed (reuses the SwapPanel
-///      pattern; encapsulated in `start_status_poll`).
+///   4. Polls `getSignatureStatuses` (`start_status_poll`, same cadence as
+///      `SwapPanel`) until the lock is confirmed, reverted on-chain, or the
+///      attempt cap is hit. The panel stays busy for the duration so a second
+///      lock can't be queued behind an unconfirmed one; on confirmation the
+///      balance and the locks / veFNCPT topics are force-refreshed.
 ///
 /// In mock mode the LOCK button is disabled with status "DEMO — fincept_lock
 /// not deployed yet" and clicking it shows the explanation in the error strip.
@@ -53,12 +57,14 @@ class LockPanel : public QWidget {
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     using Duration = fincept::wallet::StakingService::Duration;
 
     void build_ui();
     void apply_theme();
+    void retranslateUi();
 
     void on_wallet_connected(const QString& pubkey, const QString& label);
     void on_wallet_disconnected();
@@ -74,6 +80,10 @@ class LockPanel : public QWidget {
 
     void resubscribe();
     void recompute_preview();
+    /// Poll `getSignatureStatuses` after `sign_and_send` until the lock tx is
+    /// confirmed, reverted, or the attempt cap is reached. Timer and RPC client
+    /// are parented to the panel and torn down on every terminal outcome.
+    void start_status_poll(const QString& sig);
     void show_error_strip(const QString& msg);
     void clear_error_strip();
     void set_busy(bool busy);
@@ -82,6 +92,15 @@ class LockPanel : public QWidget {
     Duration current_duration() const;
 
     // UI
+    QLabel* head_title_ = nullptr;        // "STAKE / LOCK"
+    QLabel* head_subtitle_ = nullptr;     // "veFNCPT — locked $FNCPT earns USDC yield"
+    QLabel* amount_caption_ = nullptr;    // "AMOUNT"
+    QLabel* token_caption_ = nullptr;     // "TOKEN"
+    QLabel* token_chip_ = nullptr;        // "$FNCPT"
+    QLabel* duration_caption_ = nullptr;  // "DURATION"
+    QLabel* weight_caption_ = nullptr;    // "WEIGHT"
+    QLabel* est_yield_caption_ = nullptr; // "EST. YIELD"
+    QLabel* tier_caption_ = nullptr;      // "TIER"
     QLineEdit* amount_input_ = nullptr;
     QLabel* available_label_ = nullptr;
     QPushButton* max_button_ = nullptr;
@@ -107,12 +126,21 @@ class LockPanel : public QWidget {
     QString current_vefncpt_topic_;
     QString current_tier_topic_;
     double fncpt_balance_ui_ = 0.0;
-    int    fncpt_decimals_ = 6;
+    int fncpt_decimals_ = 6;
     double fncpt_usd_price_ = 0.0;
     double weekly_revenue_usd_ = 0.0;
+    /// True when the `treasury:revenue` payload the yield projection is built
+    /// from is the producer's built-in mock (worker endpoint unconfigured).
+    /// Drives the "DEMO" prefix on the EST. YIELD line — a fabricated revenue
+    /// figure must never be rendered as if it were a real projection.
+    bool revenue_is_mock_ = false;
     quint64 current_user_weight_raw_ = 0;
-    fincept::wallet::TierStatus::Tier current_tier_ =
-        fincept::wallet::TierStatus::Tier::Free;
+    fincept::wallet::TierStatus::Tier current_tier_ = fincept::wallet::TierStatus::Tier::Free;
+    /// True when the veFNCPT weight / tier the TIER preview is built from came
+    /// from the staking producer's demo positions (fincept_lock not deployed),
+    /// not from the wallet's on-chain locks.
+    bool vefncpt_is_mock_ = false;
+    bool tier_is_mock_ = false;
 
     bool busy_ = false;
 };

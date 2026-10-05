@@ -3,6 +3,7 @@
 #include "storage/workspace/WorkspaceSnapshotRing.h"
 
 #include <QDialog>
+#include <QEvent>
 #include <QList>
 
 class QListWidget;
@@ -42,14 +43,16 @@ class CrashRecoveryDialog : public QDialog {
     /// Construct with the live CrashRecovery + ring pointers from
     /// TerminalShell. Both must outlive the dialog (they're owned by the
     /// shell and only released in shutdown()).
-    explicit CrashRecoveryDialog(fincept::CrashRecovery* recovery,
-                                 fincept::WorkspaceSnapshotRing* ring,
+    explicit CrashRecoveryDialog(fincept::CrashRecovery* recovery, fincept::WorkspaceSnapshotRing* ring,
                                  QWidget* parent = nullptr);
 
     /// True iff the user picked "Restore" and the snapshot was successfully
     /// decoded + applied. False when the user picked "Skip" or no snapshot
     /// could be parsed (parse failures fall back to skip with a warning).
     bool was_restored() const { return restored_; }
+
+  protected:
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void on_selection_changed();
@@ -60,6 +63,7 @@ class CrashRecoveryDialog : public QDialog {
 
   private:
     void build_ui();
+    void retranslateUi();
     void populate_snapshots();
     void apply_styles();
     QString format_timestamp(qint64 unix_ms) const;
@@ -71,7 +75,10 @@ class CrashRecoveryDialog : public QDialog {
     fincept::WorkspaceSnapshotRing* ring_ = nullptr;
 
     QLabel* heading_ = nullptr;
+    QLabel* badge_ = nullptr;
     QLabel* explainer_ = nullptr;
+    QLabel* col_name_ = nullptr;
+    QLabel* col_meta_ = nullptr;
     QLabel* empty_label_ = nullptr;
     QListWidget* list_ = nullptr;
     QPushButton* rename_button_ = nullptr;

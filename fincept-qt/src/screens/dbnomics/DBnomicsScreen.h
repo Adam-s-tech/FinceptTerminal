@@ -4,9 +4,11 @@
 #include "services/dbnomics/DBnomicsModels.h"
 
 #include <QComboBox>
+#include <QEvent>
 #include <QHideEvent>
 #include <QLabel>
 #include <QPushButton>
+#include <QSet>
 #include <QShowEvent>
 #include <QStackedWidget>
 #include <QVBoxLayout>
@@ -31,6 +33,7 @@ class DBnomicsScreen : public QWidget, public IStatefulScreen {
   protected:
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void on_providers_loaded(const QVector<services::DbnProvider>& providers);
@@ -63,6 +66,14 @@ class DBnomicsScreen : public QWidget, public IStatefulScreen {
     void render_single_view();
     void assign_series_colors();
     void rebuild_comparison_view();
+    void retranslateUi();
+
+    // DataHub (CLAUDE.md D4): observations are read from `dbnomics:<provider>:<dataset>:<series>`
+    // topics, not from the service's fetch_observations() signal. Catalogue browsing (providers /
+    // datasets / series / search) stays on the service's one-shot callbacks.
+    static QString series_topic(const QString& series_id); // "PROV/DS/CODE" -> topic ("" if malformed)
+    void watch_series(const QString& series_id);           // subscribe (idempotent) + remember
+    void unwatch_unused_series();                          // drop topics no view / slot / selection uses
 
     struct SlotCard {
         DBnomicsChartWidget* chart = nullptr;
@@ -80,6 +91,15 @@ class DBnomicsScreen : public QWidget, public IStatefulScreen {
     QPushButton* single_btn_ = nullptr;
     QPushButton* compare_btn_ = nullptr;
 
+    // Toolbar + toggle chrome (cached for retranslateUi)
+    QLabel* toolbar_title_ = nullptr;
+    QPushButton* fetch_btn_ = nullptr;
+    QPushButton* refresh_btn_ = nullptr;
+    QPushButton* export_btn_ = nullptr;
+    QLabel* chart_type_label_ = nullptr;
+    QLabel* comparison_placeholder_ = nullptr;
+    QLabel* attribution_label_ = nullptr;
+
     services::DbnViewMode view_mode_ = services::DbnViewMode::Single;
     services::DbnChartType single_chart_type_ = services::DbnChartType::Line;
     QVector<services::DbnDataPoint> single_series_;
@@ -87,6 +107,9 @@ class DBnomicsScreen : public QWidget, public IStatefulScreen {
     services::DbnDataPoint last_loaded_data_;
     bool has_pending_data_ = false;
     int provider_count_ = 0;
+
+    QSet<QString> watched_series_; // series ids subscribed on the hub (re-subscribed on every show)
+    QString pending_series_id_;    // the series the user just picked, until its observations arrive
 
     QWidget* comparison_content_ = nullptr;
     QVBoxLayout* comparison_layout_ = nullptr;

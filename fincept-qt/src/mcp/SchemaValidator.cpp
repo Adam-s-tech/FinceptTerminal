@@ -15,13 +15,19 @@ namespace {
 // (Qt stores all numbers as double). For "integer" we additionally require
 // the value to be representable losslessly as an int64.
 bool type_matches(const QString& expected, const QJsonValue& v) {
-    if (expected == "string")  return v.isString();
-    if (expected == "boolean") return v.isBool();
-    if (expected == "array")   return v.isArray();
-    if (expected == "object")  return v.isObject();
-    if (expected == "number")  return v.isDouble();
+    if (expected == "string")
+        return v.isString();
+    if (expected == "boolean")
+        return v.isBool();
+    if (expected == "array")
+        return v.isArray();
+    if (expected == "object")
+        return v.isObject();
+    if (expected == "number")
+        return v.isDouble();
     if (expected == "integer") {
-        if (!v.isDouble()) return false;
+        if (!v.isDouble())
+            return false;
         const double d = v.toDouble();
         return d == static_cast<double>(static_cast<qint64>(d));
     }
@@ -49,7 +55,14 @@ QString validate_typed(const QString& /*key*/, const ToolParam& p, const QJsonVa
         if (!p.enum_values.isEmpty() && !p.enum_values.contains(s))
             return "must be one of [" + p.enum_values.join(",") + "]";
         if (!p.pattern.isEmpty()) {
-            QRegularExpression rx(p.pattern);
+            // anchoredPattern() wraps in \A(?:...)\z so the pattern must match
+            // the WHOLE value. QRegularExpression::match() is a substring
+            // search: an unanchored pattern like "[a-z]+" would happily accept
+            // "../../etc/passwd", and even an "^...$" pattern accepts a
+            // trailing newline because $ matches before a final \n. Tool
+            // patterns are a security control (see run_python_script), so they
+            // must be full-string.
+            QRegularExpression rx(QRegularExpression::anchoredPattern(p.pattern));
             if (!rx.match(s).hasMatch())
                 return "does not match pattern " + p.pattern;
         }
@@ -72,16 +85,21 @@ QString validate_legacy(const QString& /*key*/, const QJsonObject& spec, const Q
         const QJsonArray arr = spec["enum"].toArray();
         bool found = false;
         for (const auto& e : arr) {
-            if (e == v) { found = true; break; }
+            if (e == v) {
+                found = true;
+                break;
+            }
         }
         if (!found) {
             QStringList allowed;
-            for (const auto& e : arr) allowed.append(e.toString());
+            for (const auto& e : arr)
+                allowed.append(e.toString());
             return "must be one of [" + allowed.join(",") + "]";
         }
     }
     if (expected == "string" && spec.contains("pattern")) {
-        QRegularExpression rx(spec["pattern"].toString());
+        // Full-string match — see the note in validate_typed().
+        QRegularExpression rx(QRegularExpression::anchoredPattern(spec["pattern"].toString()));
         if (!rx.match(v.toString()).hasMatch())
             return "does not match pattern " + spec["pattern"].toString();
     }
@@ -108,7 +126,8 @@ Result<void> validate_args(const ToolSchema& schema, QJsonObject& args) {
     // Legacy `properties` may also declare defaults inline.
     for (auto it = schema.properties.constBegin(); it != schema.properties.constEnd(); ++it) {
         const QString& key = it.key();
-        if (args.contains(key)) continue;
+        if (args.contains(key))
+            continue;
         const QJsonObject spec = it.value().toObject();
         if (spec.contains("default") && !schema.params.contains(key))
             args[key] = spec["default"];
@@ -123,6 +142,35 @@ Result<void> validate_args(const ToolSchema& schema, QJsonObject& args) {
     for (const QString& key : all_required) {
         if (!args.contains(key))
             return Result<void>::err(("Missing required parameter: " + key).toStdString());
+    }
+
+    // ── Step 2.2: reject arguments the schema doesn't declare ────────────
+    // Unknown keys used to be dropped silently, which let a call written
+    // against an imagined API look like it worked: recalculate_excel_sheet
+    // received {"workbook_name": …, "tab_name": …}, had both ignored, fell back
+    // to sheet_index=-1 (the active sheet) and reported success — so a model
+    // that had invented a whole workbook API got a green light for it.
+    //
+    // Only enforced for tools with a structured schema; legacy `properties`-only
+    // tools keep the permissive behaviour. Underscore-prefixed keys are protocol
+    // metadata (_meta and friends), not tool arguments.
+    if (!schema.params.isEmpty()) {
+        QStringList unknown;
+        for (const QString& key : args.keys()) {
+            if (key.startsWith(QLatin1Char('_')))
+                continue;
+            if (schema.params.contains(key) || schema.properties.contains(key))
+                continue;
+            unknown.append(key);
+        }
+        if (!unknown.isEmpty()) {
+            QStringList accepted = schema.params.keys();
+            accepted.sort();
+            return Result<void>::err(("Unknown parameter(s): " + unknown.join(", ") +
+                                      ". This tool accepts only: " + accepted.join(", ") +
+                                      ". Call tool_describe for its schema before calling it again.")
+                                         .toStdString());
+        }
     }
 
     // ── Step 2.5: coerce stringified primitives, objects, arrays ─────────

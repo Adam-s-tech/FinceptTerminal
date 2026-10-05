@@ -10,6 +10,7 @@
 #include <QObject>
 #include <QTimer>
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -48,7 +49,10 @@ class McpManager : public QObject {
     std::vector<ExternalTool> get_all_external_tools();
     Result<QJsonObject> call_external_tool(const QString& server_id, const QString& tool_name, const QJsonObject& args);
 
-    /// Returns captured log lines for a running server (empty if not running).
+    /// Returns captured log lines for a running server. For a server whose last start
+    /// FAILED there is no live client, so this falls back to the output that attempt
+    /// produced (kept until the server is started successfully or removed) — that output
+    /// is the only explanation of why it errored. Empty if neither exists.
     QStringList get_logs(const QString& id) const;
 
     McpManager(const McpManager&) = delete;
@@ -65,14 +69,22 @@ class McpManager : public QObject {
     QHash<QString, McpServerConfig> configs_;
     QHash<QString, std::vector<ExternalTool>> tool_cache_;
     QHash<QString, int> restart_attempts_;
+    // Output of the most recent FAILED start per server (a failed attempt's McpClient is
+    // discarded, taking its log buffer with it). One entry per server id, each bounded by
+    // McpClient's own 500-line cap; guarded by mutex_.
+    QHash<QString, QStringList> last_start_log_;
 
     QTimer* health_timer_ = nullptr;
     mutable QMutex mutex_;
+    std::atomic<bool> health_check_running_{false}; // guards against overlapping async health passes
 
     static constexpr int MAX_RESTART_ATTEMPTS = 3;
 
     McpClient* get_client(const QString& id) const;
     void refresh_tools_for(const QString& id);
+    // Handles one server's ping result on the MAIN thread (restart uses QProcess,
+    // which is thread-affine and must stay on the thread that owns it).
+    void on_health_result(const QString& id, bool ok);
 
   private slots:
     void do_health_check();

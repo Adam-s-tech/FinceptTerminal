@@ -63,62 +63,68 @@ static QString parse_422_detail(const QJsonDocument& doc) {
     return msgs.join("\n");
 }
 
-void AuthApi::request(const QString& method, const QString& endpoint, const QJsonObject& body, Callback cb) {
+void AuthApi::request(const QString& method, const QString& endpoint, const QJsonObject& body, Callback cb,
+                      const QObject* context) {
     auto& http = fincept::HttpClient::instance();
 
     auto handle = [cb, endpoint](fincept::Result<QJsonDocument> result) {
-        // ── No body / network error path ─────────────────────────────────────
-        // HttpClient returns err() only when there is NO parseable JSON body.
-        // In that case we fall back to status-based messages.
+        // ── HTTP error / transport error path ────────────────────────────────
+        // Any non-2xx is err(). HttpClient carries the server's own wording in
+        // the error string ("HTTP_<status>: <message>") — prefer it, since that
+        // is where the specific registration/verification failures live. Fall
+        // back to a friendly status-specific message when the body had none.
         if (result.is_err()) {
-            QString err = QString::fromStdString(result.error());
-            int status = 0;
-            if (err.startsWith("HTTP_"))
-                status = err.mid(5).toInt();
+            const int status = fincept::HttpClient::status_from_error(result.error());
+            // 401/403 are deliberately message-free (HttpClient keeps them a
+            // bare "HTTP_<status>" for session-expiry detection), so they land
+            // in the switch below and get our own wording.
+            QString msg = status > 0 ? fincept::HttpClient::message_from_error(result.error()) : QString{};
+            if (!msg.isEmpty()) {
+                cb({false, {}, msg, status});
+                return;
+            }
 
-            QString msg;
             switch (status) {
                 case 400:
-                    msg = "Bad request. Please check your input.";
+                    msg = tr("Bad request. Please check your input.");
                     break;
                 case 401:
-                    msg = "Incorrect email or password.";
+                    msg = tr("Incorrect email or password.");
                     break;
                 case 403:
-                    msg = "Access denied. Your account may be suspended.";
+                    msg = tr("Access denied. Your account may be suspended.");
                     break;
                 case 404:
-                    msg = "Account not found. Please check your email.";
+                    msg = tr("Account not found. Please check your email.");
                     break;
                 case 409:
-                    msg = "An account with this email or username already exists.";
+                    msg = tr("An account with this email or username already exists.");
                     break;
                 case 422:
-                    msg = "Please check your input and try again.";
+                    msg = tr("Please check your input and try again.");
                     break;
                 case 429:
-                    msg = "Too many attempts. Please wait a moment and try again.";
+                    msg = tr("Too many attempts. Please wait a moment and try again.");
                     break;
                 case 500:
-                    msg = "Server error. Please try again later.";
+                    msg = tr("Server error. Please try again later.");
                     break;
                 case 503:
-                    msg = "Service unavailable. Please try again later.";
+                    msg = tr("Service unavailable. Please try again later.");
                     break;
                 default:
-                    msg = status > 0 ? QString("Request failed (HTTP %1). Please try again.").arg(status)
-                                     : "Network error. Check your connection.";
+                    msg = status > 0 ? tr("Request failed (HTTP %1). Please try again.").arg(status)
+                                     : tr("Network error. Check your connection.");
             }
             cb({false, {}, msg, status});
             return;
         }
 
-        // ── JSON body path (covers both success and all HTTP error responses) ─
+        // ── 2xx body path ────────────────────────────────────────────────────
+        // The backend reports most business-logic failures with HTTP 200 and a
+        // {"success": false, ...} envelope, so the checks below still matter.
         auto doc = result.value();
         auto obj = doc.object();
-
-        // Infer HTTP status from body when available (HttpClient doesn't pass status with ok())
-        // We detect error bodies by absence of positive signals below.
 
         // 1. Pydantic 422 field-level validation errors: {"detail": [{loc, msg, type}, ...]}
         if (obj.contains("detail") && obj["detail"].isArray()) {
@@ -145,7 +151,7 @@ void AuthApi::request(const QString& method, const QString& endpoint, const QJso
             if (msg.isEmpty())
                 msg = obj.value("detail").toString();
             if (msg.isEmpty())
-                msg = "Request failed. Please try again.";
+                msg = tr("Request failed. Please try again.");
             cb({false, obj, msg, 200});
             return;
         }
@@ -162,69 +168,80 @@ void AuthApi::request(const QString& method, const QString& endpoint, const QJso
         cb({true, obj, {}, 200});
     };
 
+    // Forward `context` so HttpClient auto-disconnects the handler if the caller
+    // is destroyed mid-flight. Dropping it scoped every callback to the AuthApi
+    // singleton instead of the caller — including PricingScreen's checkout-token
+    // call, which spans a payment-provider round trip (the longest-latency call
+    // in the app, and exactly when a user is likely to close the window).
     if (method == "GET")
-        http.get(endpoint, handle);
+        http.get(endpoint, handle, context);
     else if (method == "POST")
-        http.post(endpoint, body, handle);
+        http.post(endpoint, body, handle, context);
     else if (method == "PUT")
-        http.put(endpoint, body, handle);
+        http.put(endpoint, body, handle, context);
     else if (method == "DELETE")
-        http.del(endpoint, handle);
+        http.del(endpoint, handle, context);
 }
 
 // ── Unauthenticated auth endpoints ───────────────────────────────────────────
 
-void AuthApi::login(const LoginRequest& req, Callback cb) {
-    request("POST", "/user/login", req.to_json(), cb);
+void AuthApi::login(const LoginRequest& req, Callback cb, const QObject* context) {
+    request("POST", "/user/login", req.to_json(), cb, context);
 }
 
-void AuthApi::register_user(const RegisterRequest& req, Callback cb) {
-    request("POST", "/user/register", req.to_json(), cb);
+void AuthApi::register_user(const RegisterRequest& req, Callback cb, const QObject* context) {
+    request("POST", "/user/register", req.to_json(), cb, context);
 }
 
-void AuthApi::verify_otp(const VerifyOtpRequest& req, Callback cb) {
-    request("POST", "/user/verify-otp", req.to_json(), cb);
+void AuthApi::verify_otp(const VerifyOtpRequest& req, Callback cb, const QObject* context) {
+    request("POST", "/user/verify-otp", req.to_json(), cb, context);
 }
 
-void AuthApi::forgot_password(const ForgotPasswordRequest& req, Callback cb) {
-    request("POST", "/user/forgot-password", req.to_json(), cb);
+void AuthApi::forgot_password(const ForgotPasswordRequest& req, Callback cb, const QObject* context) {
+    request("POST", "/user/forgot-password", req.to_json(), cb, context);
 }
 
-void AuthApi::reset_password(const ResetPasswordRequest& req, Callback cb) {
-    request("POST", "/user/reset-password", req.to_json(), cb);
+void AuthApi::reset_password(const ResetPasswordRequest& req, Callback cb, const QObject* context) {
+    request("POST", "/user/reset-password", req.to_json(), cb, context);
 }
 
-void AuthApi::verify_mfa(const QString& email, const QString& otp, Callback cb) {
+void AuthApi::verify_mfa(const QString& email, const QString& otp, Callback cb, const QObject* context) {
     QJsonObject body;
     body["email"] = email;
     body["otp"] = otp;
-    request("POST", "/user/verify-mfa", body, cb);
+    request("POST", "/user/verify-mfa", body, cb, context);
+}
+
+void AuthApi::redeem_desktop_handoff(const QString& code, Callback cb, const QObject* context) {
+    QJsonObject body;
+    body["token"] = code;
+    request("POST", "/user/auth/desktop-handoff/redeem", body, cb, context);
 }
 
 // ── Authenticated endpoints (HttpClient carries X-API-Key + X-Session-Token) ─
 
-void AuthApi::logout(Callback cb) {
-    request("POST", "/user/logout", {}, cb);
+void AuthApi::logout(Callback cb, const QObject* context) {
+    request("POST", "/user/logout", {}, cb, context);
 }
 
-void AuthApi::session_pulse(Callback cb) {
-    request("GET", "/user/session-pulse", {}, cb);
+void AuthApi::session_pulse(Callback cb, const QObject* context) {
+    request("GET", "/user/session-pulse", {}, cb, context);
 }
 
-void AuthApi::get_user_profile(Callback cb) {
-    request("GET", "/user/profile", {}, cb);
+void AuthApi::get_user_profile(Callback cb, const QObject* context) {
+    request("GET", "/user/profile", {}, cb, context);
 }
 
 // ── Subscription / payment ────────────────────────────────────────────────────
 
-void AuthApi::get_subscription_plans(Callback cb) {
-    request("GET", "/cashfree/plans", {}, cb);
+void AuthApi::get_subscription_plans(Callback cb, const QObject* context) {
+    request("GET", "/cashfree/plans", {}, cb, context);
 }
 
-void AuthApi::generate_checkout_token(const QString& plan_id, Callback cb) {
+void AuthApi::generate_checkout_token(const QString& plan_id, Callback cb, const QObject* context) {
     QJsonObject body;
     body["plan_id"] = plan_id;
-    request("POST", "/user/generate-checkout-token", body, cb);
+    request("POST", "/user/generate-checkout-token", body, cb, context);
 }
 
 } // namespace fincept::auth

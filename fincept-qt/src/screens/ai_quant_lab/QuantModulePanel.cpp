@@ -5,11 +5,12 @@
 // Result rendering (display_result + the huge on_result dispatch) lives in
 // QuantModulePanel_Results.cpp.
 #include "screens/ai_quant_lab/QuantModulePanel.h"
+
+#include "core/currency/Currency.h"
+#include "core/logging/Logger.h"
 #include "screens/ai_quant_lab/QuantModulePanel_Common.h"
 #include "screens/ai_quant_lab/QuantModulePanel_GsHelpers.h"
 #include "screens/ai_quant_lab/QuantModulePanel_Styles.h"
-
-#include "core/logging/Logger.h"
 #include "services/ai_quant_lab/AIQuantLabService.h"
 #include "services/file_manager/FileManagerService.h"
 #include "storage/repositories/LlmProfileRepository.h"
@@ -22,25 +23,30 @@
 #include <QDateTime>
 #include <QDateTimeAxis>
 #include <QDesktopServices>
-#include <QLineSeries>
-#include <QValueAxis>
 #include <QFile>
 #include <QFileInfo>
+#include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QJsonDocument>
-#include <QRegularExpression>
-#include <QFrame>
+#include <QJsonParseError>
+#include <QKeySequence>
+#include <QLineSeries>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QProgressBar>
+#include <QRegularExpression>
 #include <QScrollArea>
+#include <QShortcut>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimer>
 #include <QUrl>
+#include <QValueAxis>
 
 #include <cmath>
 
@@ -67,6 +73,12 @@ QPushButton* QuantModulePanel::make_run_button(const QString& text, QWidget* par
     auto* btn = new QPushButton(text, parent);
     btn->setCursor(Qt::PointingHandCursor);
     btn->setFixedHeight(32);
+    // Tagged so the panel-wide Ctrl+Enter shortcut (build_ui) can find the run
+    // button belonging to the currently visible tab, and so screen readers
+    // announce something meaningful.
+    btn->setObjectName(QStringLiteral("quantRunButton"));
+    btn->setAccessibleName(text);
+    btn->setAccessibleDescription(tr("Run this analysis (Ctrl+Enter)"));
     btn->setStyleSheet(QString("QPushButton { background:%1; color:%2; font-weight:700; border:none;"
                                "padding:0 20px; border-radius:2px; letter-spacing:0.8px; }"
                                "QPushButton:hover { background:%3; }"
@@ -81,11 +93,24 @@ QWidget* QuantModulePanel::build_input_row(const QString& label, QWidget* input,
     auto* hl = new QHBoxLayout(row);
     hl->setContentsMargins(0, 2, 0, 2);
     hl->setSpacing(8);
-    auto* lbl = new QLabel(label, row);
+    auto* lbl = new QLabel(row);
     lbl->setFixedWidth(160);
+    // Bind "($)" unit hints to the preferred currency; others stay plain.
+    if (label.endsWith("($)")) {
+        QString base = label;
+        base.chop(3); // strip "($)"
+        cur::bindLabel(lbl, base + "(%1)");
+    } else {
+        lbl->setText(label);
+    }
     lbl->setStyleSheet(QString("color:%1; background:transparent;").arg(ui::colors::TEXT_SECONDARY()));
+    lbl->setBuddy(input);
     hl->addWidget(lbl);
     hl->addWidget(input, 1);
+    // Every parameter control gets an accessible name — without this a screen
+    // reader announces bare "edit"/"combo box" for ~200 unlabeled inputs.
+    if (input && input->accessibleName().isEmpty())
+        input->setAccessibleName(lbl->text().isEmpty() ? label : lbl->text());
     return row;
 }
 
@@ -125,8 +150,8 @@ QJsonObject QuantModulePanel::llm_config_from_combo(QComboBox* combo) const {
     if (profile_id.isEmpty())
         return {};
 
-    auto resolved = LlmProfileRepository::instance().resolve_for_context("ai_quant_lab", profile_id);
-    // resolve_for_context uses context_id as a profile_id hint — use get_profile directly
+    // resolve_for_context() takes the context id, not a profile id — the combo
+    // already holds a concrete profile id, so read it directly.
     auto result = LlmProfileRepository::instance().get_profile(profile_id);
     if (!result.is_ok())
         return {};
@@ -147,10 +172,16 @@ QuantModulePanel::QuantModulePanel(const QuantModule& mod, QWidget* parent) : QW
     connect_service();
     connect(&ui::ThemeManager::instance(), &ui::ThemeManager::theme_changed, this,
             [this](const ui::ThemeTokens&) { refresh_theme(); });
+    // Apply the themed header / status / base colours now: refresh_theme() was only ever reached
+    // on a theme CHANGE, so every panel opened with an unstyled header bar and accent-less title.
+    refresh_theme();
 }
 
 void QuantModulePanel::refresh_theme() {
-    setStyleSheet(QString("background:%1; color:%2;").arg(ui::colors::BG_BASE(), ui::colors::TEXT_PRIMARY()));
+    // Panel-wide base colours plus the shared table rules, so a result table that is created
+    // without its own style sheet still matches the theme.
+    setStyleSheet(QString("* { background:%1; color:%2; }").arg(ui::colors::BG_BASE(), ui::colors::TEXT_PRIMARY()) +
+                  table_ss());
 
     if (panel_header_)
         panel_header_->setStyleSheet(QString("background:%1; border-bottom:1px solid %2;")
@@ -165,6 +196,49 @@ void QuantModulePanel::refresh_theme() {
 
     if (status_label_)
         status_label_->setStyleSheet(QString("color:%1; background:transparent;").arg(ui::colors::TEXT_TERTIARY()));
+}
+
+// ── Re-translation ───────────────────────────────────────────────────────────
+// Static chrome only: re-apply tr() text to the persistent, member-stored
+// widgets. The module header (label/category) is data-derived and kept
+// verbatim; status_label_ is transient state set per-operation; dynamically
+// built input forms and result cards re-render in the active language on their
+// next build/fetch.
+
+void QuantModulePanel::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+// Loading-spinner timers are created by show_loading() and named "quantSpinnerTimer". They used to
+// keep ticking (8 Hz, repainting a hidden label) for as long as a request was in flight, even after
+// the user switched to another module or screen.
+void QuantModulePanel::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    for (auto* t : findChildren<QTimer*>(QStringLiteral("quantSpinnerTimer")))
+        t->start();
+}
+
+void QuantModulePanel::hideEvent(QHideEvent* event) {
+    QWidget::hideEvent(event);
+    for (auto* t : findChildren<QTimer*>(QStringLiteral("quantSpinnerTimer")))
+        t->stop();
+}
+
+void QuantModulePanel::retranslateUi() {
+    // deep_agent / rd_agent persistent output surfaces
+    if (agent_output_)
+        agent_output_->setPlaceholderText(tr("Analysis results will appear here..."));
+    if (rd_agent_output_)
+        rd_agent_output_->setPlaceholderText(tr("Select a task and click GET FACTORS / GET MODEL to view results..."));
+    if (rd_task_table_)
+        rd_task_table_->setHorizontalHeaderLabels(
+            {tr("Task ID"), tr("Type"), tr("Status"), tr("Progress"), tr("Best IC"), tr("Elapsed")});
+
+    // rl_trading persistent controls
+    if (rl_train_button_)
+        rl_train_button_->setText(tr("TRAIN RL AGENT"));
 }
 
 void QuantModulePanel::connect_service() {
@@ -285,6 +359,24 @@ void QuantModulePanel::build_ui() {
 
     scroll->setWidget(content);
     root->addWidget(scroll, 1);
+
+    // ── Ctrl+Enter runs the visible tab's action ─────────────────────────────
+    // One shortcut per panel rather than QPushButton::setShortcut on every run
+    // button: N buttons sharing a window-level shortcut is an "ambiguous
+    // shortcut overload" in Qt and silently does nothing. Scoped to this widget
+    // subtree so it never fires for another screen.
+    auto* run_shortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Return")), this);
+    run_shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(run_shortcut, &QShortcut::activated, this, [this]() {
+        // isVisible() is false for widgets on a non-current QTabWidget page, so
+        // this resolves to the run button the user is actually looking at.
+        for (auto* btn : this->findChildren<QPushButton*>(QStringLiteral("quantRunButton"))) {
+            if (btn->isVisible() && btn->isEnabled()) {
+                btn->click();
+                return;
+            }
+        }
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -338,17 +430,24 @@ QWidget* QuantModulePanel::build_generic_panel() {
 
     auto* run = make_run_button(tr("EXECUTE"), w);
     connect(run, &QPushButton::clicked, this, [this, params_edit]() {
-        status_label_->setText(tr("Running..."));
         auto cmd_text = text_inputs_["gen_command"]->text().trimmed();
         if (cmd_text.isEmpty())
-            cmd_text = "analyze";
-        auto json_text = params_edit->toPlainText().trimmed();
+            cmd_text = QStringLiteral("analyze");
+        const auto json_text = params_edit->toPlainText().trimmed();
         QJsonObject params;
         if (!json_text.isEmpty()) {
-            auto doc = QJsonDocument::fromJson(json_text.toUtf8());
-            if (!doc.isNull())
-                params = doc.object();
+            // A malformed body used to be dropped silently and the command ran
+            // with no parameters at all.
+            QJsonParseError perr{};
+            const auto doc = QJsonDocument::fromJson(json_text.toUtf8(), &perr);
+            if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+                display_error(tr("JSON parameters must be an object like {\"ticker\":\"AAPL\"} — %1")
+                                  .arg(perr.errorString()));
+                return;
+            }
+            params = doc.object();
         }
+        show_loading(tr("Running %1 %2...").arg(module_.script, cmd_text));
         AIQuantLabService::instance().run_module(module_.id, cmd_text, params);
     });
     vl->addWidget(run);
@@ -368,6 +467,9 @@ QWidget* QuantModulePanel::build_generic_panel() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void QuantModulePanel::clear_results() {
+    // New content (a result, an error) supersedes the in-flight request, so the run buttons that
+    // show_loading() disabled accept clicks again. show_loading() re-disables them after this.
+    set_run_buttons_enabled(this, true);
     if (!results_layout_)
         return;
     while (results_layout_->count() > 0) {
@@ -380,8 +482,22 @@ void QuantModulePanel::clear_results() {
 
 void QuantModulePanel::display_error(const QString& msg) {
     clear_results();
-    auto* err = new QLabel(msg);
+    if (!results_layout_)
+        return;
+
+    // Python tracebacks can be thousands of lines; an unbounded QLabel makes the
+    // scroll area unusable. Keep the tail — that's where the exception is.
+    constexpr int kMaxChars = 4000;
+    QString text = msg;
+    if (text.size() > kMaxChars)
+        text = tr("… (%1 earlier characters omitted) …\n\n").arg(text.size() - kMaxChars) +
+               text.right(kMaxChars);
+
+    auto* err = new QLabel(text);
     err->setWordWrap(true);
+    // Selectable so the user can copy the traceback into a bug report.
+    err->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+    err->setAccessibleName(tr("Error details"));
     err->setStyleSheet(QString("color:%1; font-size:%2px; font-family:%3; padding:12px;"
                                "background:rgba(220,38,38,0.08); border:1px solid rgba(220,38,38,0.3);"
                                "border-radius:2px;")
@@ -389,15 +505,22 @@ void QuantModulePanel::display_error(const QString& msg) {
                            .arg(ui::fonts::SMALL)
                            .arg(ui::fonts::DATA_FAMILY));
     results_layout_->addWidget(err);
-    status_label_->setText(tr("Error"));
+    if (status_label_)
+        status_label_->setText(tr("Error"));
 }
-
 
 // ── Loading spinner shown while a Python op is in flight ─────────────────────
 
 void QuantModulePanel::show_loading(const QString& message) {
     clear_results();
-    status_label_->setText(message);
+    if (!results_layout_)
+        return;
+    // One analysis at a time: a second click used to start a duplicate Python process (a second
+    // multi-minute training run) whose result then replaced the first. Re-enabled by whichever
+    // result / error comes back (clear_results()).
+    set_run_buttons_enabled(this, false);
+    if (status_label_)
+        status_label_->setText(message);
 
     // Container card
     auto* box = new QWidget(this);
@@ -419,15 +542,18 @@ void QuantModulePanel::show_loading(const QString& message) {
     spinner->setText(kFrames[0]);
 
     auto* timer = new QTimer(box);
+    timer->setObjectName(QStringLiteral("quantSpinnerTimer"));
     timer->setInterval(120);
     int frame_idx = 0;
     QPointer<QLabel> spin_guard(spinner);
     connect(timer, &QTimer::timeout, box, [spin_guard, frame_idx]() mutable {
-        if (!spin_guard) return;
+        if (!spin_guard)
+            return;
         frame_idx = (frame_idx + 1) % kFrames.size();
         spin_guard->setText(kFrames[frame_idx]);
     });
-    timer->start();
+    if (isVisible())
+        timer->start(); // otherwise showEvent() starts it when the panel is next shown
 
     auto* msg = new QLabel(message, box);
     msg->setWordWrap(true);
@@ -438,8 +564,7 @@ void QuantModulePanel::show_loading(const QString& message) {
                                "first invocation per session takes longer (cold start)."),
                             box);
     hint->setWordWrap(true);
-    hint->setStyleSheet(QString("color:%1; font-size:9px; background:transparent;")
-                            .arg(ui::colors::TEXT_TERTIARY()));
+    hint->setStyleSheet(QString("color:%1; font-size:9px; background:transparent;").arg(ui::colors::TEXT_TERTIARY()));
 
     auto* text_col = new QVBoxLayout;
     text_col->setContentsMargins(0, 0, 0, 0);
@@ -453,14 +578,43 @@ void QuantModulePanel::show_loading(const QString& message) {
     results_layout_->addWidget(box);
 }
 
-
 void QuantModulePanel::on_error(const QString& module_id, const QString& message) {
     if (module_id != module_.id)
         return;
-    if (module_id == "rl_trading" && rl_train_button_) {
-        rl_train_button_->setEnabled(true);
+    if (module_id == "rl_trading") {
+        if (rl_train_button_)
+            rl_train_button_->setEnabled(true);
+        if (rl_progress_bar_)
+            rl_progress_bar_->setValue(0);
+        if (rl_progress_stats_)
+            rl_progress_stats_->setText(tr("Training failed — see the log below."));
     }
-    display_error(message);
+    // Rolling Retraining owns a bespoke progress bar; leave it in a readable
+    // failed state rather than a stale "Starting..." forever.
+    if (auto* pb = this->findChild<QProgressBar*>(QStringLiteral("rr_progress")))
+        pb->setFormat(tr("Failed"));
+    if (module_id == QLatin1String("rolling_retraining"))
+        set_retrain_busy(this, false);
+
+    // message is the script's stderr (PythonRunner::PythonResult::error), so the
+    // user sees the actual traceback. Prefix it with the script that failed —
+    // otherwise a bare traceback gives no clue which module produced it.
+    const QString text = message.trimmed().isEmpty() ? tr("%1 failed with no diagnostic output.").arg(module_.script)
+                                                     : tr("%1 failed:\n\n%2").arg(module_.script, message.trimmed());
+
+    // The Deep Agent panel has two tabs. display_error() paints into the Deep Analysis tab's
+    // results pane, so a failed RD-Agent request (status check, task list, stop, ...) showed
+    // nothing in the tab the user was looking at. When the RD-Agent output box is the visible
+    // one, report there and on its status strip instead.
+    if (module_id == QLatin1String("deep_agent") && rd_agent_output_ && rd_agent_output_->isVisible()) {
+        rd_agent_output_->setPlainText(text);
+        if (auto* lbl = this->findChild<QLabel*>(QStringLiteral("rdStatusTxt")))
+            lbl->setText(tr("Error — see output below"));
+        if (status_label_)
+            status_label_->setText(tr("Error"));
+        return;
+    }
+    display_error(text);
 }
 
 } // namespace fincept::screens

@@ -1,284 +1,146 @@
-# 金融終端機 (Fincept Terminal)
+> [!IMPORTANT]
+> ## 🔒 Fincept Terminal **Enterprise** — 私有版本。上線特價：**立減 90%，限時。**
+> 自有即時數據 · 多代理 AI 研究 · 即時券商與演算法交易 · 優先支援
+>
+> | 方案 | 原價 | **上線特價** |
+> |:--|:--:|:--:|
+> | **Exclusive** | ~~99 美元~~ | **10 美元** /使用者/月 |
+> | **Exclusive+** | ~~199 美元~~ | **20 美元** /使用者/月 |
+> | **Exclusive Pro** ⭐ 最受歡迎 | ~~299 美元~~ | **40 美元** /使用者/月 |
+>
+> [![🔥 鎖定上線特價 →](https://img.shields.io/badge/%F0%9F%94%A5_%E9%8E%96%E5%AE%9A%E4%B8%8A%E7%B7%9A%E7%89%B9%E5%83%B9_%E2%86%92-C06524?style=for-the-badge)](https://fincept.in/enterprise/signup) &nbsp; [![比較方案](https://img.shields.io/badge/%E6%AF%94%E8%BC%83%E6%96%B9%E6%A1%88-1F2328?style=for-the-badge)](https://fincept.in/pricing)
+>
+> <sub>早期席次永久鎖定上線特價 · 無年度綁約，隨時取消 · 本開源儲存庫繼續以 AGPL-3.0 免費提供</sub>
+
+# Fincept Terminal
 
 <div align="center">
 
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-C06524)](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/LICENSE)[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus)](https://isocpp.org/)[![Qt6](https://img.shields.io/badge/Qt-6-41CD52?logo=qt&logoColor=white)](https://www.qt.io/)[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)[![Hits](https://hits.sh/github.com/Fincept-Corporation/FinceptTerminal.svg?label=Visits)](https://hits.sh/github.com/Fincept-Corporation/FinceptTerminal/)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-C06524)](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/LICENSE)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus)](https://isocpp.org/)
+[![Qt6](https://img.shields.io/badge/Qt-6-41CD52?logo=qt&logoColor=white)](https://www.qt.io/)
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
-[![Twitter](https://img.shields.io/badge/-Twitter-1DA1F2?style=flat-square&logo=twitter&logoColor=white)](https://twitter.com/intent/tweet?text=Check%20out%20FinceptTerminal&url=https%3A//github.com/Fincept-Corporation/FinceptTerminal/)[![LinkedIn](https://img.shields.io/badge/-LinkedIn-0077B5?style=flat-square&logo=linkedin&logoColor=white)](https://www.linkedin.com/sharing/share-offsite/?url=https%3A//github.com/Fincept-Corporation/FinceptTerminal/)[![Facebook](https://img.shields.io/badge/-Facebook-1877F2?style=flat-square&logo=facebook&logoColor=white)](https://www.facebook.com/sharer/sharer.php?u=https%3A//github.com/Fincept-Corporation/FinceptTerminal/)[![Reddit](https://img.shields.io/badge/-Reddit-FF4500?style=flat-square&logo=reddit&logoColor=white)](https://www.reddit.com/submit?url=https%3A//github.com/Fincept-Corporation/FinceptTerminal/&title=FinceptTerminal)[![WhatsApp](https://img.shields.io/badge/-WhatsApp-25D366?style=flat-square&logo=whatsapp&logoColor=white)](https://api.whatsapp.com/send?text=Check%20out%20FinceptTerminal%3A%20https%3A//github.com/Fincept-Corporation/FinceptTerminal/)
+### **唯一的上限是你的思考，而不是資料。**
 
-### **你的思維是唯一的限制。數據不是。**
+面向機構級金融分析、AI 自動化與無限資料連接的前沿金融智慧平台。
 
-最先進的金融情報平台，具備 CFA 級別分析、人工智慧自動化，以及無限的數據連接能力。
+[📥 下載](https://github.com/Fincept-Corporation/FinceptTerminal/releases) · [🏢 Enterprise](https://fincept.in/enterprise) · [💳 價格](https://fincept.in/pricing) · [📖 手冊](https://fincept.in/manual) · [💬 Discord](https://discord.gg/ae87a8ygbN)
 
-[📥 下載](https://github.com/Fincept-Corporation/FinceptTerminal/releases)·[📚 官方文件](https://github.com/Fincept-Corporation/FinceptTerminal/tree/main/docs)·[💬 討論區](https://github.com/Fincept-Corporation/FinceptTerminal/discussions)·[💬 Discord](https://discord.gg/ae87a8ygbN)·[🤝 合作夥伴](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/docs/COMMERCIAL_LICENSE.md)
-
-![Fincept Terminal](https://raw.githubusercontent.com/Fincept-Corporation/FinceptTerminal/main/images/Dashboard.png)
+![Fincept Terminal](https://raw.githubusercontent.com/Fincept-Corporation/FinceptTerminal/main/images/FinceptBanner.png)
 
 </div>
 
-* * *
+---
 
 ## 關於
 
-**Fincept Terminal v4** 是一個純原生的 C++20 桌面應用程式。它採用 **Qt6** 負責使用者介面與圖表渲染，並嵌入 **Python** 作為分析引擎，在單一原生執行檔中，提供媲美專業金融終端機級別的強大效能。
+**Fincept Terminal** 是一款用於金融研究的原生 C++20 桌面終端機 —— Qt6 介面、內嵌 Python 3.11 分析引擎、單一執行檔，不依賴 Electron。
 
-* * *
+兩個版本執行在同一套資料核心之上。**[Enterprise](https://fincept.in/enterprise)** 是團隊日常開發的私有閉源版本，面向基金、家族辦公室與研究團隊。**本儲存庫**是免費的 AGPL-3.0 版本 —— 學習、個人使用、學術研究 —— 每月發布一次。
 
-## 核心特色
+如果你是學生、愛好者或學術研究者，用開源版。如果你是機構，或者靠終端機賺錢，用 Enterprise：AGPL 的傳染性條款不適用，而開源版的真實成本是你自己的資料與 LLM 帳單，按 token 計費且沒有上限。
 
-| **功能** | **描述** |
-| ----------------- | -------------------------------------------------------------------------------------------------------------- |
-| 📊**CFA 級別分析** | DCF 模型、投資組合最佳化 (Portfolio Optimization)、風險指標（VaR、夏普比率）、透過嵌入式 Python 進行衍生性金融商品定價                                                                |
-| 🤖**AI 代理** | 20 多種投資者角色（巴菲特、達里歐、葛拉漢）、避險基金策略、**本地大型語言模型 (LLM) 支援**、多模型供應商（OpenAI、Anthropic、Gemini、Groq、DeepSeek、MiniMax、OpenRouter、Ollama） |
-| 🌐**100+ 數據連接器** | DBnomics、Polygon、Kraken、Yahoo 財經、FRED、IMF、世界銀行、AkShare、政府 API，以及可選的替代數據疊加（例如用於股票研究的 Adanos 市場情緒數據）                    |
-| 📈**實盤交易** | 加密貨幣（Kraken/HyperLiquid WebSocket）、股票、演算法交易、模擬交易引擎 (Paper Trading)                                                              |
-| 🔬**量化函式庫套件** | 18 個量化分析模組 —— 定價、風險、隨機微積分 (Stochastic)、波動率、固定收益                                                                                   |
-| 🚢**全球情報** | 海上船舶追蹤、地緣政治分析、關聯性映射、衛星數據                                                                                          |
-| 🎨**視覺化工作流程** | 支援自動化管線 (Pipeline) 與 MCP 工具整合的節點編輯器 (Node Editor)                                                                                         |
-| 🧠**AI 量化實驗室** | 機器學習模型、因子發掘 (Factor Discovery)、高頻交易 (HFT)、強化學習交易                                                                                        |
+| | 開源版 | **Enterprise** |
+|---|---|---|
+| **授權條款** | AGPL-3.0 —— 強傳染性 | 專有 —— 無 copyleft 義務 |
+| **成本** | 免費，另加自付的資料與 LLM 帳單 | 每位使用者每月 ~~99 / 199 / 299 美元~~ **10 / 20 / 40 美元**（上線特價）|
+| **資料** | 免費公開資料來源，需自備金鑰 | 專有資料集、更長歷史、時點資料 |
+| **AI** | 自備 LLM 金鑰 | 含 400–5,000 點數 · 多代理研究 · 私有資料室 |
+| **交易** | 模擬交易 + 券商串接 | 即時券商路由 + 即時演算法部署 |
+| **管控** | — | SSO/SAML、稽核紀錄、RBAC、SLA 保障支援 |
 
-* * *
+[**了解 Enterprise →**](https://fincept.in/enterprise) · [完整比較](https://fincept.in/comparison) · [價格](https://fincept.in/pricing) · [常見問題](https://fincept.in/faq)
 
-* * *
+---
+
+## Enterprise
+
+六大業務台、41 個模組 —— 代理研究、量化實驗室與回測、深度基本面研究、市場與執行、總體與全球情報，以及你的專屬工作區。全部收錄於一本 [700 頁手冊](https://fincept.in/manual)。
+
+| | **Exclusive** | **Exclusive+** | **Exclusive Pro** ★ |
+|---|---|---|---|
+| | ~~99 美元~~ **10 美元**/使用者/月 | ~~199 美元~~ **20 美元**/使用者/月 | ~~299 美元~~ **40 美元**/使用者/月 |
+| AI 點數 / 月 | 400 | 2,000 | 5,000 |
+| 深度研究 + 代理團隊 | — | ✓ | ✓ |
+| 即時交易 + 演算法 | — | — | ✓ |
+
+按月計費、無綁約、無最低席次、按季付款享 9 折 —— 上線特價下折合**每位使用者每年 120–480 美元**，而一個彭博終端機席次約為 27,000 美元。**大專院校：** 5 個 Exclusive Pro 席次每月 **699 美元**。這就是完整價目表：沒有議價報價，也沒有另外販售的商業授權。
+
+Enterprise 需要獨立帳號 —— 免費 Fincept 帳號無法登入。
+
+[**建立帳號**](https://fincept.in/enterprise/signup) · [**預約導覽**](https://calendly.com/nikultilak/fincept-terminal-demo)
+
+---
 
 ## 安裝
 
-### 選項 1 — 下載預先建置的二進位檔（推薦）
+**Windows x64**、**Linux x64**（`.run` / `.deb` / `.rpm`）與 **macOS（Apple 晶片）**的安裝檔請見 [Releases 頁面](https://github.com/Fincept-Corporation/FinceptTerminal/releases/latest)。
 
-您可以在 [發佈頁面 (Releases)](https://github.com/Fincept-Corporation/FinceptTerminal/releases) 下載預先建置的二進位檔。不需要安裝任何建置工具 — 只需解壓縮並執行即可。
+**從原始碼建置** —— Linux/macOS：`git clone … && ./setup.sh`。Windows、手動建置、鎖定的工具鏈（**CMake 3.27.7 · Ninja 1.11.1 · Qt 6.8.3 · Python 3.11.9**）與疑難排解請見 **[docs/GETTING_STARTED.md](../GETTING_STARTED.md)**。版本已鎖定，更新或更舊的版本皆不支援。
 
-| 平台              | 下載檔案                                     | 執行方式                                               |
-| --------------- | ---------------------------------------- | ---------------------------------------------------- |
-| **Windows x64** | `FinceptTerminal-Windows-x64.zip`        | 解壓縮 → 執行 `FinceptTerminal.exe`                            |
-| **Windows ARM64** | `FinceptTerminal-Windows-arm64.zip`      | 解壓縮 → 執行 `FinceptTerminal.exe`                            |
-| **Linux x64** | `FinceptTerminal-Linux-x86_64.AppImage`  | `chmod +x` → `./FinceptTerminal-Linux-x86_64.AppImage` |
-| **macOS (Apple 晶片)** | `FinceptTerminal-macOS-arm64.tar.gz`     | 解壓縮 → 執行 `./FinceptTerminal`                              |
-| **macOS (Intel)** | `FinceptTerminal-macOS-x64.tar.gz`       | 解壓縮 → 執行 `./FinceptTerminal`                              |
-| **macOS (通用)** | `FinceptTerminal-macOS-universal.tar.gz` | 解壓縮 → 執行 `./FinceptTerminal`                              |
+> 在找 Enterprise 版本嗎？它有專屬的簽章安裝檔，支援 Windows、macOS 與 Linux，需以 Enterprise 帳號登入取得 —— [由此取得](https://fincept.in/enterprise)。
 
-* * *
+---
 
-### 選項 2 — 快速啟動（一鍵建置）
+## 開源版包含哪些功能
 
-複製 (Clone) 專案並執行安裝腳本 — 它會自動安裝所有相依套件 (Dependencies) 並建置應用程式：
+- **分析** —— DCF、投資組合最佳化、VaR/夏普值、衍生性商品定價、固定收益、另類資產，外加 18 個模組的 QuantLib 套件
+- **AI** —— 涵蓋交易員/投資人、經濟與地緣政治的 37 個代理；需自備金鑰（OpenAI、Anthropic、Gemini、Groq、DeepSeek、OpenRouter、Ollama）
+- **資料** —— 100 多個連接器：FRED、IMF、世界銀行、DBnomics、AkShare、Polygon、Kraken、Yahoo Finance、政府 API
+- **交易** —— 加密貨幣與股票行情、模擬交易引擎、16 家券商串接
+- **自動化** —— 視覺化節點編輯器、MCP 工具、AI Quant Lab（機器學習、因子挖掘、強化學習）
+- **全球情報** —— 海運追蹤、地緣政治分析、關係圖譜
 
-```bash
-# Linux / macOS
-git clone [https://github.com/Fincept-Corporation/FinceptTerminal.git](https://github.com/Fincept-Corporation/FinceptTerminal.git)
-cd FinceptTerminal
-chmod +x setup.sh && ./setup.sh
+原生 C++20 · Qt6 · 內嵌 Python 3.11 · 單一執行檔 · 不需 Node.js、不需瀏覽器執行環境。
 
+---
 
-```bat
-# Windows — 請從 VS 2022 的開發人員命令提示字元 (Developer Command Prompt) 執行
-git clone [https://github.com/Fincept-Corporation/FinceptTerminal.git](https://github.com/Fincept-Corporation/FinceptTerminal.git)
-cd FinceptTerminal
-setup.bat
-```
+## 本儲存庫的維護方式
 
-該腳本會自動處理：編譯器檢查、CMake、Qt6、Python 環境設定、建置與啟動。
+本儲存庫**會持續公開，不會被刪除**。已經發布的內容都會保留。
 
-* * *
+現在改為**每月發布一次**，而非持續開發，因為團隊的日常工作在 Enterprise 上。Issue 與 Pull Request 仍會審閱，修正會依月度週期釋出。資安問題請回報至 [support@fincept.in](mailto:support@fincept.in)。
 
-### 選項 3 — Docker
+---
 
-```bash
-# Pull and run
-docker pull ghcr.io/fincept-corporation/fincept-terminal:latest
-docker run --rm -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix \
-    ghcr.io/fincept-corporation/fincept-terminal:latest
+## 參與貢獻
 
-# Or build from source
-git clone https://github.com/Fincept-Corporation/FinceptTerminal.git
-cd FinceptTerminal
-docker build -t fincept-terminal .
-docker run --rm -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix fincept-terminal
-```
+歡迎提交新的資料連接器、AI 代理、分析模組、C++ 畫面與文件。
 
-> **注意：** Docker 映像檔主要適用於 Linux 環境。macOS 和 Windows 若要使用 Docker 執行 GUI，需要進行額外的 XServer 設定。。
+[貢獻指南](../CONTRIBUTING.md) · [C++ 指南](../CPP_CONTRIBUTOR_GUIDE.md) · [Python 指南](../PYTHON_CONTRIBUTOR_GUIDE.md) · [架構說明](../ARCHITECTURE.md) · [回報錯誤](https://github.com/Fincept-Corporation/FinceptTerminal/issues) · [提出需求](https://github.com/Fincept-Corporation/FinceptTerminal/discussions)
 
-* * *
+---
 
-### 選項 4 — 從原始碼建置 (手動)
+## Fincept 的其他產品
 
-> **版本已鎖定**（Qt 6.7.2、CMake 3.27.7、MSVC 19.38 / GCC 12.3 / Apple Clang 15.0、Python 3.11.9）。為避免翻譯文件與實際程式碼產生落差，請優先遵循官方英文說明：
->
-> 👉 **[README.md (English) — Build from Source](../../README.md#option-4--build-from-source-manual)**
->
-> 使用 CMake 預設配置 (Presets) 快速啟動：
-> ```bash
-> ./setup.sh                                            # Linux / macOS — 自動化安裝
-> setup.bat                                             # Windows（於 VS 2022 開發人員命令提示字元執行）
->
-> # 或採用手動方式：
-> cd FinceptTerminal/fincept-qt
-> cmake --preset linux-release   && cmake --build --preset linux-release
-> cmake --preset macos-release   && cmake --build --preset macos-release
-> cmake --preset win-release     && cmake --build --preset win-release
-> ```
+- **[Fincept Data API](https://docs.fincept.in)** —— 500 多個 REST 端點、423,000 多檔標的、2,000 多個資料來源。任何帳號皆含免費額度。
+- **[Quantcept](https://quantcept.io)** —— 面向市場的 AI 研究工作台：一手資料、回測、投資組合、文件與全天候監控。免費起步；Alpha 14 美元 / Apex 24 美元（30 天）。
 
-<details>
-<summary>原始說明（已過時 — 保留供參考）</summary>
-
-#### 先決條件 (Prerequisites)
-
-| 工具         | 版本    | Windows                                                       | Linux                 | macOS                              |
-| ---------- | ----- | -------------------------------------------------------- | --------------------- | ---------------------------------- |
-| **git** | 最新版   | `winget install Git.Git`                                 | `apt install git`     | `brew install git`                 |
-| **CMake** | 3.20+ | `winget install Kitware.CMake`                           | `apt install cmake`   | `brew install cmake`               |
-| **C++ 編譯器** | C++20 | MSVC 2022 ([Visual Studio](https://visualstudio.microsoft.com/)) | `apt install g++`     | Xcode CLT：`xcode-select --install` |
-| **Qt6** | 6.5+  | 見下文                                                      | 見下文                   | 見下文                                |
-| **Python** | 3.11+ | [python.org](https://www.python.org/downloads/)          | `apt install python3` | `brew install python`              |
-
-#### 安裝 Qt6
-
-**Windows：**
-
-```powershell
-# 透過 Qt 線上安裝程式 (推薦 — 包含 windeployqt)
-# 從 [https://www.qt.io/download-qt-installer](https://www.qt.io/download-qt-installer) 下載
-# 選擇: Qt 6.x > MSVC 2022 64-bit
-
-# 或透過 winget 安裝
-winget install Qt.QtCreator
-```
-
-**Linux（Ubuntu/Debian）：**
-
-```bash
-sudo apt install -y \
-  qt6-base-dev qt6-charts-dev qt6-tools-dev \
-  libqt6sql6-sqlite libqt6websockets6-dev \
-  libgl1-mesa-dev libglu1-mesa-dev
-```
-
-**macOS：**
-
-```bash
-brew install qt
-```
-
-#### 建置 (Build)
-
-```bash
-git clone [https://github.com/Fincept-Corporation/FinceptTerminal.git](https://github.com/Fincept-Corporation/FinceptTerminal.git)
-cd FinceptTerminal/fincept-qt
-
-# Linux / macOS
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-
-# Windows (請從 VS 2022 開發人員命令提示字元執行)
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="C:/Qt/6.x.x/msvc2022_64"
-cmake --build build --config Release --parallel
-```
-
-#### 執行 (Run)
-
-```bash
-./build/FinceptTerminal              # Linux / macOS
-.\build\Release\FinceptTerminal.exe  # Windows
-```
-
-</details>
-
-* * *
-
-## 是什麼讓我們與眾不同
-
-**金融終端機 (Fincept Terminal)**是一個為拒絕受限於傳統軟體框架的使用者所打造的開源金融平台。我們競爭的優勢在於**分析的深度**與**數據的可及性** —— 而非依賴內線消息或封閉的獨家數據源。
-
-最新版本更支援在**資料源 → 替代數據**中，連接可選的**Adanos 市場情緒**數據。設定完成後，股票研究介面將能顯示 Reddit、X (Twitter)、財經新聞和 Polymarket 等多個來源的散戶情緒快照。若未啟用 Adanos 連接，此功能將保持休眠狀態，且應用程式的其他運作邏輯與以往完全相同
-
-
--  **原生效能** — 採用 C++20 與 Qt6 開發，沒有 Electron 或網頁瀏覽器的效能負擔
--  **單一執行檔** — 不需要 Node.js、瀏覽器執行環境或 JavaScript 打包工具
--  **CFA 級別分析** — 透過內建的 Python 模組，完整涵蓋 CFA 課程級別的分析能力
--  **100+ 數據連接器** — 從 Yahoo 財經到各國政府資料庫
--  **免費且開源** (AGPL-3.0)，並提供商業授權選項
-
-* * *
-
-## 產品開發路線圖
-
-| 時間軸            | 里程碑                         |
-| -------------- | --------------------------- |
-| **2026 年第一季** | 即時串流報價、進階回測系統、券商 API 整合            |
-| **2026 年第二季**    | 選擇權策略建構器、多重投資組合管理、50+ AI 智能體 |
-| **2026 年第三季**     | 程式化 API、機器學習訓練介面、機構級功能       |
-| **未來展望**         | 移动端 App、雲端同步、社群市場               |
-
-* * *
-
-## 貢獻
-
-我們正在共同建構財務分析的未來。
-
-**歡迎貢獻**： 新的數據連接器、AI 智能體、分析模組、C++ 介面設計、官方文件撰寫。
-
--   [貢獻指南](docs/CONTRIBUTING.md)
--   [C++ 貢獻指南](fincept-qt/CONTRIBUTING.md)
--   [Python 貢獻者指南](docs/PYTHON_CONTRIBUTOR_GUIDE.md)
--   [回報bug](https://github.com/Fincept-Corporation/FinceptTerminal/issues)
--   [許願新功能](https://github.com/Fincept-Corporation/FinceptTerminal/discussions)
-
-* * *
-
-## 針對大學與教育工作者
-
-**將專業級的財務分析系統帶入您的課堂中。**
-
--   $799/月 涵蓋 20 個使用者帳號
--   完全存取 Fincept 數據庫與 API
--   非常適合財務、經濟學與資料科學等課程
--   內建 CFA 課程分析
-
- 
-**有興趣嗎？**  請附上您的機構名稱，發送電子郵件至 support@fincept.in。
-[大學授權詳細資訊](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/docs/COMMERCIAL_LICENSE.md)
-
-* * *
+---
 
 ## 授權條款
 
-**雙重授權模式：AGPL-3.0（開源）+ 商業授權**
+**AGPL-3.0-or-later** —— 全文見 [LICENSE](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/LICENSE)。
 
-### 開源授權 (AGPL-3.0)
+個人使用、學習與學術研究免費。AGPL-3.0 是**強傳染性授權，而非寬鬆授權**：若你散布修改過的版本，或將其作為他人可存取的服務執行，就必須以相同授權公開你的修改。對多數法務團隊而言，討論到這一條就結束了 —— 這也是企業選擇 **[Enterprise](https://fincept.in/enterprise)** 的原因：它是專有軟體，沒有任何 copyleft 義務需要處理。不涉及散布的個人使用則沒有任何義務。
 
--   供個人、教育及非商業用途免費使用
--   若進行散佈或作為網路服務 (Web Service) 提供時，必須開源您的修改內容
--   原始碼完全透明
+對於本儲存庫，Fincept 不再販售單獨的商業或學術授權。商業、企業與大專院校需求由 **[Fincept Terminal Enterprise](https://fincept.in/enterprise)** 依上述公開價格提供。
 
-### 商業授權
+**商標。** 「Fincept」、「Fincept Terminal」及 Fincept 標誌均為 Fincept Corporation 的商標。在任何分支、衍生、改名或商業產品中使用，皆須事先取得書面許可。
 
--   若用於商業用途或需要商業級存取 Fincept 數據/API 時必備
--   聯絡方式：**[support@fincept.in](mailto:support@fincept.in)**
--   詳細資訊：[商業授權指南](https://github.com/Fincept-Corporation/FinceptTerminal/blob/main/docs/COMMERCIAL_LICENSE.md)
+洽詢：[support@fincept.in](mailto:support@fincept.in) · [服務條款](https://fincept.in/terms) · [隱私權政策](https://fincept.in/privacy)
 
-### 商標聲明
+© 2025–2026 Fincept Corporation. 保留一切權利。
 
-「Fincept Terminal」與「Fincept」為 Fincept Corporation 之註冊商標。
-
-© 2025-2026 Fincept Corporation. 保留所有權利。
-
-* * *
+---
 
 <div align="center">
 
-### **你的思維是唯一的限制。數據不是。**
+### **唯一的上限是你的思考，而不是資料。**
 
-<div align="center">
-<a href="https://star-history.com/#Fincept-Corporation/FinceptTerminal&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Fincept-Corporation/FinceptTerminal&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Fincept-Corporation/FinceptTerminal&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Fincept-Corporation/FinceptTerminal&type=Date" />
- </picture>
-</a>
-</div>
+⭐ **加星** · 🔄 **分享** · 🤝 **貢獻**
 
-[![Email](https://img.shields.io/badge/Email-support@fincept.in-blue)](mailto:support@fincept.in)
-
-⭐ Star 支持 · 🔄 Fork 分享 · 🤝 參與貢獻
+<sub>英文原版：<a href="../../README.md">README.md</a></sub>
 
 </div>

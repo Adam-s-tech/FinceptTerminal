@@ -12,6 +12,13 @@ namespace fincept::i18n {
 namespace {
 constexpr const char* kSettingsKey = "general.language";
 constexpr const char* kDefaultCode = "en";
+
+/// Set only for the duration of the startup set_language() call that follows a
+/// *failed* read of the persisted preference. The detected/default language is
+/// then applied for this session but never written back, so a transient DB
+/// error cannot overwrite the user's real saved language. Explicit switches
+/// (LanguageSwitcher, GeneralSection) always run with this false and persist.
+bool g_suppress_language_persist = false;
 } // namespace
 
 LanguageManager& LanguageManager::instance() {
@@ -20,53 +27,71 @@ LanguageManager& LanguageManager::instance() {
 }
 
 QStringList LanguageManager::supported_languages() {
-    return {QStringLiteral("en"),
-            QStringLiteral("zh_CN"),
-            QStringLiteral("zh_HK"),
-            QStringLiteral("id_ID"),
-            QStringLiteral("vi_VN"),
-            QStringLiteral("tr_TR"),
-            QStringLiteral("de_DE"),
-            QStringLiteral("pt_BR"),
-            QStringLiteral("es_ES"),
-            QStringLiteral("fr_FR"),
-            QStringLiteral("it_IT")};
+    return {QStringLiteral("en"),    QStringLiteral("zh_CN"), QStringLiteral("zh_HK"), QStringLiteral("zh_TW"),
+            QStringLiteral("id_ID"), QStringLiteral("vi_VN"), QStringLiteral("tr_TR"), QStringLiteral("de_DE"),
+            QStringLiteral("pt_BR"), QStringLiteral("es_ES"), QStringLiteral("fr_FR"), QStringLiteral("it_IT")};
 }
 
 QString LanguageManager::native_name(const QString& code) {
-    if (code == QLatin1String("en"))    return QStringLiteral("English");
-    if (code == QLatin1String("zh_CN")) return QString::fromUtf8("\xe7\xae\x80\xe4\xbd\x93\xe4\xb8\xad\xe6\x96\x87"); // 简体中文
-    if (code == QLatin1String("zh_HK")) return QString::fromUtf8("\xe7\xb9\x81\xe9\xab\x94\xe4\xb8\xad\xe6\x96\x87 (\xe9\xa6\x99\xe6\xb8\xaf)"); // 繁體中文 (香港)
-    if (code == QLatin1String("id_ID")) return QStringLiteral("Bahasa Indonesia");
-    if (code == QLatin1String("vi_VN")) return QString::fromUtf8("Ti\xe1\xba\xbfng Vi\xe1\xbb\x87t"); // Tiếng Việt
-    if (code == QLatin1String("tr_TR")) return QString::fromUtf8("T\xc3\xbcrk\xc3\xa7""e"); // Türkçe
-    if (code == QLatin1String("de_DE")) return QStringLiteral("Deutsch");
-    if (code == QLatin1String("pt_BR")) return QString::fromUtf8("Portugu\xc3\xaas (Brasil)"); // Português (Brasil)
-    if (code == QLatin1String("es_ES")) return QString::fromUtf8("Espa\xc3\xb1ol"); // Español
-    if (code == QLatin1String("fr_FR")) return QString::fromUtf8("Fran\xc3\xa7""ais"); // Français
-    if (code == QLatin1String("it_IT")) return QStringLiteral("Italiano");
+    if (code == QLatin1String("en"))
+        return QStringLiteral("English");
+    if (code == QLatin1String("zh_CN"))
+        return QString::fromUtf8("\xe7\xae\x80\xe4\xbd\x93\xe4\xb8\xad\xe6\x96\x87"); // 简体中文
+    if (code == QLatin1String("zh_HK"))
+        return QString::fromUtf8(
+            "\xe7\xb9\x81\xe9\xab\x94\xe4\xb8\xad\xe6\x96\x87 (\xe9\xa6\x99\xe6\xb8\xaf)"); // 繁體中文 (香港)
+    if (code == QLatin1String("zh_TW"))
+        return QString::fromUtf8(
+            "\xe7\xb9\x81\xe9\xab\x94\xe4\xb8\xad\xe6\x96\x87 (\xe5\x8f\xb0\xe7\x81\xa3)"); // 繁體中文 (台灣)
+    if (code == QLatin1String("id_ID"))
+        return QStringLiteral("Bahasa Indonesia");
+    if (code == QLatin1String("vi_VN"))
+        return QString::fromUtf8("Ti\xe1\xba\xbfng Vi\xe1\xbb\x87t"); // Tiếng Việt
+    if (code == QLatin1String("tr_TR"))
+        return QString::fromUtf8("T\xc3\xbcrk\xc3\xa7"
+                                 "e"); // Türkçe
+    if (code == QLatin1String("de_DE"))
+        return QStringLiteral("Deutsch");
+    if (code == QLatin1String("pt_BR"))
+        return QString::fromUtf8("Portugu\xc3\xaas (Brasil)"); // Português (Brasil)
+    if (code == QLatin1String("es_ES"))
+        return QString::fromUtf8("Espa\xc3\xb1ol"); // Español
+    if (code == QLatin1String("fr_FR"))
+        return QString::fromUtf8("Fran\xc3\xa7"
+                                 "ais"); // Français
+    if (code == QLatin1String("it_IT"))
+        return QStringLiteral("Italiano");
     return code;
 }
 
 void LanguageManager::initialize() {
     // Read the persisted preference. If it's set (even to "en"), respect it
     // — the user has made an explicit choice we should not override.
-    const auto r = SettingsRepository::instance().get(
-        QString::fromLatin1(kSettingsKey), QString());
-    QString code = r.is_ok() ? r.value() : QString();
+    const auto r = SettingsRepository::instance().get(QString::fromLatin1(kSettingsKey), QString());
+    // A read error is not "no preference" — the stored language is unknown, so
+    // whatever we fall back to must stay session-local.
+    const bool read_failed = r.is_err();
+    if (read_failed) {
+        LOG_ERROR("i18n", QString("settings read failed for '%1' — applying the detected language for this session "
+                                  "only, leaving the stored value untouched: %2")
+                              .arg(QString::fromLatin1(kSettingsKey), QString::fromStdString(r.error())));
+    }
+    QString code = read_failed ? QString() : r.value();
 
     if (code.isEmpty()) {
         // No saved preference — try the OS locale. The Settings save in
         // set_language() will record whatever we picked, so subsequent runs
         // skip this detection and honour the explicit value.
         code = detect_system_language();
-        if (!code.isEmpty())
+        if (!code.isEmpty() && !read_failed)
             LOG_INFO("i18n", QStringLiteral("First launch — detected system language: %1").arg(code));
     }
     if (code.isEmpty())
         code = QString::fromLatin1(kDefaultCode);
 
+    g_suppress_language_persist = read_failed;
     set_language(code);
+    g_suppress_language_persist = false;
 }
 
 QString LanguageManager::detect_system_language() {
@@ -74,10 +99,19 @@ QString LanguageManager::detect_system_language() {
 
     // QLocale returns a preference-ordered list. Use the underscore separator
     // so the strings match our .qm naming convention (e.g. "zh_CN" not "zh-CN").
-    const QStringList preferred =
-        QLocale::system().uiLanguages(QLocale::TagSeparator::Underscore);
+    const QStringList preferred = QLocale::system().uiLanguages(QLocale::TagSeparator::Underscore);
 
     for (const QString& ui : preferred) {
+        // Script-tagged locales first. macOS reports UI languages with a script
+        // subtag ("zh_Hant_TW", "zh_Hans_CN"), which never matches our
+        // region-coded .qm names directly — the loop below would strip it down
+        // to "zh" and the prefix fallback would then hand every Chinese system
+        // the Simplified build, including Traditional ones. QLocale resolves
+        // the likely territory for us ("zh_Hant_TW" → "zh_TW").
+        const QString resolved = QLocale(ui).name();
+        if (supported.contains(resolved))
+            return resolved;
+
         // Strip script/region tags from longest to shortest (e.g.
         // "zh_Hans_CN" → "zh_Hans" → "zh") and try each form against our
         // supported set. This catches both exact matches ("zh_CN") and
@@ -87,7 +121,8 @@ QString LanguageManager::detect_system_language() {
             if (supported.contains(candidate))
                 return candidate;
             const int last = candidate.lastIndexOf(QLatin1Char('_'));
-            if (last < 0) break;
+            if (last < 0)
+                break;
             candidate = candidate.left(last);
         }
         // No exact or shorter match — fall back to any supported locale that
@@ -135,8 +170,11 @@ void LanguageManager::set_language(const QString& code) {
 
     // Persist the choice. The repository call is cheap; we accept the small
     // overhead on startup so the value is always in sync with what's running.
-    SettingsRepository::instance().set(
-        QString::fromLatin1(kSettingsKey), code, QStringLiteral("general"));
+    // Suppressed only when initialize() is falling back after a failed read —
+    // set() is an INSERT OR REPLACE, so writing a guess there would destroy the
+    // language the user actually chose.
+    if (!g_suppress_language_persist)
+        SettingsRepository::instance().set(QString::fromLatin1(kSettingsKey), code, QStringLiteral("general"));
 
     emit language_changed(code);
 }

@@ -3,10 +3,12 @@
 
 #include "trading/TradingTypes.h"
 
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMutex>
 #include <QTableWidget>
+#include <QTimer>
 #include <QVector>
 #include <QWidget>
 
@@ -33,16 +35,26 @@ class CryptoWatchlist : public QWidget {
     void symbol_selected(const QString& symbol);
     void search_requested(const QString& filter);
 
+  protected:
+    void changeEvent(QEvent* event) override;
+
   private slots:
     void on_cell_clicked(int row, int col);
     void on_filter_changed(const QString& text);
 
   private:
     void rebuild_table();
+    void retranslateUi();
 
     QLineEdit* filter_edit_ = nullptr;
+    QLabel* title_label_ = nullptr;
     QLabel* count_label_ = nullptr;
     QTableWidget* table_ = nullptr;
+
+    // Debounces the exchange-wide market search: every keystroke used to fire its
+    // own daemon fetch_markets call, and replies could land out of order.
+    QTimer* search_timer_ = nullptr;
+    QString pending_search_;
 
     QVector<WatchlistEntry> entries_;
     QVector<trading::MarketInfo> search_results_;

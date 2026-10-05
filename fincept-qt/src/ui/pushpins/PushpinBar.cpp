@@ -37,16 +37,25 @@ PushpinBar::PushpinBar(QWidget* parent) : QWidget(parent) {
     strip_layout_->addStretch(1);
     scroll_->setWidget(strip_);
 
-    empty_hint_ = new QLabel("Drag any symbol here to pin", strip_);
+    empty_hint_ = new QLabel(tr("Drag any symbol here to pin"), strip_);
     empty_hint_->setStyleSheet("color:#6b7280;font-size:11px;font-style:italic;");
 
     // Dropping a symbol anywhere on the bar pins it.
-    symbol_dnd::installDropFilter(this, [](const SymbolRef& ref, SymbolGroup) {
-        PushpinService::instance().pin(ref);
-    });
+    symbol_dnd::installDropFilter(this, [](const SymbolRef& ref, SymbolGroup) { PushpinService::instance().pin(ref); });
 
     connect(&PushpinService::instance(), &PushpinService::pins_changed, this, &PushpinBar::rebuild);
     rebuild();
+}
+
+void PushpinBar::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void PushpinBar::retranslateUi() {
+    if (empty_hint_)
+        empty_hint_->setText(tr("Drag any symbol here to pin"));
 }
 
 void PushpinBar::rebuild() {

@@ -21,6 +21,7 @@
 
 #include "services/options/OptionChainTypes.h"
 
+#include <QEvent>
 #include <QLabel>
 #include <QString>
 #include <QStringList>
@@ -38,6 +39,8 @@ class ChainSubTab : public QWidget {
     explicit ChainSubTab(QWidget* parent = nullptr);
     ~ChainSubTab() override;
 
+    OptionChainTable* table() const { return table_; }
+
     // Lightweight save/restore for the F&O screen aggregator.
     QVariantMap save_state() const;
     void restore_state(const QVariantMap& state);
@@ -52,36 +55,61 @@ class ChainSubTab : public QWidget {
     /// other Yellow-group panels can follow.
     QString active_underlying() const;
 
+    /// Screen-level lifecycle, driven by FnoScreen. The chain topic must stay
+    /// subscribed for as long as the F&O SCREEN is visible, not just this sub-tab:
+    /// the OI / Builder / Multi-Straddle / Screener tabs all read the chain this tab
+    /// subscribes to, and the hub only refreshes topics with a concrete subscriber —
+    /// so switching to any of them used to freeze every chain after the first view.
+    void on_screen_shown();
+    void on_screen_hidden();
+
   protected:
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private slots:
     void on_broker_changed(const QString& broker_id);
     void on_underlying_changed(const QString& underlying);
     void on_expiry_changed(const QString& expiry);
     void on_refresh_clicked();
+    /// Right-click Buy/Sell on a chain leg → build a 1-lot market order, confirm,
+    /// and route to the connected broker (live or paper per its trading mode).
+    void on_order_requested(qint64 token, double strike, bool is_call, bool is_buy);
 
   private:
+    void retranslateUi();
     void rebuild_picker_for_broker(const QString& broker_id, bool keep_selection);
-    void rebuild_expiries_for_underlying(const QString& broker_id, const QString& underlying,
-                                         bool keep_selection);
+    void rebuild_expiries_for_underlying(const QString& broker_id, const QString& underlying, bool keep_selection);
     void resubscribe();
+    /// Unsubscribe the chain topic + per-leg tick pattern (hub + error channel).
+    void drop_subscription();
+    /// True while the owning FnoScreen is on screen (this tab may be a hidden page).
+    bool owning_screen_visible() const;
     void show_empty_state(const QString& message);
     void hide_empty_state();
 
     QString current_topic() const;
+    /// True when the table currently holds rows belonging to `topic`'s
+    /// (broker, underlying, expiry) — i.e. what's on screen is not a leftover
+    /// from a previous picker selection.
+    bool holds_rows_for(const QString& topic) const;
 
     FnoHeaderBar* header_ = nullptr;
     OptionChainTable* table_ = nullptr;
     QLabel* empty_label_ = nullptr;
-    class QStackedLayout* body_stack_ = nullptr;  // owns table_ + empty_label_
+    class QStackedLayout* body_stack_ = nullptr; // owns table_ + empty_label_
 
     /// Topic we're currently subscribed to. Empty when not subscribed.
     QString active_topic_;
 
-    /// Whether the widget is currently visible — gates re-subscribe paths
-    /// triggered by combo changes from non-visible state.
+    /// Per-leg live-tick pattern we're subscribed to (`option:tick:<broker>:*`),
+    /// used to patch single cells from the WS feed. Empty when not subscribed.
+    QString tick_pattern_;
+
+    /// Whether the chain subscription is wanted: this tab is shown, or the owning F&O
+    /// screen is (see on_screen_shown). Gates re-subscribe paths triggered by combo
+    /// changes.
     bool is_visible_ = false;
 
     /// Last-applied selection — used to avoid clobbering user choice on

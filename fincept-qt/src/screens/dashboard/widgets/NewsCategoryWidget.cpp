@@ -5,9 +5,10 @@
 #include "services/news/NewsService.h"
 #include "ui/theme/Theme.h"
 
+#include <QDateTime>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
-#include <QDateTime>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QJsonObject>
@@ -15,6 +16,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QSpinBox>
+#include <QUrl>
 
 namespace fincept::screens::widgets {
 
@@ -36,7 +38,16 @@ NewsCategoryWidget::NewsCategoryWidget(const QJsonObject& cfg, QWidget* parent)
     list_->setWordWrap(true);
     list_->setSelectionMode(QAbstractItemView::NoSelection);
     list_->setFocusPolicy(Qt::NoFocus);
+    list_->setToolTip(tr("Click a headline to open the article"));
     vl->addWidget(list_, 1);
+
+    // Headline → article. The URL rides on the item (Qt::UserRole); only
+    // http(s) links are opened.
+    connect(list_, &QListWidget::itemClicked, this, [](QListWidgetItem* item) {
+        const QUrl url(item->data(Qt::UserRole).toString());
+        if (url.isValid() && (url.scheme() == QLatin1String("http") || url.scheme() == QLatin1String("https")))
+            QDesktopServices::openUrl(url);
+    });
 
     set_configurable(true);
     apply_styles();
@@ -57,6 +68,10 @@ void NewsCategoryWidget::apply_config(const QJsonObject& cfg) {
     max_rows_ = qBound(3, cfg.value("max_rows").toInt(12), 50);
     badge_->setText(category_.toUpper());
     list_->clear();
+    // Show the loading overlay until the first delivery for this category —
+    // the list used to sit blank (indistinguishable from "broken") while the
+    // topic fetched.
+    set_loading(true);
 
     if (isVisible())
         hub_resubscribe();
@@ -99,13 +114,17 @@ void NewsCategoryWidget::on_articles(const QVariant& v) {
     int n = std::min<int>(max_rows_, articles.size());
     for (int i = 0; i < n; ++i) {
         const auto& a = articles[i];
-        const QString time =
-            (a.sort_ts > 0)
-                ? QDateTime::fromSecsSinceEpoch(a.sort_ts).toString("HH:mm")
-                : a.time;
+        const QString time = (a.sort_ts > 0) ? QDateTime::fromSecsSinceEpoch(a.sort_ts).toString("HH:mm") : a.time;
         const QString line = QString("[%1]  %2").arg(time, a.headline);
         auto* item = new QListWidgetItem(line, list_);
         item->setToolTip(a.summary.isEmpty() ? a.headline : a.summary);
+        item->setData(Qt::UserRole, a.link);
+    }
+    // Empty state — an unknown/quiet category rendered a blank list.
+    if (n == 0) {
+        auto* empty = new QListWidgetItem(tr("No articles in this category"), list_);
+        empty->setFlags(Qt::NoItemFlags);
+        empty->setTextAlignment(Qt::AlignCenter);
     }
     set_loading(false);
 }
@@ -147,12 +166,20 @@ void NewsCategoryWidget::on_theme_changed() {
 void NewsCategoryWidget::apply_styles() {
     badge_->setStyleSheet(QString("color:%1;background:%2;border:1px solid %3;"
                                   "border-radius:3px;padding:1px 6px;font-size:9px;font-weight:700;")
-                              .arg(ui::colors::TEXT_SECONDARY(), ui::colors::BG_RAISED(),
-                                   ui::colors::BORDER_DIM()));
-    list_->setStyleSheet(
-        QString("QListWidget{background:transparent;color:%1;font-size:10px;border:none;}"
-                "QListWidget::item{padding:3px 4px;border-bottom:1px solid %2;}")
-            .arg(ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM()));
+                              .arg(ui::colors::TEXT_SECONDARY(), ui::colors::BG_RAISED(), ui::colors::BORDER_DIM()));
+    list_->setStyleSheet(QString("QListWidget{background:transparent;color:%1;font-size:10px;border:none;}"
+                                 "QListWidget::item{padding:3px 4px;border-bottom:1px solid %2;}")
+                             .arg(ui::colors::TEXT_PRIMARY(), ui::colors::BORDER_DIM()));
+}
+
+void NewsCategoryWidget::retranslateUi() {
+    BaseWidget::retranslateUi();
+    set_title(tr("NEWS — CATEGORY"));
+    // Re-render from the hub — but only while subscribed. This used to call
+    // hub_resubscribe() unconditionally, so a language switch made every hidden
+    // tile subscribe (and stay subscribed until its next hide).
+    if (hub_active_)
+        hub_resubscribe();
 }
 
 } // namespace fincept::screens::widgets

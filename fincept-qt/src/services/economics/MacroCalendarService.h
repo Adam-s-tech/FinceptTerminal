@@ -10,18 +10,16 @@
 // TTL: 5 min. Min interval: 60 s. Both honour the upstream cache and keep
 // rate-limit pressure low.
 
+#include "datahub/Producer.h"
+
 #include <QJsonArray>
 #include <QObject>
 #include <QString>
 #include <QStringList>
 
-#include "datahub/Producer.h"
-
 namespace fincept::services {
 
-class MacroCalendarService : public QObject
-    , public fincept::datahub::Producer
-{
+class MacroCalendarService : public QObject, public fincept::datahub::Producer {
     Q_OBJECT
   public:
     static MacroCalendarService& instance();
@@ -39,7 +37,6 @@ class MacroCalendarService : public QObject
     Q_DISABLE_COPY(MacroCalendarService)
 
     bool hub_registered_ = false;
-    class QNetworkAccessManager* nam_ = nullptr;  ///< Dedicated NAM so we can attach the per-endpoint API key without polluting the shared HttpClient auth header.
 };
 
 } // namespace fincept::services

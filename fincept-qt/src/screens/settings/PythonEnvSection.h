@@ -4,6 +4,7 @@
 // their installed versions, and allows install/upgrade via uv pip.
 
 #include <QComboBox>
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QProcess>
@@ -24,23 +25,29 @@ class PythonEnvSection : public QWidget {
 
   protected:
     void showEvent(QShowEvent* e) override;
+    void changeEvent(QEvent* event) override;
 
   private:
     // ── UI ────────────────────────────────────────────────────────────────────
-    QTableWidget*  pkg_table_           = nullptr;
-    QLineEdit*     search_input_        = nullptr;
-    QComboBox*     venv_filter_         = nullptr;  // All / Trading / Analytics
-    QLabel*        status_lbl_          = nullptr;
-    QProgressBar*  install_bar_         = nullptr;  // hidden when idle
-    QLabel*        install_log_         = nullptr;  // last stdout line from uv
-    QPushButton*   refresh_btn_         = nullptr;
-    QPushButton*   install_missing_btn_ = nullptr;
-    QPushButton*   upgrade_all_btn_     = nullptr;
-    QPushButton*   batch_action_btn_    = nullptr;  // "Install/Upgrade Selected"
+    QTableWidget* pkg_table_ = nullptr;
+    QLineEdit* search_input_ = nullptr;
+    QComboBox* venv_filter_ = nullptr; // All / Trading / Analytics
+    QLabel* status_lbl_ = nullptr;
+    QProgressBar* install_bar_ = nullptr; // hidden when idle
+    QLabel* install_log_ = nullptr;       // last stdout line from uv
+    QPushButton* refresh_btn_ = nullptr;
+    QPushButton* install_missing_btn_ = nullptr;
+    QPushButton* upgrade_all_btn_ = nullptr;
+    QPushButton* batch_action_btn_ = nullptr; // "Install/Upgrade Selected"
+
+    // Fixed text widgets captured for retranslateUi.
+    QLabel* title_lbl_ = nullptr;
+    QLabel* info_lbl_ = nullptr;
+    QLabel* warn_text_ = nullptr;
 
     // ── Processes — signal-driven, never waitForFinished on UI thread ─────────
-    QProcess*      list_proc_           = nullptr;  // uv pip list, reused sequentially
-    QProcess*      action_proc_         = nullptr;  // uv pip install / upgrade
+    QProcess* list_proc_ = nullptr;   // uv pip list, reused sequentially
+    QProcess* action_proc_ = nullptr; // uv pip install / upgrade
 
     // ── Data ──────────────────────────────────────────────────────────────────
     struct PackageRow {
@@ -50,20 +57,20 @@ class PythonEnvSection : public QWidget {
         QString venv_label;    // "Trading" or "Analytics"
         QString required_spec; // raw spec, e.g. ">=2.2.3,<3.0"
         QString installed_ver; // from uv pip list; empty if not installed
-        bool    missing = true;
+        bool missing = true;
     };
 
-    QList<PackageRow>       all_packages_;  // merged from both req files
-    QMap<QString, QString>  installed_v1_;  // canonical_name → version, venv-numpy1
-    QMap<QString, QString>  installed_v2_;  // canonical_name → version, venv-numpy2
-    bool                    v1_loaded_ = false;
-    bool                    v2_loaded_ = false;
+    QList<PackageRow> all_packages_;      // merged from both req files
+    QMap<QString, QString> installed_v1_; // canonical_name → version, venv-numpy1
+    QMap<QString, QString> installed_v2_; // canonical_name → version, venv-numpy2
+    bool v1_loaded_ = false;
+    bool v2_loaded_ = false;
 
     // ── Action queue — drained one batch at a time ────────────────────────────
     struct ActionBatch {
-        QString     venv;      // "venv-numpy1" or "venv-numpy2"
-        QStringList packages;  // raw spec strings to pass to uv
-        bool        upgrade = false;
+        QString venv;         // "venv-numpy1" or "venv-numpy2"
+        QStringList packages; // raw spec strings to pass to uv
+        bool upgrade = false;
     };
     QList<ActionBatch> action_queue_;
 
@@ -74,13 +81,15 @@ class PythonEnvSection : public QWidget {
     // ── Builders ──────────────────────────────────────────────────────────────
     void build_ui();
 
+    /// Re-apply tr() lookups to every widget whose text we keep a handle to.
+    /// Called from changeEvent() on QEvent::LanguageChange.
+    void retranslateUi();
+
     // ── Load phase ────────────────────────────────────────────────────────────
     void load_packages();
     void start_list_venv(const QString& venv_name);
     void on_list_finished(const QString& venv_name, int exit_code);
-    void parse_requirements(const QString& req_file,
-                            const QString& venv_name,
-                            const QString& venv_label);
+    void parse_requirements(const QString& req_file, const QString& venv_name, const QString& venv_label);
     void merge_and_populate_table();
     QString find_req_file(const QString& filename) const;
 

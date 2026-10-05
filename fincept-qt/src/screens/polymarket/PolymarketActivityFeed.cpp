@@ -3,10 +3,11 @@
 #include "ui/theme/Theme.h"
 
 #include <QBrush>
+#include <QCoreApplication>
 #include <QDateTime>
-#include <QTimeZone>
 #include <QHeaderView>
 #include <QPointer>
+#include <QTimeZone>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -23,12 +24,12 @@ constexpr int kFlashMs = 600;
 void apply_row(QTableWidget* table, int row, const PredictionTrade& t, int price_decimals) {
     const QString time = QDateTime::fromMSecsSinceEpoch(t.ts_ms, QTimeZone::UTC).toString("HH:mm:ss");
     table->setItem(row, 0, new QTableWidgetItem(time));
-    table->setItem(row, 1, new QTableWidgetItem("TRADE"));
+    // Free helper (anonymous namespace) — translate via QCoreApplication.
+    table->setItem(row, 1, new QTableWidgetItem(QCoreApplication::translate("PolymarketActivityFeed", "TRADE")));
 
     auto* side_item = new QTableWidgetItem(t.side);
-    side_item->setForeground(QColor(t.side.compare("BUY", Qt::CaseInsensitive) == 0
-                                        ? colors::POSITIVE()
-                                        : colors::NEGATIVE()));
+    side_item->setForeground(
+        QColor(t.side.compare("BUY", Qt::CaseInsensitive) == 0 ? colors::POSITIVE() : colors::NEGATIVE()));
     table->setItem(row, 2, side_item);
 
     auto* price_item = new QTableWidgetItem(QString::number(t.price, 'f', price_decimals));
@@ -42,7 +43,8 @@ void apply_row(QTableWidget* table, int row, const PredictionTrade& t, int price
 }
 
 void flash_row(QTableWidget* table, int row, const QColor& accent) {
-    if (row < 0 || row >= table->rowCount()) return;
+    if (row < 0 || row >= table->rowCount())
+        return;
     // Tint the row's backgrounds; clear after kFlashMs so the highlight
     // decays without needing per-row animation timers.
     QColor tint = accent;
@@ -53,8 +55,10 @@ void flash_row(QTableWidget* table, int row, const QColor& accent) {
     }
     QPointer<QTableWidget> guard = table;
     QTimer::singleShot(kFlashMs, table, [guard, row]() {
-        if (!guard) return;
-        if (row >= guard->rowCount()) return;
+        if (!guard)
+            return;
+        if (row >= guard->rowCount())
+            return;
         for (int c = 0; c < guard->columnCount(); ++c) {
             if (auto* it = guard->item(row, c))
                 it->setBackground(QBrush(Qt::NoBrush));
@@ -70,31 +74,30 @@ PolymarketActivityFeed::PolymarketActivityFeed(QWidget* parent) : QWidget(parent
 
     table_ = new QTableWidget;
     table_->setColumnCount(5);
-    table_->setHorizontalHeaderLabels({"TIME", "TYPE", "SIDE", "PRICE", "SIZE"});
+    table_->setHorizontalHeaderLabels({tr("TIME"), tr("TYPE"), tr("SIDE"), tr("PRICE"), tr("SIZE")});
     table_->horizontalHeader()->setStretchLastSection(true);
     table_->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     table_->verticalHeader()->setVisible(false);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setShowGrid(false);
-    table_->setStyleSheet(
-        QString("QTableWidget {"
-                "  background: %1; color: %2; border: none; font-size: 10px;"
-                "}"
-                "QTableWidget::item {"
-                "  padding: 3px 8px; border-bottom: 1px solid %3;"
-                "}"
-                "QTableWidget::item:selected { background: %4; color: %2; }"
-                "QHeaderView::section {"
-                "  background: %5; color: %6; border: none;"
-                "  border-bottom: 1px solid %3;"
-                "  padding: 5px 8px; font-size: 8px; font-weight: 700; letter-spacing: 0.5px;"
-                "}"
-                "QScrollBar:vertical { background: %1; width: 4px; border: none; }"
-                "QScrollBar::handle:vertical { background: %3; min-height: 20px; }"
-                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }")
-            .arg(colors::BG_BASE(), colors::TEXT_PRIMARY(), colors::BORDER_DIM(),
-                 colors::BG_HOVER(), colors::BG_RAISED(), colors::TEXT_SECONDARY()));
+    table_->setStyleSheet(QString("QTableWidget {"
+                                  "  background: %1; color: %2; border: none; font-size: 10px;"
+                                  "}"
+                                  "QTableWidget::item {"
+                                  "  padding: 3px 8px; border-bottom: 1px solid %3;"
+                                  "}"
+                                  "QTableWidget::item:selected { background: %4; color: %2; }"
+                                  "QHeaderView::section {"
+                                  "  background: %5; color: %6; border: none;"
+                                  "  border-bottom: 1px solid %3;"
+                                  "  padding: 5px 8px; font-size: 8px; font-weight: 700; letter-spacing: 0.5px;"
+                                  "}"
+                                  "QScrollBar:vertical { background: %1; width: 4px; border: none; }"
+                                  "QScrollBar::handle:vertical { background: %3; min-height: 20px; }"
+                                  "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }")
+                              .arg(colors::BG_BASE(), colors::TEXT_PRIMARY(), colors::BORDER_DIM(), colors::BG_HOVER(),
+                                   colors::BG_RAISED(), colors::TEXT_SECONDARY()));
     vl->addWidget(table_);
 }
 
@@ -141,7 +144,23 @@ void PolymarketActivityFeed::clear() {
 void PolymarketActivityFeed::set_presentation(const ExchangePresentation& p) {
     const bool decimals_changed = p.price_decimal_places != presentation_.price_decimal_places;
     presentation_ = p;
-    if (decimals_changed && !last_trades_.isEmpty()) set_trades(last_trades_);
+    if (decimals_changed && !last_trades_.isEmpty())
+        set_trades(last_trades_);
+}
+
+void PolymarketActivityFeed::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
+    QWidget::changeEvent(event);
+}
+
+void PolymarketActivityFeed::retranslateUi() {
+    if (table_)
+        table_->setHorizontalHeaderLabels({tr("TIME"), tr("TYPE"), tr("SIDE"), tr("PRICE"), tr("SIZE")});
+    // Re-render rows so the per-row "TRADE" type label picks up the new
+    // language (side/price/size are data).
+    if (!last_trades_.isEmpty())
+        set_trades(last_trades_);
 }
 
 } // namespace fincept::screens::polymarket
